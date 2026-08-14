@@ -1,0 +1,42 @@
+name: orabbit-worker
+
+services:
+  orabbit-worker:
+    image: orabbit-worker:cloud-local
+    build:
+      context: .
+      dockerfile: Dockerfile.orabbit
+      target: worker
+    env_file:
+      - ${ORABBIT_ENV_FILE:-.env.worker}
+    environment:
+      AWS_EC2_METADATA_DISABLED: "true"
+    entrypoint:
+      - /bin/sh
+      - -ec
+    command:
+      - |
+        : "$${ORABBIT_MASTER_GRPC_ADDR:?set ORABBIT_MASTER_GRPC_ADDR to host:port, for example orabbit-master:9102}"
+        : "$${ORABBIT_WORKER_AUTH_TOKEN:?set ORABBIT_WORKER_AUTH_TOKEN to the value configured on the master}"
+        wid="$${ORABBIT_WORKER_ID:-$${HOSTNAME}}"
+        waddr="$${ORABBIT_WORKER_ADVERTISE_ADDR:-$${wid}}"
+
+        exec /usr/local/bin/orabbit-worker \
+          -master "$${ORABBIT_MASTER_GRPC_ADDR}" \
+          -worker-id "$${wid}" \
+          -worker-addr "$${waddr}" \
+          -insecure="$${ORABBIT_GRPC_INSECURE:-true}" \
+          -tls-ca "$${ORABBIT_TLS_CA_FILE:-}" \
+          -tls-server-name "$${ORABBIT_TLS_SERVER_NAME:-}" \
+          -poll "$${ORABBIT_WORKER_POLL:-2s}" \
+          -log-level "$${ORABBIT_LOG_LEVEL:-INFO}" \
+          -log-format "$${ORABBIT_LOG_FORMAT:-json}"
+    networks:
+      - orabbit_control_plane
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+networks:
+  orabbit_control_plane:
+    external: true
+    name: orabbit-control-plane

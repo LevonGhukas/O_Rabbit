@@ -1,0 +1,338 @@
+package arrowio
+
+import (
+	"fmt"
+	"sort"
+	"time"
+
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+)
+
+type mongoFieldPlan struct {
+	Name    string
+	Type    arrow.DataType
+	Builder func(mem memory.Allocator) array.Builder
+	Append  func(b array.Builder, v any)
+}
+
+func InferMongoSchema(docs []map[string]any) (*arrow.Schema, error) {
+	if len(docs) == 0 {
+		return nil, fmt.Errorf("cannot infer schema from empty documents")
+	}
+
+	fieldTypes := map[string]arrow.DataType{}
+
+	for _, doc := range docs {
+		for key, val := range doc {
+			if _, seen := fieldTypes[key]; seen {
+				continue
+			}
+			dt, _, _ := mongoValueToArrowType(val)
+			fieldTypes[key] = dt
+		}
+	}
+
+	keys := make([]string, 0, len(fieldTypes))
+	for k := range fieldTypes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	fields := make([]arrow.Field, len(keys))
+	for i, k := range keys {
+		fields[i] = arrow.Field{Name: k, Type: fieldTypes[k], Nullable: true}
+	}
+
+	return arrow.NewSchema(fields, nil), nil
+}
+
+func buildPlansFromSchema(schema *arrow.Schema) []mongoFieldPlan {
+	plans := make([]mongoFieldPlan, schema.NumFields())
+	for i := 0; i < schema.NumFields(); i++ {
+		f := schema.Field(i)
+		dt := f.Type
+		builderFn, appendFn := mongoBuilderFromArrowType(dt)
+		plans[i] = mongoFieldPlan{
+			Name:    f.Name,
+			Type:    dt,
+			Builder: builderFn,
+			Append:  appendFn,
+		}
+	}
+	return plans
+}
+
+func MongoDocsToRecord(alloc memory.Allocator, schema *arrow.Schema, docs []map[string]any) (arrow.RecordBatch, error) {
+	if len(docs) == 0 {
+		return nil, nil
+	}
+
+	plans := buildPlansFromSchema(schema)
+	builders := make([]array.Builder, len(plans))
+	for i, p := range plans {
+		b := p.Builder(alloc)
+		b.Reserve(len(docs))
+		builders[i] = b
+	}
+	defer func() {
+		for _, b := range builders {
+			b.Release()
+		}
+	}()
+
+	for _, doc := range docs {
+		for i, p := range plans {
+			val := doc[p.Name]
+			if val == nil {
+				builders[i].AppendNull()
+			} else {
+				p.Append(builders[i], val)
+			}
+		}
+	}
+
+	arrays := make([]arrow.Array, len(builders))
+	for i, b := range builders {
+		arrays[i] = b.NewArray()
+	}
+	defer func() {
+		for _, a := range arrays {
+			a.Release()
+		}
+	}()
+
+	return array.NewRecordBatch(schema, arrays, int64(len(docs))), nil
+}
+
+func mongoValueToArrowType(v any) (arrow.DataType, func(memory.Allocator) array.Builder, func(array.Builder, any)) {
+	switch v.(type) {
+	case string:
+		return arrow.BinaryTypes.String,
+			func(mem memory.Allocator) array.Builder { return array.NewStringBuilder(mem) },
+			func(b array.Builder, val any) {
+				if s, ok := val.(string); ok {
+					b.(*array.StringBuilder).Append(s)
+				} else {
+					b.(*array.StringBuilder).Append(fmt.Sprint(val))
+				}
+			}
+	case int32, int64, int:
+		return arrow.PrimitiveTypes.Int64,
+			func(mem memory.Allocator) array.Builder { return array.NewInt64Builder(mem) },
+			func(b array.Builder, val any) {
+				b.(*array.Int64Builder).Append(mongoToInt64(val))
+			}
+	case float64:
+		return arrow.PrimitiveTypes.Float64,
+			func(mem memory.Allocator) array.Builder { return array.NewFloat64Builder(mem) },
+			func(b array.Builder, val any) {
+				if f, ok := val.(float64); ok {
+					b.(*array.Float64Builder).Append(f)
+				} else {
+					b.(*array.Float64Builder).AppendNull()
+				}
+			}
+	case bool:
+		return arrow.FixedWidthTypes.Boolean,
+			func(mem memory.Allocator) array.Builder { return array.NewBooleanBuilder(mem) },
+			func(b array.Builder, val any) {
+				if bl, ok := val.(bool); ok {
+					b.(*array.BooleanBuilder).Append(bl)
+				} else {
+					b.(*array.BooleanBuilder).AppendNull()
+				}
+			}
+	case time.Time:
+		tsType := &arrow.TimestampType{Unit: arrow.Millisecond, TimeZone: "UTC"}
+		return tsType,
+			func(mem memory.Allocator) array.Builder { return array.NewTimestampBuilder(mem, tsType) },
+			func(b array.Builder, val any) {
+				if t, ok := val.(time.Time); ok {
+					b.(*array.TimestampBuilder).Append(arrow.Timestamp(t.UTC().UnixMilli()))
+				} else {
+					b.(*array.TimestampBuilder).AppendNull()
+				}
+			}
+	case primitive.ObjectID:
+		return arrow.BinaryTypes.String,
+			func(mem memory.Allocator) array.Builder { return array.NewStringBuilder(mem) },
+			func(b array.Builder, val any) {
+				if oid, ok := val.(primitive.ObjectID); ok {
+					b.(*array.StringBuilder).Append(oid.Hex())
+				} else {
+					b.(*array.StringBuilder).Append(fmt.Sprint(val))
+				}
+			}
+	case primitive.DateTime:
+		tsType := &arrow.TimestampType{Unit: arrow.Millisecond, TimeZone: "UTC"}
+		return tsType,
+			func(mem memory.Allocator) array.Builder { return array.NewTimestampBuilder(mem, tsType) },
+			func(b array.Builder, val any) {
+				if dt, ok := val.(primitive.DateTime); ok {
+					b.(*array.TimestampBuilder).Append(arrow.Timestamp(dt))
+				} else {
+					b.(*array.TimestampBuilder).AppendNull()
+				}
+			}
+	case primitive.Decimal128:
+		return arrow.BinaryTypes.String,
+			func(mem memory.Allocator) array.Builder { return array.NewStringBuilder(mem) },
+			func(b array.Builder, val any) {
+				if d, ok := val.(primitive.Decimal128); ok {
+					b.(*array.StringBuilder).Append(d.String())
+				} else {
+					b.(*array.StringBuilder).Append(fmt.Sprint(val))
+				}
+			}
+	case primitive.Binary:
+		return arrow.BinaryTypes.Binary,
+			func(mem memory.Allocator) array.Builder { return array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary) },
+			func(b array.Builder, val any) {
+				if bin, ok := val.(primitive.Binary); ok {
+					b.(*array.BinaryBuilder).Append(bin.Data)
+				} else {
+					b.(*array.BinaryBuilder).AppendNull()
+				}
+			}
+	case []byte:
+		return arrow.BinaryTypes.Binary,
+			func(mem memory.Allocator) array.Builder { return array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary) },
+			func(b array.Builder, val any) {
+				if data, ok := val.([]byte); ok {
+					b.(*array.BinaryBuilder).Append(data)
+				} else {
+					b.(*array.BinaryBuilder).AppendNull()
+				}
+			}
+	default:
+		return arrow.BinaryTypes.String,
+			func(mem memory.Allocator) array.Builder { return array.NewStringBuilder(mem) },
+			func(b array.Builder, val any) {
+				if val == nil {
+					b.(*array.StringBuilder).AppendNull()
+				} else {
+					b.(*array.StringBuilder).Append(mongoValueToString(val))
+				}
+			}
+	}
+}
+
+func mongoBuilderFromArrowType(dt arrow.DataType) (func(memory.Allocator) array.Builder, func(array.Builder, any)) {
+	switch dt.ID() {
+	case arrow.STRING:
+		return func(mem memory.Allocator) array.Builder { return array.NewStringBuilder(mem) },
+			func(b array.Builder, val any) {
+				if val == nil {
+					b.(*array.StringBuilder).AppendNull()
+				} else if s, ok := val.(string); ok {
+					b.(*array.StringBuilder).Append(s)
+				} else {
+					b.(*array.StringBuilder).Append(mongoValueToString(val))
+				}
+			}
+	case arrow.INT64:
+		return func(mem memory.Allocator) array.Builder { return array.NewInt64Builder(mem) },
+			func(b array.Builder, val any) {
+				b.(*array.Int64Builder).Append(mongoToInt64(val))
+			}
+	case arrow.FLOAT64:
+		return func(mem memory.Allocator) array.Builder { return array.NewFloat64Builder(mem) },
+			func(b array.Builder, val any) {
+				if f, ok := val.(float64); ok {
+					b.(*array.Float64Builder).Append(f)
+				} else {
+					b.(*array.Float64Builder).AppendNull()
+				}
+			}
+	case arrow.BOOL:
+		return func(mem memory.Allocator) array.Builder { return array.NewBooleanBuilder(mem) },
+			func(b array.Builder, val any) {
+				if bl, ok := val.(bool); ok {
+					b.(*array.BooleanBuilder).Append(bl)
+				} else {
+					b.(*array.BooleanBuilder).AppendNull()
+				}
+			}
+	case arrow.TIMESTAMP:
+		return func(mem memory.Allocator) array.Builder {
+				return array.NewTimestampBuilder(mem, dt.(*arrow.TimestampType))
+			},
+			func(b array.Builder, val any) {
+				switch v := val.(type) {
+				case time.Time:
+					b.(*array.TimestampBuilder).Append(arrow.Timestamp(v.UTC().UnixMilli()))
+				case primitive.DateTime:
+					b.(*array.TimestampBuilder).Append(arrow.Timestamp(v))
+				case int64:
+					b.(*array.TimestampBuilder).Append(arrow.Timestamp(v))
+				default:
+					b.(*array.TimestampBuilder).AppendNull()
+				}
+			}
+	case arrow.BINARY:
+		return func(mem memory.Allocator) array.Builder { return array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary) },
+			func(b array.Builder, val any) {
+				switch v := val.(type) {
+				case []byte:
+					b.(*array.BinaryBuilder).Append(v)
+				case primitive.Binary:
+					b.(*array.BinaryBuilder).Append(v.Data)
+				default:
+					b.(*array.BinaryBuilder).AppendNull()
+				}
+			}
+	default:
+		return func(mem memory.Allocator) array.Builder { return array.NewStringBuilder(mem) },
+			func(b array.Builder, val any) {
+				if val == nil {
+					b.(*array.StringBuilder).AppendNull()
+				} else {
+					b.(*array.StringBuilder).Append(mongoValueToString(val))
+				}
+			}
+	}
+}
+
+func mongoToInt64(v any) int64 {
+	switch x := v.(type) {
+	case int32:
+		return int64(x)
+	case int64:
+		return x
+	case int:
+		return int64(x)
+	default:
+		return 0
+	}
+}
+
+func mongoValueToString(val any) string {
+	switch v := val.(type) {
+	case primitive.M, primitive.D, primitive.A, map[string]any, []any:
+		b, err := bson.MarshalExtJSON(v, true, false)
+		if err == nil {
+			return string(b)
+		}
+		return fmt.Sprint(v)
+	case primitive.Regex:
+		return v.String()
+	case primitive.JavaScript:
+		return string(v)
+	case primitive.CodeWithScope:
+		return string(v.Code)
+	case primitive.MinKey:
+		return "$MinKey"
+	case primitive.MaxKey:
+		return "$MaxKey"
+	case primitive.Undefined:
+		return "$Undefined"
+	case primitive.Symbol:
+		return string(v)
+	default:
+		return fmt.Sprint(v)
+	}
+}

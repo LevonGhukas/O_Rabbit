@@ -1,0 +1,7 @@
+# Optional override for an intentionally host-published worker endpoint.
+# The default bind is host loopback for a trusted tunnel. Publishing on a
+# non-loopback host address requires worker auth plus gRPC TLS.
+services:
+  orabbit-master:
+    ports:
+      - "${ORABBIT_GRPC_PUBLISH_ADDR:-127.0.0.1}:${ORABBIT_GRPC_PUBLISHED_PORT:-9102}:9102"

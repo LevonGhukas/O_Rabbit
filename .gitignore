@@ -1,0 +1,52 @@
+# OS junk
+.DS_Store
+
+# Env / secrets
+.env
+*.key
+.master_key
+.ice.yaml
+
+# Logs
+*.log
+
+# Build outputs
+/orabbit-client
+/orabbit-master
+/orabbit-worker
+/master
+/worker
+/dist/
+*.exe
+
+# SQLite artifacts
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Python (optional)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node (optional)
+node_modules/
+
+# PDF files
+*.pdf
+
+# Benchmarks
+Benchmarks/*/*.txt
+Benchmarks/mssql/*.txt
+Benchmarks/mysql/*.txt
+Benchmarks/postgres/*.txt
+Benchmarks/oracle/*.txt
+
+# Local deployment env files - never commit real secrets/IPs
+.env.master
+.env.minio
+.env.worker
+.env.worker.on.master
+
+configs.sql

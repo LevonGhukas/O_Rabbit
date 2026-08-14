@@ -1,0 +1,127 @@
+version: "3.9"
+
+services:
+  ex-postgres:
+    image: postgres:17
+    container_name: ex-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - ex-postgres-data:/var/lib/postgresql/data
+
+  ex-mysql:
+    image: mysql:8.4
+    container_name: ex-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: test
+      MYSQL_USER: mysql
+      MYSQL_PASSWORD: mysql
+    command:
+      - --default-authentication-plugin=caching_sha2_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - ex-mysql-data:/var/lib/mysql
+
+  ex-mariadb:
+    image: mariadb:11
+    container_name: ex-mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: root
+      MARIADB_DATABASE: test
+      MARIADB_USER: mariadb
+      MARIADB_PASSWORD: mariadb
+    ports:
+      - "3307:3306"
+    volumes:
+      - ex-mariadb-data:/var/lib/mysql
+
+  ex-oracle:
+    image: gvenzl/oracle-free:23-slim
+    container_name: ex-oracle
+    restart: unless-stopped
+    environment:
+      ORACLE_PASSWORD: oracle
+      APP_USER: app
+      APP_USER_PASSWORD: app
+    ports:
+      - "1521:1521"
+      - "5500:5500"
+    volumes:
+      - ex-oracle-data:/opt/oracle/oradata
+
+  ex-mongodb:
+    image: mongo:8
+    container_name: ex-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: root
+    ports:
+      - "27017:27017"
+    volumes:
+      - ex-mongodb-data:/data/db
+
+  ex-mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: ex-mssql
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "YourStrong!Passw0rd"
+      MSSQL_PID: "Developer"
+    ports:
+      - "1433:1433"
+    volumes:
+      - ex-mssql-data:/var/opt/mssql
+
+  ex-cassandra:
+    image: cassandra:5.0
+    container_name: ex-cassandra
+    restart: unless-stopped
+    environment:
+      CASSANDRA_CLUSTER_NAME: ExternalCluster
+    ports:
+      - "9042:9042"
+    volumes:
+      - ex-cassandra-data:/var/lib/cassandra
+
+  ex-clickhouse:
+    image: clickhouse/clickhouse-server:25.6
+    container_name: ex-clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+    ports:
+      - "8124:8123"
+      - "9003:9000"
+    volumes:
+      - ex-clickhouse-data:/var/lib/clickhouse
+
+  ex-trino:
+    image: trinodb/trino:477
+    container_name: ex-trino
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+
+volumes:
+  ex-postgres-data:
+  ex-mysql-data:
+  ex-mariadb-data:
+  ex-oracle-data:
+  ex-mongodb-data:
+  ex-mssql-data:
+  ex-cassandra-data:
+  ex-clickhouse-data:
+

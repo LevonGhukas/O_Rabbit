@@ -1,0 +1,13 @@
+services:
+  ice-rest-catalog:
+    image: altinity/ice-rest-catalog:0.11.0
+    command: ["-c", "/etc/ice-rest-catalog/config.yaml"]
+    ports:
+      - "0.0.0.0:5000:5000"
+    volumes:
+      - ./ice-rest-catalog.yaml:/etc/ice-rest-catalog/config.yaml:ro
+      - ice_rest_catalog_data:/var/lib/ice-rest-catalog
+    restart: unless-stopped
+
+volumes:
+  ice_rest_catalog_data:

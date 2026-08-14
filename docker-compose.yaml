@@ -1,0 +1,170 @@
+x-orabbit-build: &orabbit-build
+  context: .
+  dockerfile: Dockerfile.orabbit
+
+x-worker-common: &worker-common
+  image: orabbit-worker:local
+  build:
+    <<: *orabbit-build
+    target: worker
+  depends_on:
+    master:
+      condition: service_started
+    minio-init:
+      condition: service_completed_successfully
+    postgres:
+      condition: service_healthy
+  restart: unless-stopped
+  environment:
+    ORABBIT_WORKER_AUTH_TOKEN: "${ORABBIT_WORKER_AUTH_TOKEN:?set ORABBIT_WORKER_AUTH_TOKEN}"
+  networks:
+    - orabbit_net
+
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+    networks:
+      - orabbit_net
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done
+        mc mb -p local/bucket1 || true
+    restart: "no"
+    networks:
+      - orabbit_net
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: mypassword
+      POSTGRES_DB: mydb
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U myuser -d mydb"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    restart: unless-stopped
+    networks:
+      - orabbit_net
+
+  ice-rest-catalog:
+    image: altinity/ice-rest-catalog:0.2.0
+    command: ["-c", "/etc/ice/ice-rest-catalog.yaml"]
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "5001:5000"
+    volumes:
+      - ice_catalog_data:/var/lib/ice-rest-catalog
+      - ./ice-rest-catalog.yaml:/etc/ice/ice-rest-catalog.yaml:ro
+    restart: unless-stopped
+    networks:
+      - orabbit_net
+
+  clickhouse: # Indent this line and all below
+    image: altinity/clickhouse-server:25.8.9.20207.altinityantalya
+    ports:
+      - "8123:8123"
+      - "9090:9090"
+    environment:
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+    depends_on:
+      ice-rest-catalog:
+        condition: service_started
+      minio:
+        condition: service_started
+    networks:
+      - orabbit_net
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+
+  master:
+    image: orabbit-master:local
+    build:
+      <<: *orabbit-build
+      target: master
+    command:
+      - "-db"
+      - "/var/lib/orabbit/master.sqlite"
+      - "-http-addr"
+      - "0.0.0.0:9100"
+      - "-grpc-addr"
+      - "0.0.0.0:9102"
+      - "-insecure=true"
+      - "-log-level"
+      - "INFO"
+      - "-log-format"
+      - "json"
+    environment:
+      ORABBIT_HTTP_AUTH_TOKEN: "${ORABBIT_HTTP_AUTH_TOKEN:?set ORABBIT_HTTP_AUTH_TOKEN}"
+      ORABBIT_WORKER_AUTH_TOKEN: "${ORABBIT_WORKER_AUTH_TOKEN:?set ORABBIT_WORKER_AUTH_TOKEN}"
+    ports:
+      - "9100:9100"
+    volumes:
+      - master_data:/var/lib/orabbit
+    restart: unless-stopped
+    networks:
+      - orabbit_net
+
+  worker-1:
+    <<: *worker-common
+    command:
+      - "-master"
+      - "master:9102"
+      - "-worker-id"
+      - "docker-worker-1"
+      - "-worker-addr"
+      - "worker-1"
+      - "-insecure=true"
+      - "-poll"
+      - "2s"
+
+  worker-2:
+    <<: *worker-common
+    command:
+      - "-master"
+      - "master:9102"
+      - "-worker-id"
+      - "docker-worker-2"
+      - "-worker-addr"
+      - "worker-2"
+      - "-insecure=true"
+      - "-poll"
+      - "2s"
+
+volumes:
+  clickhouse_data:
+  ice_catalog_data:
+  master_data:
+  minio_data:
+  postgres_data:
+
+networks:
+  orabbit_net:
+    name: orabbit_net

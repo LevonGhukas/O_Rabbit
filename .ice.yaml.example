@@ -1,0 +1,8 @@
+uri: http://localhost:5001
+bearerToken: ""
+s3:
+  endpoint: http://127.0.0.1:9000
+  region: us-east-1
+  pathStyleAccess: true
+  accessKeyID: ""
+  secretAccessKey: ""

@@ -1,0 +1,17 @@
+.git
+.github
+.gitignore
+.env*
+.DS_Store
+Benchmarks
+docs
+ice_catalog_data
+orabbit-client
+orabbit-master
+orabbit-worker
+docker-compose.yaml
+README.md
+*.sqlite
+*.log
+coverage.out
+*.coverprofile

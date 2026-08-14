@@ -1,0 +1,29 @@
+name: orabbit-master
+
+services:
+  orabbit-master:
+    image: orabbit-master:cloud-local
+    build:
+      context: .
+      dockerfile: Dockerfile.orabbit
+      target: master
+    env_file:
+      - ${ORABBIT_ENV_FILE:-.env.master}
+    environment:
+      AWS_EC2_METADATA_DISABLED: "true"
+    ports:
+      - "${ORABBIT_HTTP_PUBLISHED_PORT:-9100}:9100"
+    volumes:
+      - orabbit_master_data:/var/lib/orabbit
+    networks:
+      - orabbit_control_plane
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+volumes:
+  orabbit_master_data:
+
+networks:
+  orabbit_control_plane:
+    external: true
+    name: orabbit-control-plane

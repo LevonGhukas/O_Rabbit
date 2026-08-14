@@ -1,0 +1,45 @@
+name: orabbit-minio
+
+services:
+  minio:
+    image: ${MINIO_IMAGE:-minio/minio:latest}
+    command: server /data --address ":9000" --console-address ":9001"
+    env_file:
+      - ${ORABBIT_ENV_FILE:-.env.minio}
+    ports:
+      - "${MINIO_API_PUBLISHED_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PUBLISHED_PORT:-9001}:9001"
+    volumes:
+      - orabbit_minio_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  minio-init:
+    image: ${MINIO_MC_IMAGE:-minio/mc:latest}
+    depends_on:
+      minio:
+        condition: service_started
+    env_file:
+      - ${ORABBIT_ENV_FILE:-.env.minio}
+    entrypoint:
+      - /bin/sh
+      - -ec
+    command:
+      - |
+        : "$${MINIO_ROOT_USER:?set MINIO_ROOT_USER}"
+        : "$${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}"
+        : "$${ORABBIT_S3_BUCKET:?set ORABBIT_S3_BUCKET}"
+
+        until mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"; do
+          sleep 1
+        done
+        mc mb -p "local/$${ORABBIT_S3_BUCKET}" || true
+        mc anonymous set none "local/$${ORABBIT_S3_BUCKET}" || true
+    restart: "no"
+
+volumes:
+  orabbit_minio_data:

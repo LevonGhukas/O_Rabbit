@@ -1,0 +1,198 @@
+syntax = "proto3";
+
+package orabbit.v1;
+
+option go_package = "github.com/LevonGhukas/O_Rabbit/internal/grpcpb;grpcpb";
+
+service ControlPlane {
+  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Pull model: worker asks for work.
+  rpc RequestTask(RequestTaskRequest) returns (RequestTaskResponse);
+
+  rpc RenewTaskLease(RenewTaskLeaseRequest) returns (RenewTaskLeaseResponse);
+
+  rpc AcquireUploadCapacity(AcquireUploadCapacityRequest) returns (AcquireUploadCapacityResponse);
+  rpc ReleaseUploadCapacity(ReleaseUploadCapacityRequest) returns (ReleaseUploadCapacityResponse);
+
+  rpc ReportTaskProgress(ReportTaskProgressRequest) returns (ReportTaskProgressResponse);
+  rpc ReportTaskResult(ReportTaskResultRequest) returns (ReportTaskResultResponse);
+}
+
+message RegisterWorkerRequest {
+  string worker_id = 1;           // optional; if empty master assigns
+  string addr = 2;                // for observability only
+  string capabilities_json = 3;   // opaque
+  string boot_id = 4;
+  string hostname = 5;
+  int32 pid = 6;
+  string version = 7;
+}
+
+message RegisterWorkerResponse {
+  string worker_id = 1;
+  int64 heartbeat_interval_ms = 2;
+}
+
+message HeartbeatRequest {
+  string worker_id = 1;
+  int64 now_unix_ms = 2;
+  string boot_id = 3;
+}
+
+message HeartbeatResponse {}
+
+message RequestTaskRequest {
+  string worker_id = 1;
+  string capabilities_json = 2;
+  // Current value is 5. The master accepts an exact match only; see
+  // docs/WORKER_PROTOCOL_COMPATIBILITY.md.
+  int32 protocol_version = 3;
+  string boot_id = 4;
+}
+
+message RequestTaskResponse {
+  TaskAssignment task = 1; // if task.task_id is empty, no work
+}
+
+message TaskAssignment {
+  string task_id = 1;
+  string run_id = 2;
+  string job_id = 3;
+  int32 task_index = 4;
+  string correlation_id = 5;
+  string attempt_id = 6;
+  string fencing_token = 7; // secret ownership credential; do not log
+  int32 attempt_number = 8;
+  int64 lease_deadline_unix_ms = 9;
+
+  // Planning / partition
+  string partition_spec_json = 10;
+
+  // Source
+  string source_engine = 20; // e.g. mssql, postgres
+  string source_dsn = 21;    // decrypted DSN; do not log
+  string source_sql = 22;
+
+  // Target (S3/MinIO)
+  string s3_endpoint = 30;
+  string s3_region = 31;
+  string s3_bucket = 32;
+  string s3_prefix = 33; // base prefix for output objects
+  bool s3_force_path_style = 34;
+  string s3_access_key_id = 35;     // do not log
+  string s3_secret_access_key = 36; // do not log
+  string s3_session_token = 37;     // optional
+
+  // Output controls
+  int64 target_file_bytes = 40;
+
+  reserved 41, 42;
+  reserved "max_rows_per_file", "fetch_limit_rows";
+
+  repeated string partition_keys = 43;
+}
+
+message ReportTaskProgressRequest {
+  string worker_id = 1;
+  string task_id = 2;
+  string run_id = 3;
+  string attempt_id = 4;
+  string fencing_token = 5;
+  string boot_id = 6;
+
+  int64 rows_read = 10;
+  int64 bytes_read = 11;
+  int64 bytes_written = 12;
+  int64 uncompressed_bytes = 13;
+
+  string message = 20;
+  string fields_json = 21;
+}
+
+message ReportTaskProgressResponse {}
+
+message ReportTaskResultRequest {
+  string worker_id = 1;
+  string task_id = 2;
+  string run_id = 3;
+  string attempt_id = 4;
+  string fencing_token = 5;
+  string boot_id = 6;
+
+  string status = 10;        // SUCCEEDED, FAILED, or CANCELED
+  string error_message = 11; // if failed
+  string failure_class = 12; // strongly typed classification
+
+  int64 rows_read = 20;
+  int64 bytes_read = 21;
+  int64 bytes_written = 22;
+  int64 uncompressed_bytes = 23;
+
+  repeated string parquet_object_keys = 30;
+  string max_hwm_value = 31; // optional, as string
+  repeated ArtifactIntegrity artifacts = 32;
+}
+
+message ArtifactIntegrity {
+  string object_key = 1;
+  int64 byte_size = 2;
+  string sha256 = 3;
+  int64 row_count = 4;
+  string schema_fingerprint = 5;
+  string run_id = 6;
+  string task_id = 7;
+  string attempt_id = 8;
+  int32 attempt_number = 9;
+  int32 file_index = 10;
+  int32 format_version = 11;
+  string verification_method = 12;
+  string verification_status = 13;
+  string verified_at = 14;
+  string max_hwm = 15;
+}
+
+message RenewTaskLeaseRequest {
+  string worker_id = 1;
+  string task_id = 2;
+  string attempt_id = 3;
+  string fencing_token = 4;
+  string boot_id = 5;
+}
+
+message RenewTaskLeaseResponse {
+  int64 lease_deadline_unix_ms = 1;
+}
+
+message AcquireUploadCapacityRequest {
+  string worker_id = 1;
+  string task_id = 2;
+  string attempt_id = 3;
+  string fencing_token = 4;
+  string boot_id = 5;
+}
+
+message AcquireUploadCapacityResponse {
+  bool acquired = 1;
+  string lease_id = 2;
+  string lease_token = 3; // secret capacity credential; do not log
+  int64 lease_deadline_unix_ms = 4;
+  int64 retry_after_ms = 5;
+}
+
+message ReleaseUploadCapacityRequest {
+  string worker_id = 1;
+  string task_id = 2;
+  string attempt_id = 3;
+  string lease_id = 4;
+  string lease_token = 5; // secret capacity credential; do not log
+  string boot_id = 6;
+}
+
+message ReleaseUploadCapacityResponse {}
+
+message ReportTaskResultResponse {
+  bool accepted = 1;
+  string message = 2;
+}

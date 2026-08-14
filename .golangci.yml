@@ -1,0 +1,20 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - ineffassign
+    - unused
+  exclusions:
+    paths:
+      - third_party
+
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    paths:
+      - third_party
