@@ -342,7 +342,10 @@ func buildOracleCursorQuery(q CursorQuery) (string, []any, error) {
 		return "", nil, fmt.Errorf("cursor domain is required")
 	}
 
-	clauses := make([]string, 0, 2)
+	clauses := make([]string, 0, 3)
+	if strings.TrimSpace(q.WhereClause) != "" {
+		clauses = append(clauses, fmt.Sprintf("(%s)", q.WhereClause))
+	}
 	args := make([]any, 0, 2)
 	argPos := 1
 	if strings.TrimSpace(q.LowerBound) != "" {

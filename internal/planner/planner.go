@@ -321,7 +321,7 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 	case "single":
 		var part json.RawMessage
 		if connectors.SupportsOrderedCursor(srcEngine) {
-			part = partitionSpecSQLCursorSingle(o.Table, o.NormalizedSourceMode(), o.QueryHash, o.EffectiveCursorColumn(), connectors.CursorDomainUnknown, "", false, "")
+			part = partitionSpecSQLCursorSingle(o.Table, o.NormalizedSourceMode(), o.QueryHash, o.WhereClause, o.EffectiveCursorColumn(), connectors.CursorDomainUnknown, "", false, "")
 		} else {
 			part = PartitionSpecSingle(o.Table, o.NormalizedSourceMode(), o.QueryHash)
 		}
@@ -497,7 +497,7 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 				}
 				return db.Run{}, nil, fmt.Errorf("cursor column %q was not found in table %q", cursorColumn, o.Table)
 			}
-			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, "", connectors.CursorDomainInt64, "", false, "")
+			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, "", connectors.CursorDomainInt64, "", false, "")
 			tasks := []db.TaskInsert{{
 				ID:            newID(),
 				RunID:         run.ID,
@@ -657,11 +657,11 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 				return db.Run{}, nil, err
 			}
 		} else {
-			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, cursorColumn, cv.Domain, fromHWM, strings.TrimSpace(fromHWM) != "", snapshotCtx)
+			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, cursorColumn, cv.Domain, fromHWM, strings.TrimSpace(fromHWM) != "", snapshotCtx)
 			tasks = []db.TaskInsert{{ID: newID(), RunID: run.ID, TaskIndex: idx, PartitionSpec: part, Status: "PENDING"}}
 		}
 		if len(tasks) == 0 {
-			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, cursorColumn, cv.Domain, fromHWM, strings.TrimSpace(fromHWM) != "", snapshotCtx)
+			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, cursorColumn, cv.Domain, fromHWM, strings.TrimSpace(fromHWM) != "", snapshotCtx)
 			tasks = []db.TaskInsert{{ID: newID(), RunID: run.ID, TaskIndex: idx, PartitionSpec: part, Status: "PENDING"}}
 		}
 
@@ -742,10 +742,10 @@ func PartitionSpecCDCStream(table, sourceMode, queryHash string) json.RawMessage
 
 // PartitionSpecSQLCursorRange constructs a partition specification payload for a bounded ordered-cursor task.
 func PartitionSpecSQLCursorRange(table, column string, domain connectors.CursorDomain, lower string, lowerExclusive bool, upper string, upperInclusive bool, outputPart int, snapshotCtx string) json.RawMessage {
-	return partitionSpecSQLCursorRange(table, "table", "", column, domain, lower, lowerExclusive, upper, upperInclusive, outputPart, snapshotCtx)
+	return partitionSpecSQLCursorRange(table, "table", "", "", column, domain, lower, lowerExclusive, upper, upperInclusive, outputPart, snapshotCtx)
 }
 
-func partitionSpecSQLCursorRange(table, sourceMode, queryHash, column string, domain connectors.CursorDomain, lower string, lowerExclusive bool, upper string, upperInclusive bool, outputPart int, snapshotCtx string) json.RawMessage {
+func partitionSpecSQLCursorRange(table, sourceMode, queryHash, whereClause, column string, domain connectors.CursorDomain, lower string, lowerExclusive bool, upper string, upperInclusive bool, outputPart int, snapshotCtx string) json.RawMessage {
 	part := map[string]any{
 		"type":            "sql_cursor_range",
 		"source_mode":     sourceMode,
@@ -757,6 +757,9 @@ func partitionSpecSQLCursorRange(table, sourceMode, queryHash, column string, do
 		"lower_exclusive": lowerExclusive,
 		"upper":           strings.TrimSpace(upper),
 		"upper_inclusive": upperInclusive,
+	}
+	if strings.TrimSpace(whereClause) != "" {
+		part["where_clause"] = strings.TrimSpace(whereClause)
 	}
 	if strings.TrimSpace(queryHash) != "" {
 		part["query_hash"] = strings.TrimSpace(queryHash)
@@ -770,10 +773,10 @@ func partitionSpecSQLCursorRange(table, sourceMode, queryHash, column string, do
 
 // PartitionSpecSQLCursorSingle constructs a partition specification payload for a single ordered-cursor task.
 func PartitionSpecSQLCursorSingle(table, column string, domain connectors.CursorDomain, lower string, lowerExclusive bool, snapshotCtx string) json.RawMessage {
-	return partitionSpecSQLCursorSingle(table, "table", "", column, domain, lower, lowerExclusive, snapshotCtx)
+	return partitionSpecSQLCursorSingle(table, "table", "", "", column, domain, lower, lowerExclusive, snapshotCtx)
 }
 
-func partitionSpecSQLCursorSingle(table, sourceMode, queryHash, column string, domain connectors.CursorDomain, lower string, lowerExclusive bool, snapshotCtx string) json.RawMessage {
+func partitionSpecSQLCursorSingle(table, sourceMode, queryHash, whereClause, column string, domain connectors.CursorDomain, lower string, lowerExclusive bool, snapshotCtx string) json.RawMessage {
 	part := map[string]any{
 		"type":            "sql_cursor_single",
 		"source_mode":     sourceMode,
@@ -782,6 +785,9 @@ func partitionSpecSQLCursorSingle(table, sourceMode, queryHash, column string, d
 		"cursor_domain":   domain,
 		"lower":           strings.TrimSpace(lower),
 		"lower_exclusive": lowerExclusive,
+	}
+	if strings.TrimSpace(whereClause) != "" {
+		part["where_clause"] = strings.TrimSpace(whereClause)
 	}
 	if strings.TrimSpace(queryHash) != "" {
 		part["query_hash"] = strings.TrimSpace(queryHash)
@@ -1104,7 +1110,7 @@ func buildOrderedCursorRangeTasks(runID string, baseIndex int, table, column str
 	queryHash := strings.TrimSpace(o.QueryHash)
 	tasks := make([]db.TaskInsert, 0, len(uppers))
 	for _, upper := range uppers {
-		part := partitionSpecSQLCursorRange(table, sourceMode, queryHash, column, domain, lower, lowerExclusive, upper, true, idx, snapshotCtx)
+		part := partitionSpecSQLCursorRange(table, sourceMode, queryHash, o.WhereClause, column, domain, lower, lowerExclusive, upper, true, idx, snapshotCtx)
 		tasks = append(tasks, db.TaskInsert{
 			ID:            newID(),
 			RunID:         runID,

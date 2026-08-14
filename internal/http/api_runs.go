@@ -53,7 +53,8 @@ type runSubmitSourceRequest struct {
 	Table        string `json:"table"`
 	Query        string `json:"query"`
 	CursorColumn string `json:"cursor_column"`
-	Incremental  bool   `json:"incremental"`
+	Incremental  bool   `json:"incremental"` 
+	WhereClause  string `json:"where_clause,omitempty"`
 }
 
 type runSubmitTargetRequest struct {
@@ -94,6 +95,7 @@ type validatedRunSubmitSpec struct {
 	SourceTable             string
 	SourceQuery             string
 	QueryHash               string
+	WhereClause             string
 	SourceName              string
 	CursorColumn            string
 	Incremental             bool
@@ -364,6 +366,7 @@ func (s *Server) handleRunValidate(w http.ResponseWriter, r *http.Request) {
 			"source_connection_name": spec.SourceConnectionName,
 			"source_name":            spec.SourceName,
 			"query_hash":             spec.QueryHash,
+		"where_clause":           spec.WhereClause,
 			"target_connection_name": spec.TargetConnectionName,
 			"target_prefix":          spec.TargetPrefix,
 			"iceberg_table":          spec.IcebergTable,
@@ -734,6 +737,7 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 			SourceTable:             sourceTable,
 			SourceQuery:             sourceQuery,
 			QueryHash:               queryHash,
+			WhereClause:             strings.TrimSpace(req.Source.WhereClause),
 			SourceName:              sourceName,
 			CursorColumn:            cursorColumn,
 			Incremental:             req.Source.Incremental,
@@ -776,6 +780,7 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 		SourceTable:             sourceTable,
 		SourceQuery:             sourceQuery,
 		QueryHash:               queryHash,
+			WhereClause:             strings.TrimSpace(req.Source.WhereClause),
 		SourceName:              sourceName,
 		CursorColumn:            cursorColumn,
 		Incremental:             req.Source.Incremental,

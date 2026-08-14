@@ -117,7 +117,10 @@ func (m *MySQL) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []st
 		return nil, nil, nil, -1, fmt.Errorf("cursor domain is required")
 	}
 
-	clauses := make([]string, 0, 2)
+	clauses := make([]string, 0, 3)
+	if strings.TrimSpace(q.WhereClause) != "" {
+		clauses = append(clauses, fmt.Sprintf("(%s)", q.WhereClause))
+	}
 	args := make([]any, 0, 2)
 	if strings.TrimSpace(q.LowerBound) != "" {
 		lowerArg, err := ParseCursorArgument(q.CursorDomain, q.LowerBound)

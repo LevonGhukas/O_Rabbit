@@ -162,7 +162,10 @@ func (p *Postgres) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, [
 		return nil, nil, nil, -1, fmt.Errorf("cursor domain is required")
 	}
 
-	clauses := make([]string, 0, 2)
+	clauses := make([]string, 0, 3)
+	if strings.TrimSpace(q.WhereClause) != "" {
+		clauses = append(clauses, fmt.Sprintf("(%s)", q.WhereClause))
+	}
 	args := make([]any, 0, 2)
 	argPos := 1
 	if strings.TrimSpace(q.LowerBound) != "" {
