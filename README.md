@@ -474,6 +474,55 @@ least one of `planned_tasks` or `chunk_size`. FlightSQL requires `source.sql`,
 `incremental: false`, `auto_tune: false`, no `id_column`, and no manual planning
 fields.
 
+### Iceberg table options
+
+The Iceberg YAML snapshot accepts table metadata and write policy options in
+addition to `uri`, `bearerToken`, and `s3`:
+
+```yaml
+uri: http://catalog:8181
+bearerToken: token
+
+partition_spec:
+  - source: created_at
+    name: created_day
+    transform: day
+
+sort_order:
+  - source: created_at
+    direction: desc
+    null_order: nulls_last
+
+schema_evolution: additive
+target_file_size: 268435456
+distribution_mode: range
+metrics_mode: truncate(32)
+
+metadata_retention:
+  delete_after_commit: true
+  previous_versions_max: 10
+  min_snapshots_to_keep: 3
+  max_snapshot_age_ms: 604800000
+
+upsert:
+  enabled: true
+  keys: [id]
+  mode: merge-on-read
+
+credential_vending:
+  enabled: true
+  required: true
+```
+
+Partition transforms support `identity`, `year`, `month`, `day`, `hour`,
+`bucket[N]`, and `truncate[N]`. Schema evolution is `strict` by default;
+`additive` adds optional columns and permits Iceberg-compatible type promotion.
+Upsert requires Iceberg format v2 and non-null, unique keys in every incoming
+run. When credential vending is required, static S3 credentials are not passed
+to the catalog-backed table filesystem. Partitioned registration rewrites the
+committed source Parquet stream into Iceberg-managed partitioned files; the
+unpartitioned path remains zero-copy.
+
 Cancel a run explicitly:
 
 ```sh

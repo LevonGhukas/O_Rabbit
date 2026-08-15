@@ -66,17 +66,9 @@ func buildIcebergRegistrationSnapshot(cfg ranConfig) (json.RawMessage, error) {
 		return nil, fmt.Errorf("missing iceberg config file")
 	}
 
-	absIceCfg, err := filepath.Abs(cfg.IceConfig)
+	rawCfg, iceCfg, err := readIceConfig(cfg.IceConfig)
 	if err != nil {
-		absIceCfg = cfg.IceConfig
-	}
-	rawCfg, err := os.ReadFile(absIceCfg)
-	if err != nil {
-		return nil, fmt.Errorf("read iceberg config %q: %w", cfg.IceConfig, err)
-	}
-	iceCfg, err := icebergreg.ParseIceYAMLBytes(rawCfg)
-	if err != nil {
-		return nil, fmt.Errorf("read iceberg config %q: %w", cfg.IceConfig, err)
+		return nil, err
 	}
 
 	runCfg := icebergreg.ResolveRunConfig(
@@ -102,6 +94,22 @@ func buildIcebergRegistrationSnapshot(cfg ranConfig) (json.RawMessage, error) {
 		return nil, err
 	}
 	return raw, nil
+}
+
+func readIceConfig(path string) ([]byte, icebergreg.IceYAML, error) {
+	absIceCfg, err := filepath.Abs(path)
+	if err != nil {
+		absIceCfg = path
+	}
+	rawCfg, err := os.ReadFile(absIceCfg)
+	if err != nil {
+		return nil, icebergreg.IceYAML{}, fmt.Errorf("read iceberg config %q: %w", path, err)
+	}
+	iceCfg, err := icebergreg.ParseIceYAMLBytes(rawCfg)
+	if err != nil {
+		return nil, icebergreg.IceYAML{}, fmt.Errorf("read iceberg config %q: %w", path, err)
+	}
+	return rawCfg, iceCfg, nil
 }
 
 func restGoTableLocation(bucket, basePrefix string) string {

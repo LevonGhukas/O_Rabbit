@@ -16,9 +16,49 @@ import (
 const JobOptionsKey = "iceberg_registration"
 
 type IceYAML struct {
-	URI         string `yaml:"uri"`
-	BearerToken string `yaml:"bearerToken"`
-	S3          IceS3  `yaml:"s3"`
+	URI               string                  `yaml:"uri"`
+	BearerToken       string                  `yaml:"bearerToken"`
+	S3                IceS3                   `yaml:"s3"`
+	PartitionSpec     []PartitionFieldConfig  `yaml:"partition_spec"`
+	SortOrder         []SortFieldConfig       `yaml:"sort_order"`
+	SchemaEvolution   string                  `yaml:"schema_evolution"`
+	TargetFileSize    int64                   `yaml:"target_file_size"`
+	DistributionMode  string                  `yaml:"distribution_mode"`
+	MetricsMode       string                  `yaml:"metrics_mode"`
+	MetadataRetention MetadataRetentionConfig `yaml:"metadata_retention"`
+	Upsert            UpsertConfig            `yaml:"upsert"`
+	CredentialVending CredentialVendingConfig `yaml:"credential_vending"`
+}
+
+type PartitionFieldConfig struct {
+	Source    string `json:"source" yaml:"source"`
+	Name      string `json:"name,omitempty" yaml:"name"`
+	Transform string `json:"transform,omitempty" yaml:"transform"`
+}
+
+type SortFieldConfig struct {
+	Source    string `json:"source" yaml:"source"`
+	Transform string `json:"transform,omitempty" yaml:"transform"`
+	Direction string `json:"direction,omitempty" yaml:"direction"`
+	NullOrder string `json:"null_order,omitempty" yaml:"null_order"`
+}
+
+type MetadataRetentionConfig struct {
+	DeleteAfterCommit   bool  `json:"delete_after_commit,omitempty" yaml:"delete_after_commit"`
+	PreviousVersionsMax int   `json:"previous_versions_max,omitempty" yaml:"previous_versions_max"`
+	MinSnapshotsToKeep  int   `json:"min_snapshots_to_keep,omitempty" yaml:"min_snapshots_to_keep"`
+	MaxSnapshotAgeMS    int64 `json:"max_snapshot_age_ms,omitempty" yaml:"max_snapshot_age_ms"`
+}
+
+type UpsertConfig struct {
+	Enabled bool     `json:"enabled,omitempty" yaml:"enabled"`
+	Keys    []string `json:"keys,omitempty" yaml:"keys"`
+	Mode    string   `json:"mode,omitempty" yaml:"mode"`
+}
+
+type CredentialVendingConfig struct {
+	Enabled  bool `json:"enabled,omitempty" yaml:"enabled"`
+	Required bool `json:"required,omitempty" yaml:"required"`
 }
 
 type IceS3 struct {
@@ -36,13 +76,22 @@ type JobConfig struct {
 }
 
 type RunConfig struct {
-	Enabled     bool        `json:"enabled"`
-	Engine      string      `json:"engine,omitempty"`
-	Table       string      `json:"table,omitempty"`
-	URI         string      `json:"uri,omitempty"`
-	BearerToken string      `json:"bearer_token,omitempty"`
-	ConfigYAML  string      `json:"config_yaml,omitempty"`
-	S3          RunConfigS3 `json:"s3"`
+	Enabled           bool                    `json:"enabled"`
+	Engine            string                  `json:"engine,omitempty"`
+	Table             string                  `json:"table,omitempty"`
+	URI               string                  `json:"uri,omitempty"`
+	BearerToken       string                  `json:"bearer_token,omitempty"`
+	ConfigYAML        string                  `json:"config_yaml,omitempty"`
+	S3                RunConfigS3             `json:"s3"`
+	PartitionSpec     []PartitionFieldConfig  `json:"partition_spec,omitempty"`
+	SortOrder         []SortFieldConfig       `json:"sort_order,omitempty"`
+	SchemaEvolution   string                  `json:"schema_evolution,omitempty"`
+	TargetFileSize    int64                   `json:"target_file_size,omitempty"`
+	DistributionMode  string                  `json:"distribution_mode,omitempty"`
+	MetricsMode       string                  `json:"metrics_mode,omitempty"`
+	MetadataRetention MetadataRetentionConfig `json:"metadata_retention,omitempty"`
+	Upsert            UpsertConfig            `json:"upsert,omitempty"`
+	CredentialVending CredentialVendingConfig `json:"credential_vending,omitempty"`
 }
 
 type RunConfigS3 struct {
@@ -72,6 +121,10 @@ func ParseIceYAMLBytes(b []byte) (IceYAML, error) {
 	cfg.S3.Region = strings.TrimSpace(cfg.S3.Region)
 	cfg.S3.AccessKeyID = strings.TrimSpace(cfg.S3.AccessKeyID)
 	cfg.S3.SecretAccessKey = strings.TrimSpace(cfg.S3.SecretAccessKey)
+	cfg.normalizeTableOptions()
+	if err := cfg.validateTableOptions(); err != nil {
+		return IceYAML{}, err
+	}
 	return cfg, nil
 }
 
@@ -140,6 +193,7 @@ func (c RunConfig) Normalize() RunConfig {
 	c.S3.Region = strings.TrimSpace(c.S3.Region)
 	c.S3.AccessKeyID = strings.TrimSpace(c.S3.AccessKeyID)
 	c.S3.SecretAccessKey = strings.TrimSpace(c.S3.SecretAccessKey)
+	c.normalizeTableOptions()
 	return c
 }
 
@@ -151,13 +205,20 @@ func ParseRunConfig(raw json.RawMessage) (RunConfig, error) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return RunConfig{}, fmt.Errorf("parse run registration config: %w", err)
 	}
-	return cfg.Normalize(), nil
+	cfg = cfg.Normalize()
+	if err := cfg.validateTableOptions(); err != nil {
+		return RunConfig{}, fmt.Errorf("parse run registration config: %w", err)
+	}
+	return cfg, nil
 }
 
 func MarshalRunConfig(cfg RunConfig) (json.RawMessage, error) {
 	cfg = cfg.Normalize()
 	if !cfg.Enabled {
 		return nil, nil
+	}
+	if err := cfg.validateTableOptions(); err != nil {
+		return nil, err
 	}
 	b, err := json.Marshal(cfg)
 	if err != nil {
@@ -188,11 +249,20 @@ func ResolveRegistrationS3Config(base s3io.Config, iceCfg IceYAML) s3io.Config {
 
 func ResolveRunConfig(enabled bool, engine, table string, baseS3 s3io.Config, iceCfg IceYAML) RunConfig {
 	cfg := RunConfig{
-		Enabled:     enabled,
-		Engine:      strings.ToLower(strings.TrimSpace(engine)),
-		Table:       strings.TrimSpace(table),
-		URI:         strings.TrimSpace(iceCfg.URI),
-		BearerToken: strings.TrimSpace(iceCfg.BearerToken),
+		Enabled:           enabled,
+		Engine:            strings.ToLower(strings.TrimSpace(engine)),
+		Table:             strings.TrimSpace(table),
+		URI:               strings.TrimSpace(iceCfg.URI),
+		BearerToken:       strings.TrimSpace(iceCfg.BearerToken),
+		PartitionSpec:     append([]PartitionFieldConfig(nil), iceCfg.PartitionSpec...),
+		SortOrder:         append([]SortFieldConfig(nil), iceCfg.SortOrder...),
+		SchemaEvolution:   iceCfg.SchemaEvolution,
+		TargetFileSize:    iceCfg.TargetFileSize,
+		DistributionMode:  iceCfg.DistributionMode,
+		MetricsMode:       iceCfg.MetricsMode,
+		MetadataRetention: iceCfg.MetadataRetention,
+		Upsert:            iceCfg.Upsert,
+		CredentialVending: iceCfg.CredentialVending,
 	}
 	regS3 := ResolveRegistrationS3Config(baseS3, iceCfg)
 	cfg.S3 = RunConfigS3{

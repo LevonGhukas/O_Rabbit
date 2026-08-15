@@ -620,6 +620,53 @@ func TestAPIRunSubmitAdvancedPerformanceValuesArePreserved(t *testing.T) {
 	}
 }
 
+func TestAPIRunSubmitUsesIcebergTargetFileSizeForWorker(t *testing.T) {
+	st := openTestStore(t)
+	srv := newSubmitTestServer(st)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/submit", strings.NewReader(`{
+		"source": {
+			"engine": "postgres",
+			"dsn": "postgresql://user:pass@db:5432/app?sslmode=disable",
+			"table": "public.orders",
+			"cursor_column": "id"
+		},
+		"target": {
+			"s3_endpoint": "http://minio:9000",
+			"s3_bucket": "bucket1",
+			"s3_access_key_id": "minioadmin",
+			"s3_secret_access_key": "miniosecret"
+		},
+		"iceberg": {
+			"enabled": true,
+			"engine": "rest-go",
+			"table": "analytics.orders",
+			"config_yaml": "uri: http://catalog:8181\ntarget_file_size: 123456789\n"
+		}
+	}`))
+
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status=%d want=%d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var resp struct {
+		JobID string `json:"job_id"`
+	}
+	decodeJSONBody(t, rec, &resp)
+	job, err := st.GetJob(context.Background(), resp.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts, err := jobopts.Parse(job.OptionsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.TargetFileBytes != 123456789 {
+		t.Fatalf("target_file_bytes=%d want 123456789", opts.TargetFileBytes)
+	}
+}
+
 func TestAPIRunSubmitResponseDoesNotIncludeSecrets(t *testing.T) {
 	st := openTestStore(t)
 	srv := newSubmitTestServer(st)
