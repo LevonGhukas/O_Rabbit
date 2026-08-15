@@ -496,6 +496,15 @@ func prepareRunPlan(ctx context.Context, cfg ranConfig) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if cfg.AutoIceberg {
+		_, iceCfg, err := readIceConfig(cfg.IceConfig)
+		if err != nil {
+			return "", err
+		}
+		if iceCfg.TargetFileSize > 0 {
+			jp.OptionsJSON["target_file_bytes"] = iceCfg.TargetFileSize
+		}
+	}
 
 	return upsertJob(ctx, cfg.HTTPBase, jp)
 }

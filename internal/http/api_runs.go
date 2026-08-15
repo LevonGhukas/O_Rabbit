@@ -727,6 +727,10 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 		if strings.TrimSpace(iceCfg.URI) == "" {
 			return validatedRunSubmitSpec{}, invalidSubmitField("iceberg.config_yaml", "iceberg.config_yaml must define uri when iceberg.enabled=true", nil)
 		}
+		targetFileBytes := req.Performance.TargetFileBytes
+		if targetFileBytes == 0 && iceCfg.TargetFileSize > 0 {
+			targetFileBytes = iceCfg.TargetFileSize
+		}
 		return validatedRunSubmitSpec{
 			SourceEngine:            engine,
 			SourceDSN:               sourceDSN,
@@ -749,7 +753,7 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 			MaxInFlightTasks:        req.Performance.MaxInFlightTasks,
 			PlannedTasks:            req.Performance.PlannedTasks,
 			TargetRowsPerTask:       req.Performance.TargetRowsPerTask,
-			TargetFileBytes:         req.Performance.TargetFileBytes,
+			TargetFileBytes:         targetFileBytes,
 			SourceConnectionName:    frontendSourceConnectionName(engine),
 			TargetConnectionName:    defaultFrontendTargetConnectionName,
 			JobName:                 frontendDefaultJobName(engine, sourceName),
@@ -875,6 +879,7 @@ func buildFrontendJobRequest(spec validatedRunSubmitSpec, sourceConnectionID, ta
 		"iceberg_engine":         spec.IcebergEngine,
 		"iceberg_table":          spec.IcebergTable,
 		"iceberg_partition_keys": spec.IcebergPartitionKeys,
+		"partition_keys":         spec.IcebergPartitionKeys,
 		"consistency_mode":       spec.ConsistencyMode,
 	}
 	options = icebergreg.MergeJobConfig(options, icebergreg.JobConfig{

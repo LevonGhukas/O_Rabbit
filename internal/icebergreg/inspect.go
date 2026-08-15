@@ -46,7 +46,7 @@ func (m *Manager) InspectCatalog(ctx context.Context, req InspectionRequest) (Ca
 		cfg.SecretAccessKey = reg.S3.SecretAccessKey
 	}
 	cfg.ForcePathStyle = reg.S3.PathStyleAccess
-	cat, err := restcatalog.NewCatalog(ctx, "rest", uri, restcatalog.WithOAuthToken(reg.BearerToken), restcatalog.WithWarehouseLocation("s3://"+req.DatasetBucket), restcatalog.WithAdditionalProps(icebergRegistrationS3Props(cfg)))
+	cat, err := restcatalog.NewCatalog(ctx, "rest", uri, restcatalog.WithOAuthToken(reg.BearerToken), restcatalog.WithWarehouseLocation("s3://"+req.DatasetBucket), restcatalog.WithAdditionalProps(icebergRegistrationS3Props(cfg, reg.CredentialVending.Required)))
 	if err != nil {
 		return CatalogObservation{}, err
 	}
