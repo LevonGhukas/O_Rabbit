@@ -83,6 +83,7 @@ func TestPromptRunConfigNormalModeHidesAdvancedPrompts(t *testing.T) {
 		"Access key ID",
 		"Secret access key",
 		"Register output as an Iceberg table?",
+		"Iceberg REST catalog URI",
 		"Iceberg destination table",
 		"Automatic performance tuning: enabled",
 		"Submit run?",
@@ -129,7 +130,8 @@ func TestPromptRunConfigAdvancedModeShowsAdvancedPrompts(t *testing.T) {
 		"Start local worker processes on this machine?",
 		"Use automatic performance tuning?",
 		"Iceberg engine",
-		"Iceberg REST config file",
+		"Iceberg defaults file (optional)",
+		"Iceberg REST catalog URI",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("advanced prompt output missing %q:\n%s", want, output)

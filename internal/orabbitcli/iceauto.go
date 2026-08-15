@@ -59,19 +59,27 @@ func buildIcebergRegistrationSnapshot(cfg ranConfig) (json.RawMessage, error) {
 	if !cfg.AutoIceberg {
 		return nil, nil
 	}
-
-	engine := registrationEngine(cfg)
-	table := effectiveIceTable(cfg)
-	if strings.TrimSpace(cfg.IceConfig) == "" {
-		return nil, fmt.Errorf("missing iceberg config file")
-	}
-
-	rawCfg, iceCfg, err := readIceConfig(cfg.IceConfig)
+	runCfg, err := resolveIcebergRunConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
+	return icebergreg.MarshalRunConfig(runCfg)
+}
 
-	runCfg := icebergreg.ResolveRunConfig(
+func resolveIcebergRunConfig(cfg ranConfig) (icebergreg.RunConfig, error) {
+	engine := registrationEngine(cfg)
+	table := effectiveIceTable(cfg)
+	rawCfg := []byte(nil)
+	iceCfg := icebergreg.IceYAML{}
+	if strings.TrimSpace(cfg.IceConfig) != "" {
+		var err error
+		rawCfg, iceCfg, err = readIceConfig(cfg.IceConfig)
+		if err != nil {
+			return icebergreg.RunConfig{}, err
+		}
+	}
+
+	runCfg, err := icebergreg.ResolveRunConfigWithOptions(
 		true,
 		engine,
 		table,
@@ -84,16 +92,15 @@ func buildIcebergRegistrationSnapshot(cfg ranConfig) (json.RawMessage, error) {
 			SecretAccessKey: cfg.S3SecretAccessKey,
 		},
 		iceCfg,
+		cfg.IceOptions,
 	)
-	if engine == "ice" {
+	if err != nil {
+		return icebergreg.RunConfig{}, fmt.Errorf("resolve iceberg run options: %w", err)
+	}
+	if engine == "ice" && len(rawCfg) != 0 {
 		runCfg.ConfigYAML = string(rawCfg)
 	}
-
-	raw, err := icebergreg.MarshalRunConfig(runCfg)
-	if err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return runCfg, nil
 }
 
 func readIceConfig(path string) ([]byte, icebergreg.IceYAML, error) {

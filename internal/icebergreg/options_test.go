@@ -74,6 +74,88 @@ credential_vending:
 	}
 }
 
+func TestResolveRunConfigWithOptionsOverridesDefaults(t *testing.T) {
+	uri := "http://run-catalog:8181"
+	token := ""
+	pathStyle := false
+	targetFileSize := int64(0)
+	distribution := "none"
+	metrics := "counts"
+	deleteAfterCommit := false
+	upsertEnabled := false
+	vendingRequired := false
+	emptyPartitions := []PartitionFieldConfig{}
+	emptyKeys := []string{}
+
+	cfg, err := ResolveRunConfigWithOptions(true, "rest-go", "analytics.orders", s3io.Config{
+		Endpoint:        "http://target-s3:9000",
+		Region:          "target-region",
+		ForcePathStyle:  true,
+		AccessKeyID:     "target-key",
+		SecretAccessKey: "target-secret",
+	}, IceYAML{
+		URI:              "http://default-catalog:8181",
+		BearerToken:      "default-token",
+		PartitionSpec:    []PartitionFieldConfig{{Source: "created_at", Transform: "day"}},
+		TargetFileSize:   128 * 1024 * 1024,
+		DistributionMode: "hash",
+		MetricsMode:      "full",
+		MetadataRetention: MetadataRetentionConfig{
+			DeleteAfterCommit: true,
+		},
+		Upsert:            UpsertConfig{Enabled: true, Keys: []string{"id"}, Mode: "merge-on-read"},
+		CredentialVending: CredentialVendingConfig{Enabled: true, Required: true},
+	}, RunOptions{
+		URI:              &uri,
+		BearerToken:      &token,
+		PartitionSpec:    &emptyPartitions,
+		TargetFileSize:   &targetFileSize,
+		DistributionMode: &distribution,
+		MetricsMode:      &metrics,
+		S3: RunS3Options{
+			PathStyleAccess: &pathStyle,
+		},
+		MetadataRetention: RunMetadataRetentionOptions{
+			DeleteAfterCommit: &deleteAfterCommit,
+		},
+		Upsert: RunUpsertOptions{
+			Enabled: &upsertEnabled,
+			Keys:    &emptyKeys,
+		},
+		CredentialVending: RunCredentialVendingOptions{
+			Required: &vendingRequired,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ResolveRunConfigWithOptions: %v", err)
+	}
+	if cfg.URI != uri || cfg.BearerToken != "" {
+		t.Fatalf("catalog settings=%q token=%q", cfg.URI, cfg.BearerToken)
+	}
+	if cfg.S3.Endpoint != "http://target-s3:9000" || cfg.S3.PathStyleAccess {
+		t.Fatalf("S3=%+v", cfg.S3)
+	}
+	if len(cfg.PartitionSpec) != 0 || cfg.TargetFileSize != 0 {
+		t.Fatalf("partition_spec=%+v target_file_size=%d", cfg.PartitionSpec, cfg.TargetFileSize)
+	}
+	if cfg.DistributionMode != "none" || cfg.MetricsMode != "counts" {
+		t.Fatalf("distribution=%q metrics=%q", cfg.DistributionMode, cfg.MetricsMode)
+	}
+	if cfg.MetadataRetention.DeleteAfterCommit || cfg.Upsert.Enabled || len(cfg.Upsert.Keys) != 0 {
+		t.Fatalf("retention=%+v upsert=%+v", cfg.MetadataRetention, cfg.Upsert)
+	}
+	if !cfg.CredentialVending.Enabled || cfg.CredentialVending.Required {
+		t.Fatalf("credential_vending=%+v", cfg.CredentialVending)
+	}
+}
+
+func TestResolveRunConfigWithOptionsRequiresFinalURI(t *testing.T) {
+	_, err := ResolveRunConfigWithOptions(true, "rest-go", "analytics.orders", s3io.Config{}, IceYAML{}, RunOptions{})
+	if err == nil || !strings.Contains(err.Error(), "uri is required") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestParseIceYAMLRejectsInvalidTableOptions(t *testing.T) {
 	tests := []struct {
 		name string

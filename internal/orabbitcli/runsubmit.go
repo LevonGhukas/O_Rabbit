@@ -20,10 +20,19 @@ import (
 var ErrRunSubmitSpecInvalid = errors.New("invalid run submit config")
 
 type runSubmitFile struct {
-	Master runSubmitMasterSpec `json:"master" yaml:"master"`
-	Source runSubmitSourceSpec `json:"source" yaml:"source"`
-	Target runSubmitTargetSpec `json:"target" yaml:"target"`
-	Job    runSubmitJobSpec    `json:"job" yaml:"job"`
+	Master  runSubmitMasterSpec  `json:"master" yaml:"master"`
+	Source  runSubmitSourceSpec  `json:"source" yaml:"source"`
+	Target  runSubmitTargetSpec  `json:"target" yaml:"target"`
+	Job     runSubmitJobSpec     `json:"job" yaml:"job"`
+	Iceberg runSubmitIcebergSpec `json:"iceberg" yaml:"iceberg"`
+}
+
+type runSubmitIcebergSpec struct {
+	Enabled      bool                  `json:"enabled" yaml:"enabled"`
+	Engine       string                `json:"engine,omitempty" yaml:"engine,omitempty"`
+	Table        string                `json:"table,omitempty" yaml:"table,omitempty"`
+	DefaultsFile string                `json:"defaults_file,omitempty" yaml:"defaults_file,omitempty"`
+	Options      icebergreg.RunOptions `json:"options,omitempty" yaml:"options,omitempty"`
 }
 
 type runSubmitMasterSpec struct {
@@ -149,6 +158,9 @@ func (s *runSubmitFile) validate() error {
 	s.Job.WriteMode = strings.TrimSpace(s.Job.WriteMode)
 	s.Job.Table = strings.TrimSpace(s.Job.Table)
 	s.Job.IDColumn = strings.TrimSpace(s.Job.IDColumn)
+	s.Iceberg.Engine = strings.ToLower(strings.TrimSpace(s.Iceberg.Engine))
+	s.Iceberg.Table = strings.TrimSpace(s.Iceberg.Table)
+	s.Iceberg.DefaultsFile = strings.TrimSpace(s.Iceberg.DefaultsFile)
 
 	if s.Source.Name == "" {
 		return invalidRunSubmitf("source.name is required")
@@ -218,6 +230,9 @@ func (s *runSubmitFile) validate() error {
 	if s.Job.FetchLimit < 0 {
 		return invalidRunSubmitf("job.fetch_limit must be >= 0")
 	}
+	if s.Iceberg.Enabled && s.Iceberg.Engine != "" && s.Iceberg.Engine != "rest-go" && s.Iceberg.Engine != "ice" {
+		return invalidRunSubmitf("iceberg.engine must be rest-go or ice")
+	}
 
 	switch {
 	case s.Source.Engine == "flightsql":
@@ -280,7 +295,11 @@ func (s runSubmitFile) toRanConfig(masterHTTPOverride string) ranConfig {
 		StartLocalWorkers: false,
 		Workers:           0,
 
-		AutoIceberg: false,
+		AutoIceberg:   s.Iceberg.Enabled,
+		IcebergEngine: s.Iceberg.Engine,
+		IceConfig:     s.Iceberg.DefaultsFile,
+		IceTable:      s.Iceberg.Table,
+		IceOptions:    s.Iceberg.Options,
 
 		SourceName:   s.Source.Name,
 		SourceEngine: s.Source.Engine,
@@ -497,7 +516,7 @@ func prepareRunPlan(ctx context.Context, cfg ranConfig) (string, error) {
 		return "", err
 	}
 	if cfg.AutoIceberg {
-		_, iceCfg, err := readIceConfig(cfg.IceConfig)
+		iceCfg, err := resolveIcebergRunConfig(cfg)
 		if err != nil {
 			return "", err
 		}
