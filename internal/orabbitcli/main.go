@@ -321,7 +321,8 @@ func cmdRunInteractive(ctx context.Context, args []string) int {
 	autoIceberg := fs.Bool("auto-iceberg", true, "After a successful run, register Parquet parts into an Iceberg REST catalog")
 	icebergEngine := fs.String("iceberg-engine", "rest-go", "Iceberg registration engine: rest-go (default) or ice")
 	iceBin := fs.String("ice-bin", "ice", "Deprecated: ignored by master-owned registration; master uses its in-container ice binary")
-	iceConfig := fs.String("ice-config", ".ice.yaml", "Iceberg config file path to snapshot into the run registration config")
+	iceConfig := fs.String("ice-config", "", "Optional Iceberg defaults file")
+	iceURI := fs.String("ice-uri", "", "Iceberg REST catalog URI for this run")
 	iceTable := fs.String("ice-table", "", "Iceberg table name (namespace.table) (default: derived)")
 
 	if handled, code := parseCommandFlags(fs, args, renderRunInteractiveHelp); handled {
@@ -407,6 +408,9 @@ func cmdRunInteractive(ctx context.Context, args []string) int {
 		AutoTune:          true,
 		MaxInFlightTasks:  0,
 		TargetRowsPerTask: 200000,
+	}
+	if strings.TrimSpace(*iceURI) != "" {
+		cfg.IceOptions.URI = iceURI
 	}
 	if v := strings.TrimSpace(*masterHTTP); v != "" {
 		cfg.HTTPBase = normalizeHTTPBase(v)
@@ -1119,17 +1123,33 @@ func promptRunConfig(ctx context.Context, prompts *promptSession, cfg *ranConfig
 			}
 			if strings.EqualFold(strings.TrimSpace(cfg.IcebergEngine), "rest-go") {
 				cfg.IceConfig, err = promptStringField(ctx, prompts, promptFieldSpec{
-					Label: "Iceberg REST config file",
+					Label: "Iceberg defaults file (optional)",
 				}, cfg.IceConfig)
 				if err != nil {
 					return err
 				}
 			} else if strings.EqualFold(strings.TrimSpace(cfg.IcebergEngine), "ice") {
-				cfg.IceConfig, err = promptStringField(ctx, prompts, promptFieldSpec{Label: "ice config file"}, cfg.IceConfig)
+				cfg.IceConfig, err = promptStringField(ctx, prompts, promptFieldSpec{Label: "ice defaults file (optional)"}, cfg.IceConfig)
 				if err != nil {
 					return err
 				}
 			}
+		}
+		iceURI := ""
+		if cfg.IceOptions.URI != nil {
+			iceURI = *cfg.IceOptions.URI
+		}
+		iceURI, err = promptStringField(ctx, prompts, promptFieldSpec{
+			Label: "Iceberg REST catalog URI",
+			Note:  "May be omitted when the defaults file defines uri.",
+		}, iceURI)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(iceURI) == "" {
+			cfg.IceOptions.URI = nil
+		} else {
+			cfg.IceOptions.URI = &iceURI
 		}
 		if strings.TrimSpace(cfg.IceTable) == "" {
 			cfg.IceTable = defaultIceTable(*cfg)

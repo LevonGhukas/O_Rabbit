@@ -75,11 +75,12 @@ type runSubmitPerformanceRequest struct {
 }
 
 type runSubmitIcebergRequest struct {
-	Enabled       bool     `json:"enabled"`
-	Engine        string   `json:"engine"`
-	Table         string   `json:"table"`
-	ConfigYAML    string   `json:"config_yaml"`
-	PartitionKeys []string `json:"partition_keys"`
+	Enabled       bool                  `json:"enabled"`
+	Engine        string                `json:"engine"`
+	Table         string                `json:"table"`
+	ConfigYAML    string                `json:"config_yaml"` // optional defaults
+	Options       icebergreg.RunOptions `json:"options"`
+	PartitionKeys []string              `json:"partition_keys"`
 }
 
 type existingJobRunRequest struct {
@@ -119,9 +120,8 @@ type validatedRunSubmitSpec struct {
 	IcebergEnabled          bool
 	IcebergEngine           string
 	IcebergTable            string
-	IcebergConfigYAML       string
 	IcebergPartitionKeys    []string
-	ParsedIceConfig         icebergreg.IceYAML
+	IcebergRunConfig        icebergreg.RunConfig
 	ConsistencyMode         string
 	OrderedCursorSupported  bool
 	QuerySupported          bool
@@ -450,6 +450,7 @@ func (s *Server) handleRunSubmit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createRunForJobRequest(r *http.Request, jobID string, req runCreateRequest) (db.Run, []db.TaskInsert, error) {
+	registrationTargetFileSize := int64(0)
 	if len(req.RegistrationConfig) != 0 {
 		cfg, err := icebergreg.ParseRunConfig(req.RegistrationConfig)
 		if err != nil {
@@ -458,6 +459,7 @@ func (s *Server) createRunForJobRequest(r *http.Request, jobID string, req runCr
 		if !cfg.Enabled {
 			req.RegistrationConfig = explicitDisabledRunRegistrationConfig()
 		} else {
+			registrationTargetFileSize = cfg.TargetFileSize
 			raw, err := icebergreg.MarshalRunConfig(cfg)
 			if err != nil {
 				return db.Run{}, nil, fmt.Errorf("failed to prepare registration config: %w", err)
@@ -468,6 +470,22 @@ func (s *Server) createRunForJobRequest(r *http.Request, jobID string, req runCr
 	j, err := s.st.GetJob(r.Context(), jobID)
 	if err != nil {
 		return db.Run{}, nil, err
+	}
+	if registrationTargetFileSize > 0 {
+		options := map[string]any{}
+		if len(j.OptionsJSON) != 0 {
+			if err := json.Unmarshal(j.OptionsJSON, &options); err != nil {
+				return db.Run{}, nil, fmt.Errorf("failed to apply iceberg target_file_size: %w", err)
+			}
+		}
+		if options == nil {
+			options = map[string]any{}
+		}
+		options["target_file_bytes"] = registrationTargetFileSize
+		j.OptionsJSON, err = json.Marshal(options)
+		if err != nil {
+			return db.Run{}, nil, fmt.Errorf("failed to apply iceberg target_file_size: %w", err)
+		}
 	}
 
 	opts, _ := jobopts.Parse(j.OptionsJSON)
@@ -717,19 +735,31 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 			return validatedRunSubmitSpec{}, invalidSubmitField("iceberg.table", "iceberg.table must use namespace.table format", nil)
 		}
 		rawYAML := strings.TrimSpace(req.Iceberg.ConfigYAML)
-		if rawYAML == "" {
-			return validatedRunSubmitSpec{}, invalidSubmitField("iceberg.config_yaml", "iceberg.config_yaml is required when iceberg.enabled=true", nil)
+		iceCfg := icebergreg.IceYAML{}
+		if rawYAML != "" {
+			var err error
+			iceCfg, err = icebergreg.ParseIceYAMLBytes([]byte(rawYAML))
+			if err != nil {
+				return validatedRunSubmitSpec{}, invalidSubmitField("iceberg.config_yaml", "iceberg.config_yaml is not valid YAML", map[string]any{"cause": err.Error()})
+			}
 		}
-		iceCfg, err := icebergreg.ParseIceYAMLBytes([]byte(rawYAML))
+		runCfg, err := icebergreg.ResolveRunConfigWithOptions(true, icebergEngine, icebergTable, s3io.Config{
+			Endpoint:        targetEndpoint,
+			Region:          targetRegion,
+			Bucket:          targetBucket,
+			ForcePathStyle:  targetForcePathStyle,
+			AccessKeyID:     targetAccessKeyID,
+			SecretAccessKey: targetSecretAccessKey,
+		}, iceCfg, req.Iceberg.Options)
 		if err != nil {
-			return validatedRunSubmitSpec{}, invalidSubmitField("iceberg.config_yaml", "iceberg.config_yaml is not valid YAML", map[string]any{"cause": err.Error()})
+			return validatedRunSubmitSpec{}, invalidSubmitField("iceberg.options", "iceberg run options are invalid", map[string]any{"cause": err.Error()})
 		}
-		if strings.TrimSpace(iceCfg.URI) == "" {
-			return validatedRunSubmitSpec{}, invalidSubmitField("iceberg.config_yaml", "iceberg.config_yaml must define uri when iceberg.enabled=true", nil)
+		if icebergEngine == "ice" && rawYAML != "" {
+			runCfg.ConfigYAML = rawYAML
 		}
 		targetFileBytes := req.Performance.TargetFileBytes
-		if targetFileBytes == 0 && iceCfg.TargetFileSize > 0 {
-			targetFileBytes = iceCfg.TargetFileSize
+		if targetFileBytes == 0 && runCfg.TargetFileSize > 0 {
+			targetFileBytes = runCfg.TargetFileSize
 		}
 		return validatedRunSubmitSpec{
 			SourceEngine:            engine,
@@ -763,9 +793,8 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 			IcebergEnabled:          true,
 			IcebergEngine:           icebergEngine,
 			IcebergTable:            icebergTable,
-			IcebergConfigYAML:       rawYAML,
 			IcebergPartitionKeys:    req.Iceberg.PartitionKeys,
-			ParsedIceConfig:         iceCfg,
+			IcebergRunConfig:        runCfg,
 			ConsistencyMode:         consistencyMode,
 			OrderedCursorSupported:  true,
 			QuerySupported:          connectors.SupportsQueryMode(engine),
@@ -910,24 +939,7 @@ func buildFrontendRegistrationConfig(spec validatedRunSubmitSpec) (json.RawMessa
 	if !spec.IcebergEnabled {
 		return nil, nil
 	}
-	runCfg := icebergreg.ResolveRunConfig(
-		true,
-		spec.IcebergEngine,
-		spec.IcebergTable,
-		s3io.Config{
-			Endpoint:        spec.TargetEndpoint,
-			Region:          spec.TargetRegion,
-			Bucket:          spec.TargetBucket,
-			ForcePathStyle:  spec.TargetForcePathStyle,
-			AccessKeyID:     spec.TargetAccessKeyID,
-			SecretAccessKey: spec.TargetSecretAccessKey,
-		},
-		spec.ParsedIceConfig,
-	)
-	if spec.IcebergEngine == "ice" {
-		runCfg.ConfigYAML = spec.IcebergConfigYAML
-	}
-	return icebergreg.MarshalRunConfig(runCfg)
+	return icebergreg.MarshalRunConfig(spec.IcebergRunConfig)
 }
 
 func explicitDisabledRunRegistrationConfig() json.RawMessage {
@@ -962,15 +974,13 @@ func (s *Server) buildExistingJobRunRegistrationConfig(ctx context.Context, job 
 	}
 
 	rawYAML := strings.TrimSpace(req.ConfigYAML)
-	if rawYAML == "" {
-		return nil, invalidSubmitField("iceberg.config_yaml", "iceberg.config_yaml is required when iceberg.enabled=true", nil)
-	}
-	iceCfg, err := icebergreg.ParseIceYAMLBytes([]byte(rawYAML))
-	if err != nil {
-		return nil, invalidSubmitField("iceberg.config_yaml", "iceberg.config_yaml is not valid YAML", map[string]any{"cause": err.Error()})
-	}
-	if strings.TrimSpace(iceCfg.URI) == "" {
-		return nil, invalidSubmitField("iceberg.config_yaml", "iceberg.config_yaml must define uri when iceberg.enabled=true", nil)
+	iceCfg := icebergreg.IceYAML{}
+	if rawYAML != "" {
+		var err error
+		iceCfg, err = icebergreg.ParseIceYAMLBytes([]byte(rawYAML))
+		if err != nil {
+			return nil, invalidSubmitField("iceberg.config_yaml", "iceberg.config_yaml is not valid YAML", map[string]any{"cause": err.Error()})
+		}
 	}
 
 	engine := normalizedIcebergEngine(req.Engine)
@@ -1015,8 +1025,11 @@ func (s *Server) buildExistingJobRunRegistrationConfig(ctx context.Context, job 
 		return nil, err
 	}
 
-	runCfg := icebergreg.ResolveRunConfig(true, engine, table, baseS3, iceCfg)
-	if engine == "ice" {
+	runCfg, err := icebergreg.ResolveRunConfigWithOptions(true, engine, table, baseS3, iceCfg, req.Options)
+	if err != nil {
+		return nil, invalidSubmitField("iceberg.options", "iceberg run options are invalid", map[string]any{"cause": err.Error()})
+	}
+	if engine == "ice" && rawYAML != "" {
 		runCfg.ConfigYAML = rawYAML
 	}
 	return icebergreg.MarshalRunConfig(runCfg)

@@ -183,6 +183,58 @@ s3:
 	}
 }
 
+func TestBuildIcebergRegistrationSnapshotUsesRunOptionsWithoutDefaultsFile(t *testing.T) {
+	uri := "http://catalog:8181"
+	schemaEvolution := "additive"
+	targetFileSize := int64(128 * 1024 * 1024)
+	distributionMode := "hash"
+	metricsMode := "full"
+	partitions := []icebergreg.PartitionFieldConfig{{Source: "created_at", Transform: "day"}}
+	upsertEnabled := true
+	upsertKeys := []string{"id"}
+	upsertMode := "merge-on-read"
+
+	raw, err := buildIcebergRegistrationSnapshot(ranConfig{
+		AutoIceberg:       true,
+		IcebergEngine:     "rest-go",
+		IceTable:          "analytics.orders",
+		SourceEngine:      "postgres",
+		Table:             "public.orders",
+		S3Endpoint:        "http://minio:9000",
+		S3Region:          "us-east-1",
+		S3Bucket:          "bucket1",
+		S3ForcePathStyle:  true,
+		S3AccessKeyID:     "minioadmin",
+		S3SecretAccessKey: "miniosecret",
+		IceOptions: icebergreg.RunOptions{
+			URI:              &uri,
+			PartitionSpec:    &partitions,
+			SchemaEvolution:  &schemaEvolution,
+			TargetFileSize:   &targetFileSize,
+			DistributionMode: &distributionMode,
+			MetricsMode:      &metricsMode,
+			Upsert: icebergreg.RunUpsertOptions{
+				Enabled: &upsertEnabled,
+				Keys:    &upsertKeys,
+				Mode:    &upsertMode,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildIcebergRegistrationSnapshot: %v", err)
+	}
+	cfg, err := icebergreg.ParseRunConfig(raw)
+	if err != nil {
+		t.Fatalf("ParseRunConfig: %v", err)
+	}
+	if cfg.URI != uri || cfg.SchemaEvolution != "additive" || cfg.TargetFileSize != targetFileSize {
+		t.Fatalf("resolved config=%+v", cfg)
+	}
+	if len(cfg.PartitionSpec) != 1 || !cfg.Upsert.Enabled || len(cfg.Upsert.Keys) != 1 {
+		t.Fatalf("partition_spec=%+v upsert=%+v", cfg.PartitionSpec, cfg.Upsert)
+	}
+}
+
 func TestBuildIcebergRegistrationSnapshotPersistsRawConfigForIceEngine(t *testing.T) {
 	iceText := strings.TrimSpace(`
 uri: http://catalog:8181

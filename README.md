@@ -460,6 +460,18 @@ job:
   table: public.people
   id_column: id
   auto_tune: true
+
+iceberg:
+  enabled: true
+  engine: rest-go
+  table: demo.people
+  options:
+    uri: http://catalog:8181
+    schema_evolution: additive
+    target_file_size: 268435456
+    partition_spec:
+      - source: created_at
+        transform: day
 ```
 
 Submit and follow the run:
@@ -474,9 +486,37 @@ least one of `planned_tasks` or `chunk_size`. FlightSQL requires `source.sql`,
 `incremental: false`, `auto_tune: false`, no `id_column`, and no manual planning
 fields.
 
-### Iceberg table options
+### Iceberg defaults and per-run options
 
-The Iceberg YAML snapshot accepts table metadata and write policy options in
+`.ice.yaml` is optional and acts only as a defaults file. Every setting can be
+supplied for one run under `iceberg.options`; explicit run values win over the
+defaults file. The resolved configuration is persisted with the run, so retries
+do not depend on the file.
+
+The HTTP run endpoints use the same model:
+
+```json
+{
+  "iceberg": {
+    "enabled": true,
+    "engine": "rest-go",
+    "table": "demo.people",
+    "config_yaml": "uri: http://default-catalog:8181\n",
+    "options": {
+      "uri": "http://run-catalog:8181",
+      "schema_evolution": "additive",
+      "target_file_size": 268435456,
+      "upsert": {
+        "enabled": true,
+        "keys": ["id"],
+        "mode": "merge-on-read"
+      }
+    }
+  }
+}
+```
+
+The optional defaults file accepts table metadata and write policy options in
 addition to `uri`, `bearerToken`, and `s3`:
 
 ```yaml
