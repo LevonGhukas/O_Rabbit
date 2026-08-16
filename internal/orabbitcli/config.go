@@ -9,6 +9,7 @@ import (
 
 	"github.com/LevonGhukas/O_Rabbit/internal/connectors"
 	"github.com/LevonGhukas/O_Rabbit/internal/envutil"
+	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 	"github.com/LevonGhukas/O_Rabbit/internal/sysinfo"
 )
 
@@ -34,8 +35,9 @@ type ranConfig struct {
 	AutoIceberg   bool
 	IcebergEngine string // rest-go (default) or ice
 	IceBin        string // deprecated: master uses its in-container `ice` binary
-	IceConfig     string // e.g. '.ice.yaml' (persisted as a per-run registration snapshot)
+	IceConfig     string // optional defaults file, e.g. '.ice.yaml'
 	IceTable      string // e.g. 'mssql.Orders'
+	IceOptions    icebergreg.RunOptions
 
 	// Source
 	SourceName   string
