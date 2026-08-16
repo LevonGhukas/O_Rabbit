@@ -620,6 +620,64 @@ func TestAPIRunSubmitAdvancedPerformanceValuesArePreserved(t *testing.T) {
 	}
 }
 
+func TestAPIRunSubmitUsesIcebergTargetFileSizeForWorker(t *testing.T) {
+	st := openTestStore(t)
+	srv := newSubmitTestServer(st)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/submit", strings.NewReader(`{
+		"source": {
+			"engine": "postgres",
+			"dsn": "postgresql://user:pass@db:5432/app?sslmode=disable",
+			"table": "public.orders",
+			"cursor_column": "id"
+		},
+		"target": {
+			"s3_endpoint": "http://minio:9000",
+			"s3_bucket": "bucket1",
+			"s3_access_key_id": "minioadmin",
+			"s3_secret_access_key": "miniosecret"
+		},
+		"iceberg": {
+			"enabled": true,
+			"engine": "rest-go",
+			"table": "analytics.orders",
+			"config_yaml": "uri: http://default-catalog:8181\ntarget_file_size: 111111111\n",
+			"options": {
+				"uri": "http://run-catalog:8181",
+				"target_file_size": 123456789
+			}
+		}
+	}`))
+
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status=%d want=%d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var resp struct {
+		JobID string `json:"job_id"`
+	}
+	decodeJSONBody(t, rec, &resp)
+	job, err := st.GetJob(context.Background(), resp.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts, err := jobopts.Parse(job.OptionsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.TargetFileBytes != 123456789 {
+		t.Fatalf("target_file_bytes=%d want 123456789", opts.TargetFileBytes)
+	}
+	registration, err := icebergreg.ParseRunConfig(srv.lastRegistrationConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registration.URI != "http://run-catalog:8181" || registration.TargetFileSize != 123456789 {
+		t.Fatalf("resolved registration=%+v", registration)
+	}
+}
+
 func TestAPIRunSubmitResponseDoesNotIncludeSecrets(t *testing.T) {
 	st := openTestStore(t)
 	srv := newSubmitTestServer(st)
@@ -1098,7 +1156,7 @@ func TestAPIJobRunsInvalidModeReturnsValidationError(t *testing.T) {
 	}
 }
 
-func TestAPIJobRunsMissingConfigYAMLReturnsValidationError(t *testing.T) {
+func TestAPIJobRunsAcceptsRunOptionsWithoutConfigYAML(t *testing.T) {
 	st := openTestStore(t)
 	seedExistingJobRunFixture(t, st, "job-api-job-run-missing-yaml", true, true)
 	srv := newSubmitTestServer(st)
@@ -1109,19 +1167,52 @@ func TestAPIJobRunsMissingConfigYAMLReturnsValidationError(t *testing.T) {
 		"iceberg": {
 			"enabled": true,
 			"engine": "rest-go",
-			"table": "postgres.public__orders"
+			"table": "postgres.public__orders",
+			"options": {
+				"uri": "http://catalog:8181",
+				"schema_evolution": "additive",
+				"target_file_size": 134217728,
+				"partition_spec": [{"source": "created_at", "transform": "day"}],
+				"upsert": {"enabled": true, "keys": ["id"], "mode": "merge-on-read"}
+			}
 		}
 	}`))
 
 	srv.Handler().ServeHTTP(rec, req)
 
-	resp := decodeErrorResponse(t, rec)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d want=%d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status=%d want=%d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
 	}
-	details := detailsMap(t, resp.Error.Details)
-	if details["field"] != "iceberg.config_yaml" {
-		t.Fatalf("field=%v want iceberg.config_yaml", details["field"])
+	cfg, err := icebergreg.ParseRunConfig(srv.lastRegistrationConfig())
+	if err != nil {
+		t.Fatalf("ParseRunConfig: %v", err)
+	}
+	if cfg.URI != "http://catalog:8181" || cfg.SchemaEvolution != "additive" || cfg.TargetFileSize != 134217728 {
+		t.Fatalf("resolved run config=%+v", cfg)
+	}
+	if len(cfg.PartitionSpec) != 1 || cfg.PartitionSpec[0].Transform != "day" {
+		t.Fatalf("partition_spec=%+v", cfg.PartitionSpec)
+	}
+	if !cfg.Upsert.Enabled || len(cfg.Upsert.Keys) != 1 || cfg.Upsert.Keys[0] != "id" {
+		t.Fatalf("upsert=%+v", cfg.Upsert)
+	}
+	plannedOptions, err := jobopts.Parse(srv.lastPlannedJob().OptionsJSON)
+	if err != nil {
+		t.Fatalf("parse planned job options: %v", err)
+	}
+	if plannedOptions.TargetFileBytes != 134217728 {
+		t.Fatalf("planned target_file_bytes=%d want 134217728", plannedOptions.TargetFileBytes)
+	}
+	persistedJob, err := st.GetJob(context.Background(), "job-api-job-run-missing-yaml")
+	if err != nil {
+		t.Fatalf("get persisted job: %v", err)
+	}
+	persistedOptions, err := jobopts.Parse(persistedJob.OptionsJSON)
+	if err != nil {
+		t.Fatalf("parse persisted job options: %v", err)
+	}
+	if persistedOptions.TargetFileBytes == 134217728 {
+		t.Fatal("run target_file_size must not rewrite the persisted job")
 	}
 }
 
@@ -1241,6 +1332,7 @@ func validRunSubmitRequestForValidation() runSubmitRequest {
 type submitTestServer struct {
 	*Server
 	registrationConfig json.RawMessage
+	plannedJob         db.Job
 }
 
 func newSubmitTestServer(st *db.Store) *submitTestServer {
@@ -1248,6 +1340,7 @@ func newSubmitTestServer(st *db.Store) *submitTestServer {
 	ts := &submitTestServer{Server: srv}
 	srv.runPlanner = func(ctx context.Context, st *db.Store, k crypto.Key, job db.Job, registrationConfig json.RawMessage, audit *db.AuditRecord) (db.Run, []db.TaskInsert, error) {
 		ts.registrationConfig = append(json.RawMessage(nil), registrationConfig...)
+		ts.plannedJob = job
 		return db.Run{
 				ID:            "run-submit-test",
 				JobID:         job.ID,
@@ -1270,6 +1363,13 @@ func (s *submitTestServer) lastRegistrationConfig() json.RawMessage {
 		return nil
 	}
 	return append(json.RawMessage(nil), s.registrationConfig...)
+}
+
+func (s *submitTestServer) lastPlannedJob() db.Job {
+	if s == nil {
+		return db.Job{}
+	}
+	return s.plannedJob
 }
 
 func seedExistingJobRunFixture(t *testing.T, st *db.Store, jobID string, incremental bool, withJobRegistration bool) {
