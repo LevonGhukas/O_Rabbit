@@ -703,14 +703,9 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 		req.Performance.TargetRowsPerTask < 0 || req.Performance.TargetFileBytes < 0 {
 		return validatedRunSubmitSpec{}, invalidSubmitField("performance", "performance values must be >= 0", nil)
 	}
-	if !autoTune {
-		if req.Performance.MaxInFlightTasks < 1 {
-			return validatedRunSubmitSpec{}, invalidSubmitField("performance.max_in_flight_tasks", "performance.max_in_flight_tasks must be >= 1 when performance.auto_tune=false", nil)
-		}
-		if req.Performance.PlannedTasks < 1 {
-			return validatedRunSubmitSpec{}, invalidSubmitField("performance.planned_tasks", "performance.planned_tasks must be >= 1 when performance.auto_tune=false", nil)
-		}
-	}
+	// Manual file-size mode does not require callers to specify scheduler or
+	// range-planning internals. Zero means "infer"; positive values remain
+	// explicit advanced overrides.
 
 	consistencyMode := strings.TrimSpace(req.Consistency.Mode)
 	if consistencyMode == "" {

@@ -389,6 +389,41 @@ func TestAPIRunValidateRejectsNeitherTableNorQuery(t *testing.T) {
 	}
 }
 
+func TestAPIRunValidateManualFileTargetDoesNotRequirePlannerInternals(t *testing.T) {
+	req := validRunSubmitRequestForValidation()
+	manual := false
+	req.Performance.AutoTune = &manual
+	req.Performance.TargetFileBytes = 30 * 1024 * 1024
+
+	spec, err := validateRunSubmitRequest(req)
+	if err != nil {
+		t.Fatalf("manual file target should be accepted: %v", err)
+	}
+	if spec.MaxInFlightTasks != 0 || spec.PlannedTasks != 0 {
+		t.Fatalf("manual request unexpectedly acquired explicit internals: concurrency=%d planned=%d", spec.MaxInFlightTasks, spec.PlannedTasks)
+	}
+	if spec.TargetFileBytes != 30*1024*1024 {
+		t.Fatalf("target_file_bytes=%d", spec.TargetFileBytes)
+	}
+}
+
+func TestAPIRunValidateManualFileTargetPreservesAdvancedOverrides(t *testing.T) {
+	req := validRunSubmitRequestForValidation()
+	manual := false
+	req.Performance.AutoTune = &manual
+	req.Performance.TargetFileBytes = 30 * 1024 * 1024
+	req.Performance.MaxInFlightTasks = 3
+	req.Performance.PlannedTasks = 7
+
+	spec, err := validateRunSubmitRequest(req)
+	if err != nil {
+		t.Fatalf("manual file target with overrides: %v", err)
+	}
+	if spec.MaxInFlightTasks != 3 || spec.PlannedTasks != 7 {
+		t.Fatalf("overrides lost: concurrency=%d planned=%d", spec.MaxInFlightTasks, spec.PlannedTasks)
+	}
+}
+
 func TestAPIRunValidateAcceptsSimpleSelectQueryMode(t *testing.T) {
 	req := validRunSubmitRequestForValidation()
 	req.Source.Mode = "query"
