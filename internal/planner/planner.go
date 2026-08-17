@@ -616,7 +616,7 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 				"from_hwm":                        fromHWM,
 				"min_cursor":                      stats.MinValue,
 				"max_cursor":                      stats.MaxValue,
-				"auto_tune":                       true,
+				"auto_tune":                       o.AutoTune,
 				"row_count_estimate":              stats.RowCount,
 				"table_bytes_estimate":            stats.TableBytes,
 				"estimated_rows":                  autoTuneDetails.EstimatedRows,
@@ -827,7 +827,17 @@ type autoTuneDecision struct {
 }
 
 func autoTuneCursorPlanWithDecision(o jobopts.Options, domain connectors.CursorDomain, st connectors.CursorStats, localTarget bool, activeWorkers int) (jobopts.Options, autoTuneDecision) {
+	// Resolved values remain in job options for current-run scheduling, but are
+	// marked so a later run recalculates them from current source statistics and
+	// target-file policy instead of mistaking them for caller overrides.
+	if o.PlannedTasksWasInferred() {
+		o.PlannedTasks = 0
+	}
+	if o.MaxInFlightTasksWasInferred() {
+		o.MaxInFlightTasks = 0
+	}
 	explicitMaxInFlight := o.MaxInFlightTasks > 0
+	explicitPlannedTasks := o.PlannedTasks > 0
 	decision := autoTuneDecision{
 		EstimatedRows:     st.RowCount,
 		ActiveWorkers:     activeWorkers,
@@ -851,10 +861,16 @@ func autoTuneCursorPlanWithDecision(o jobopts.Options, domain connectors.CursorD
 	// PlannedTasks controls independent leased source ranges. It is a distinct
 	// advanced override from MaxInFlightTasks (scheduler concurrency) and from
 	// TargetFileBytes (physical Parquet file goal).
-	if o.PlannedTasks > 0 {
+	if explicitPlannedTasks {
 		decision.SelectedReason = "user_override"
 		decision.FinalPlannedTasks = o.PlannedTasks
 		decision.TargetFileBytes = o.TargetFileBytes
+		o.PlannedTasksSource = jobopts.PerformanceValueSourceExplicit
+		if explicitMaxInFlight {
+			o.MaxInFlightTasksSource = jobopts.PerformanceValueSourceExplicit
+		} else {
+			o.MaxInFlightTasksSource = jobopts.PerformanceValueSourceInferred
+		}
 		return o, decision
 	}
 
@@ -994,6 +1010,12 @@ func autoTuneCursorPlanWithDecision(o jobopts.Options, domain connectors.CursorD
 
 	decision.FinalPlannedTasks = o.PlannedTasks
 	decision.MaxInFlightTasks = o.MaxInFlightTasks
+	o.PlannedTasksSource = jobopts.PerformanceValueSourceInferred
+	if explicitMaxInFlight {
+		o.MaxInFlightTasksSource = jobopts.PerformanceValueSourceExplicit
+	} else {
+		o.MaxInFlightTasksSource = jobopts.PerformanceValueSourceInferred
+	}
 
 	return o, decision
 }

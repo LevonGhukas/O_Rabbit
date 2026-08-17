@@ -194,6 +194,18 @@ func TestMergeInto(t *testing.T) {
 	}
 }
 
+func TestMergeIntoPreservesPlanningProvenance(t *testing.T) {
+	got := (Options{
+		PlannedTasks:           8,
+		PlannedTasksSource:     PerformanceValueSourceInferred,
+		MaxInFlightTasks:       4,
+		MaxInFlightTasksSource: PerformanceValueSourceExplicit,
+	}).MergeInto(nil)
+	if got["planned_tasks_source"] != PerformanceValueSourceInferred || got["max_in_flight_tasks_source"] != PerformanceValueSourceExplicit {
+		t.Fatalf("provenance=%v", got)
+	}
+}
+
 func TestParseNilEqualsEmptyJSON(t *testing.T) {
 	nilOpts, err := Parse(nil)
 	if err != nil {

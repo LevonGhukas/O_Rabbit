@@ -1,11 +1,93 @@
 package planner
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/connectors"
 	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 )
+
+func TestInferredPlanningIsRecomputedAfterOptionsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	first, firstDecision := autoTuneCursorPlanWithDecision(jobopts.Options{
+		AutoTune:           false,
+		MaxInFlightTasks:   1,
+		MinTasksMultiplier: 1,
+		TargetFileBytes:    30 * 1024 * 1024,
+	}, connectors.CursorDomainInt64, connectors.CursorStats{
+		RowCount:   1_000_000,
+		TableBytes: 960 * 1024 * 1024,
+	}, false, 0)
+	if first.PlannedTasks != 8 || firstDecision.TaskTargetBytes != 120*1024*1024 {
+		t.Fatalf("first plan tasks=%d task_target=%d", first.PlannedTasks, firstDecision.TaskTargetBytes)
+	}
+	if first.PlannedTasksSource != jobopts.PerformanceValueSourceInferred {
+		t.Fatalf("planned source=%q", first.PlannedTasksSource)
+	}
+
+	raw, err := json.Marshal(first.MergeInto(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := jobopts.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulates a caller changing the target policy before the next run.
+	next.TargetFileBytes = 64 * 1024 * 1024
+	next, nextDecision := autoTuneCursorPlanWithDecision(next, connectors.CursorDomainInt64, connectors.CursorStats{
+		RowCount:   1_000_000,
+		TableBytes: 960 * 1024 * 1024,
+	}, false, 0)
+	if next.PlannedTasks != 4 || nextDecision.TaskTargetBytes != 256*1024*1024 {
+		t.Fatalf("next plan tasks=%d task_target=%d", next.PlannedTasks, nextDecision.TaskTargetBytes)
+	}
+}
+
+func TestExplicitPlanningSurvivesOptionsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	got, decision := autoTuneCursorPlanWithDecision(jobopts.Options{
+		AutoTune:           false,
+		MaxInFlightTasks:   2,
+		MinTasksMultiplier: 1,
+		PlannedTasks:       16,
+		TargetFileBytes:    64 * 1024 * 1024,
+	}, connectors.CursorDomainInt64, connectors.CursorStats{TableBytes: 960 * 1024 * 1024}, false, 0)
+	if got.PlannedTasks != 16 || decision.SelectedReason != "user_override" {
+		t.Fatalf("tasks=%d reason=%q", got.PlannedTasks, decision.SelectedReason)
+	}
+	if got.PlannedTasksSource != jobopts.PerformanceValueSourceExplicit || got.MaxInFlightTasksSource != jobopts.PerformanceValueSourceExplicit {
+		t.Fatalf("sources planned=%q concurrency=%q", got.PlannedTasksSource, got.MaxInFlightTasksSource)
+	}
+}
+
+func TestInferredConcurrencyDoesNotBecomeAnOverride(t *testing.T) {
+	t.Parallel()
+
+	first, _ := autoTuneCursorPlanWithDecision(jobopts.Options{
+		AutoTune:           false,
+		MinTasksMultiplier: 1,
+		TargetFileBytes:    30 * 1024 * 1024,
+	}, connectors.CursorDomainInt64, connectors.CursorStats{RowCount: 1_000_000}, false, 0)
+	if first.MaxInFlightTasks <= 0 || first.MaxInFlightTasksSource != jobopts.PerformanceValueSourceInferred {
+		t.Fatalf("first concurrency=%d source=%q", first.MaxInFlightTasks, first.MaxInFlightTasksSource)
+	}
+	raw, err := json.Marshal(first.MergeInto(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := jobopts.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, decision := autoTuneCursorPlanWithDecision(next, connectors.CursorDomainInt64, connectors.CursorStats{RowCount: 1_000_000}, false, 0)
+	if decision.SelectedMaxInFlightReason == "user_override" || next.MaxInFlightTasksSource != jobopts.PerformanceValueSourceInferred {
+		t.Fatalf("concurrency incorrectly treated as explicit: reason=%q source=%q", decision.SelectedMaxInFlightReason, next.MaxInFlightTasksSource)
+	}
+}
 
 func TestAutoTuneCursorPlanWithDecisionAdaptiveRowFallback(t *testing.T) {
 	t.Parallel()
