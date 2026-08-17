@@ -123,8 +123,8 @@ func TestParseDefaults(t *testing.T) {
 		t.Fatalf("target file bytes=%d", got.TargetFileBytes)
 	}
 
-	if got.PlannedTasks != 1 {
-		t.Fatalf("planned tasks=%d", got.PlannedTasks)
+	if got.PlannedTasks != 0 {
+		t.Fatalf("planned tasks=%d; zero means planner inference", got.PlannedTasks)
 	}
 }
 

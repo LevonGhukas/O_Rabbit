@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/parquetio"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -30,25 +31,19 @@ func TestParquetRollingWriterUsesManagedWorkspace(t *testing.T) {
 	}
 }
 
-func TestShouldRollParquetFile(t *testing.T) {
-	tests := []struct {
-		name            string
-		rows            int64
-		bytes           int64
-		targetFileBytes int64
-		want            bool
-	}{
-		{name: "empty file never rolls", rows: 0, bytes: 1024, targetFileBytes: 1, want: false},
-		{name: "target bytes threshold", rows: 10, bytes: 1024, targetFileBytes: 1024, want: true},
-		{name: "disabled thresholds", rows: 5, bytes: 10, want: false},
-		{name: "below thresholds", rows: 4, bytes: 1023, targetFileBytes: 2048, want: false},
+func TestParquetRollingDecisionUsesEncodedBytesAndAllowsBoundedOvershoot(t *testing.T) {
+	w := &parquetRollingWriter{
+		targetFileBytes:     100,
+		current:             &parquetio.Writer{},
+		currentRows:         1,
+		currentLogicalBytes: 1_000,
+		currentEncodedBytes: 100,
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldRollParquetFile(tt.rows, tt.bytes, tt.targetFileBytes); got != tt.want {
-				t.Fatalf("shouldRollParquetFile()=%v want %v", got, tt.want)
-			}
-		})
+	if w.shouldRollBefore(100) {
+		t.Fatal("expected a small next batch to be absorbed within the overshoot allowance")
+	}
+	if !w.shouldRollBefore(300) {
+		t.Fatal("expected rollover when predicted physical size exceeds the overshoot allowance")
 	}
 }
 

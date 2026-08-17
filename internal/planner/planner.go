@@ -598,15 +598,16 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 			emitPlanEvent(ctx, st, run.ID, "INFO", message, fields)
 		}
 
-		var autoTuneDetails autoTuneDecision
-		if o.AutoTune {
-			activeWorkers := activeWorkerCountBestEffort(ctx, st)
-			o, autoTuneDetails = autoTuneCursorPlanWithDecision(o, cv.Domain, stats, localTarget, activeWorkers)
-		}
+		// Both modes infer omitted task ranges and concurrency from the same safe
+		// planner heuristics. auto_tune controls whether the caller delegates the
+		// whole performance policy, not whether a manual file-size request must
+		// expose scheduler internals.
+		activeWorkers := activeWorkerCountBestEffort(ctx, st)
+		o, autoTuneDetails := autoTuneCursorPlanWithDecision(o, cv.Domain, stats, localTarget, activeWorkers)
 		_ = persistTunedOptionsBestEffort(ctx, st, job, o)
 
-		if o.AutoTune {
-			emitPlanEvent(ctx, st, run.ID, "INFO", "auto_tune", map[string]any{
+		{
+			emitPlanEvent(ctx, st, run.ID, "INFO", "performance_plan", map[string]any{
 				"source_mode":                     sourceMode,
 				"table":                           o.Table,
 				"query_hash":                      o.QueryHash,
@@ -622,6 +623,8 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 				"active_workers":                  autoTuneDetails.ActiveWorkers,
 				"table_bytes":                     autoTuneDetails.TableBytes,
 				"target_file_bytes":               autoTuneDetails.TargetFileBytes,
+				"task_target_bytes":               autoTuneDetails.TaskTargetBytes,
+				"files_per_task":                  autoTuneDetails.FilesPerTask,
 				"planning_max_in_flight_tasks":    autoTuneDetails.PlanningMaxInFlightTasks,
 				"max_in_flight_tasks":             autoTuneDetails.MaxInFlightTasks,
 				"planned_tasks":                   o.PlannedTasks,
@@ -632,6 +635,8 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 				"target_rows_per_task":            autoTuneDetails.TargetRowsPerTask,
 				"selected_fallback_rows_per_task": autoTuneDetails.SelectedFallbackRowsPerTask,
 				"selected_reason":                 autoTuneDetails.SelectedReason,
+				"task_count_explicit":             autoTuneDetails.SelectedReason == "user_override",
+				"concurrency_explicit":            autoTuneDetails.SelectedMaxInFlightReason == "user_override",
 				"min_tasks_multiplier":            o.MinTasksMultiplier,
 			})
 		}
@@ -800,6 +805,7 @@ const (
 	smallTableRowsThreshold   int64 = 1_000_000
 	mediumTableRowsThreshold  int64 = 10_000_000
 	defaultTargetFileBytes    int64 = 256 * 1024 * 1024
+	filesPerPlannedTask             = 4
 )
 
 type autoTuneDecision struct {
@@ -807,6 +813,8 @@ type autoTuneDecision struct {
 	ActiveWorkers               int
 	TableBytes                  int64
 	TargetFileBytes             int64
+	TaskTargetBytes             int64
+	FilesPerTask                int
 	TargetRowsPerTask           int64
 	SelectedFallbackRowsPerTask int64
 	PlannedTasksByBytes         int
@@ -840,7 +848,9 @@ func autoTuneCursorPlanWithDecision(o jobopts.Options, domain connectors.CursorD
 	decision.PlanningMaxInFlightTasks = o.MaxInFlightTasks
 	decision.MaxInFlightTasks = o.MaxInFlightTasks
 
-	// If caller already set both, don't override.
+	// PlannedTasks controls independent leased source ranges. It is a distinct
+	// advanced override from MaxInFlightTasks (scheduler concurrency) and from
+	// TargetFileBytes (physical Parquet file goal).
 	if o.PlannedTasks > 0 {
 		decision.SelectedReason = "user_override"
 		decision.FinalPlannedTasks = o.PlannedTasks
@@ -906,6 +916,12 @@ func autoTuneCursorPlanWithDecision(o jobopts.Options, domain connectors.CursorD
 		o.TargetFileBytes = targetFileBytes
 	}
 	decision.TargetFileBytes = targetFileBytes
+	taskTargetBytes := targetFileBytes * filesPerPlannedTask
+	if taskTargetBytes <= 0 || taskTargetBytes/filesPerPlannedTask != targetFileBytes {
+		taskTargetBytes = targetFileBytes
+	}
+	decision.TaskTargetBytes = taskTargetBytes
+	decision.FilesPerTask = filesPerPlannedTask
 
 	minTasks := int64(o.MaxInFlightTasks * o.MinTasksMultiplier)
 	if minTasks < int64(o.MaxInFlightTasks) {
@@ -919,7 +935,7 @@ func autoTuneCursorPlanWithDecision(o jobopts.Options, domain connectors.CursorD
 
 	// Primary: bytes-based
 	if estBytes > 0 {
-		tasks = int64(math.Ceil(float64(estBytes) / float64(targetFileBytes)))
+		tasks = int64(math.Ceil(float64(estBytes) / float64(taskTargetBytes)))
 		decision.PlannedTasksByBytes = int(tasks)
 	}
 
