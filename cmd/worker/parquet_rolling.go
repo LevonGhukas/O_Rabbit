@@ -215,11 +215,7 @@ func buildTaskParquetObjectKeys(runPrefix string, partNo int64, fileCount int) [
 	base := strings.TrimSuffix(strings.TrimSpace(runPrefix), "/")
 	keys := make([]string, 0, fileCount)
 	for i := 0; i < fileCount; i++ {
-		suffix := ""
-		if i > 0 {
-			suffix = fmt.Sprintf("-%03d", i)
-		}
-		keys = append(keys, fmt.Sprintf("%s/part-%06d%s.parquet", base, partNo, suffix))
+		keys = append(keys, fmt.Sprintf("%s/part-%06d-%03d.parquet", base, partNo, i))
 	}
 	return keys
 }

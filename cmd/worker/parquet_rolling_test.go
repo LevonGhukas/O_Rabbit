@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/parquetio"
@@ -47,16 +48,43 @@ func TestParquetRollingDecisionUsesEncodedBytesAndAllowsBoundedOvershoot(t *test
 	}
 }
 
-func TestBuildTaskParquetObjectKeys(t *testing.T) {
-	got := buildTaskParquetObjectKeys("exports/orders/_runs/run-1", 123, 3)
-	want := []string{
-		"exports/orders/_runs/run-1/part-000123.parquet",
-		"exports/orders/_runs/run-1/part-000123-001.parquet",
-		"exports/orders/_runs/run-1/part-000123-002.parquet",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("keys=%v want %v", got, want)
-	}
+func TestBuildTaskParquetObjectKeysUsesExplicitTaskAndFileIndexes(t *testing.T) {
+	t.Run("one file", func(t *testing.T) {
+		got := buildTaskParquetObjectKeys("exports/orders/_runs/run-1", 1, 1)
+		want := []string{"exports/orders/_runs/run-1/part-000001-000.parquet"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("keys=%v want %v", got, want)
+		}
+	})
+
+	t.Run("multiple files are deterministic and lexically sorted", func(t *testing.T) {
+		got := buildTaskParquetObjectKeys("exports/orders/_runs/run-1/", 123, 3)
+		want := []string{
+			"exports/orders/_runs/run-1/part-000123-000.parquet",
+			"exports/orders/_runs/run-1/part-000123-001.parquet",
+			"exports/orders/_runs/run-1/part-000123-002.parquet",
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("keys=%v want %v", got, want)
+		}
+		retry := buildTaskParquetObjectKeys("exports/orders/_runs/run-1", 123, 3)
+		if !reflect.DeepEqual(retry, want) {
+			t.Fatalf("retry keys=%v want %v", retry, want)
+		}
+		sorted := append([]string(nil), got...)
+		sort.Strings(sorted)
+		if !reflect.DeepEqual(sorted, got) {
+			t.Fatalf("keys are not lexically sorted: %v", got)
+		}
+	})
+
+	t.Run("task indexes remain distinct", func(t *testing.T) {
+		first := buildTaskParquetObjectKeys("exports/orders/_runs/run-1", 1, 1)
+		second := buildTaskParquetObjectKeys("exports/orders/_runs/run-1", 2, 1)
+		if first[0] != "exports/orders/_runs/run-1/part-000001-000.parquet" || second[0] != "exports/orders/_runs/run-1/part-000002-000.parquet" {
+			t.Fatalf("task keys=%v, %v", first, second)
+		}
+	})
 }
 
 func TestParquetRollingWriterCloseWithNoRowsProducesNoFiles(t *testing.T) {
