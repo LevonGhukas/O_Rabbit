@@ -630,3 +630,52 @@ func RowsToRecordBatches(rows *sql.Rows, cols []string, colTypes []*sql.ColumnTy
 	}
 	return rowsTotal, maxCursor, nil
 }
+
+// PlansFromSQLWithOverrides returns Arrow plans and schema updated with requested target types and nullability.
+func PlansFromSQLWithOverrides(cols []string, colTypes []*sql.ColumnType, targetTypes map[string]string) ([]ColumnPlan, *arrow.Schema, error) {
+	plans, schema, err := PlansFromSQL(cols, colTypes)
+	if err != nil || len(targetTypes) == 0 {
+		return plans, schema, err
+	}
+
+	fields := schema.Fields()
+	newFields := make([]arrow.Field, len(fields))
+	copy(newFields, fields)
+
+	for i, f := range fields {
+		if targetTypeStr, ok := targetTypes[f.Name]; ok && strings.TrimSpace(targetTypeStr) != "" {
+			tStr := strings.TrimSpace(targetTypeStr)
+			nullable := strings.HasPrefix(strings.ToLower(tStr), "nullable(")
+			
+			cleanType := tStr
+			if nullable {
+				cleanType = strings.TrimSuffix(strings.TrimPrefix(tStr, "Nullable("), ")")
+				cleanType = strings.TrimSuffix(strings.TrimPrefix(cleanType, "nullable("), ")")
+			}
+			
+			var arrowType arrow.DataType
+			switch strings.ToUpper(cleanType) {
+			case "INT", "INT32", "INTEGER":
+				arrowType = arrow.PrimitiveTypes.Int32
+			case "INT64", "BIGINT":
+				arrowType = arrow.PrimitiveTypes.Int64
+			case "FLOAT", "FLOAT32":
+				arrowType = arrow.PrimitiveTypes.Float32
+			case "FLOAT64", "DOUBLE":
+				arrowType = arrow.PrimitiveTypes.Float64
+			case "BOOLEAN", "BOOL":
+				arrowType = arrow.FixedWidthTypes.Boolean
+			case "DATE":
+				arrowType = arrow.FixedWidthTypes.Date32
+			case "DATETIME", "TIMESTAMP":
+				arrowType = arrow.FixedWidthTypes.Timestamp_us
+			default:
+				arrowType = arrow.BinaryTypes.String
+			}
+			
+			newFields[i] = arrow.Field{Name: f.Name, Type: arrowType, Nullable: nullable}
+		}
+	}
+
+	return plans, arrow.NewSchema(newFields, nil), nil
+}
