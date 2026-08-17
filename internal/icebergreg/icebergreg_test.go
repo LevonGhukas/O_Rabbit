@@ -202,6 +202,7 @@ func TestParsePartNumSupportsRolledTaskSuffixes(t *testing.T) {
 	}{
 		{key: "exports/orders/part-000123.parquet", want: 123, ok: true},
 		{key: "exports/orders/part-000123-001.parquet", want: 123, ok: true},
+		{key: "exports/orders/part-000123-000.parquet", want: 123, ok: true},
 		{key: "exports/orders/part-000123-bad.parquet", want: 0, ok: false},
 	}
 	for _, tt := range tests {
@@ -221,6 +222,7 @@ func TestParsePartFileIndexSupportsBaseAndRolledFiles(t *testing.T) {
 		{key: "exports/orders/part-000123.parquet", want: 0, ok: true},
 		{key: "exports/orders/part-000123-001.parquet", want: 1, ok: true},
 		{key: "exports/orders/part-000123-010.parquet", want: 10, ok: true},
+		{key: "exports/orders/part-000123-000.parquet", want: 0, ok: true},
 		{key: "exports/orders/part-000123-bad.parquet", want: 0, ok: false},
 	}
 	for _, tt := range tests {
