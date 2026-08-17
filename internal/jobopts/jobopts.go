@@ -29,6 +29,8 @@ type Options struct {
 	Query        string `json:"query,omitempty"`
 	QueryHash    string `json:"query_hash,omitempty"`
 	WhereClause  string `json:"where_clause,omitempty"`
+	SelectColumns []string          `json:"select_columns,omitempty"` 
+	ColumnTypes   map[string]string `json:"column_types,omitempty"` 
 	CursorColumn string `json:"cursor_column,omitempty"`
 	CursorDomain string `json:"cursor_domain,omitempty"`
 	PlannedTasks int    `json:"planned_tasks,omitempty"`
@@ -135,6 +137,12 @@ func (o Options) MergeInto(existing map[string]any) map[string]any {
 	m["query"] = strings.TrimSpace(o.Query)
 	m["query_hash"] = strings.TrimSpace(o.QueryHash)
 	m["where_clause"] = strings.TrimSpace(o.WhereClause)
+	if len(o.SelectColumns) > 0 {
+		m["select_columns"] = o.SelectColumns
+	}
+	if len(o.ColumnTypes) > 0 {
+		m["column_types"] = o.ColumnTypes
+	}
 	m["cursor_column"] = o.EffectiveCursorColumn()
 	m["cursor_domain"] = strings.TrimSpace(o.CursorDomain)
 	m["planned_tasks"] = o.PlannedTasks

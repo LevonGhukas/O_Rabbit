@@ -50,7 +50,9 @@ type partitionSpec struct {
 	LowerExclusive bool   `json:"lower_exclusive"`
 	UpperInclusive bool   `json:"upper_inclusive"`
 	OutputPart     int64  `json:"output_part"` 
-	WhereClause    string `json:"where_clause,omitempty"`
+	WhereClause    string `json:"where_clause,omitempty"` 
+	SelectColumns []string          `json:"select_columns,omitempty"` 
+	ColumnTypes   map[string]string `json:"column_types,omitempty"`
 	IDColumn       string `json:"id_column"` // legacy alias
 	From           int64  `json:"from"`      // legacy alias
 	To             int64  `json:"to"`        // legacy alias
@@ -1079,6 +1081,8 @@ func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 		LowerExclusive: ps.LowerExclusive,
 		UpperInclusive: ps.UpperInclusive,
 		WhereClause:    ps.WhereClause,
+		SelectColumns:  ps.SelectColumns,
+		ColumnTypes:    ps.ColumnTypes,
 	})
 	if err != nil {
 		return res, fmt.Errorf("query cursor partition: %w", err)

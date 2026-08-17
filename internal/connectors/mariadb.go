@@ -88,7 +88,7 @@ func (m *MariaDB) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []
 		args = append(args, upperArg)
 	}
 
-	query := fmt.Sprintf("SELECT * FROM %s", qt)
+	query := fmt.Sprintf("SELECT %s FROM %s", buildMariaDBSelectClause(q.SelectColumns), qt)
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -152,4 +152,25 @@ func mariadbOrderedRangeReadsEnabled() bool {
 		mariadbOrderedReads = true
 	})
 	return mariadbOrderedReads
+}
+
+func buildMariaDBSelectClause(cols []string) string {
+	if len(cols) == 0 {
+		return "*"
+	}
+	quoted := make([]string, 0, len(cols))
+	for _, c := range cols {
+		c = strings.TrimSpace(c)
+		if c != "" {
+			if q, err := quoteMySQLMultipartIdent(c); err == nil {
+				quoted = append(quoted, q)
+			} else {
+				quoted = append(quoted, c)
+			}
+		}
+	}
+	if len(quoted) == 0 {
+		return "*"
+	}
+	return strings.Join(quoted, ", ")
 }

@@ -54,7 +54,9 @@ type runSubmitSourceRequest struct {
 	Query        string `json:"query"`
 	CursorColumn string `json:"cursor_column"`
 	Incremental  bool   `json:"incremental"` 
-	WhereClause  string `json:"where_clause,omitempty"`
+	WhereClause  string `json:"where_clause,omitempty"` 
+	SelectColumns []string          `json:"select_columns,omitempty"` 
+	ColumnTypes   map[string]string `json:"column_types,omitempty"`
 }
 
 type runSubmitTargetRequest struct {
@@ -96,6 +98,8 @@ type validatedRunSubmitSpec struct {
 	SourceQuery             string
 	QueryHash               string
 	WhereClause             string
+	SelectColumns           []string
+	ColumnTypes             map[string]string
 	SourceName              string
 	CursorColumn            string
 	Incremental             bool
@@ -367,6 +371,8 @@ func (s *Server) handleRunValidate(w http.ResponseWriter, r *http.Request) {
 			"source_name":            spec.SourceName,
 			"query_hash":             spec.QueryHash,
 		"where_clause":           spec.WhereClause,
+		"select_columns":         spec.SelectColumns,
+		"column_types":           spec.ColumnTypes,
 			"target_connection_name": spec.TargetConnectionName,
 			"target_prefix":          spec.TargetPrefix,
 			"iceberg_table":          spec.IcebergTable,
@@ -738,6 +744,8 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 			SourceQuery:             sourceQuery,
 			QueryHash:               queryHash,
 			WhereClause:             strings.TrimSpace(req.Source.WhereClause),
+			SelectColumns:           req.Source.SelectColumns,
+			ColumnTypes:             req.Source.ColumnTypes,
 			SourceName:              sourceName,
 			CursorColumn:            cursorColumn,
 			Incremental:             req.Source.Incremental,
@@ -781,6 +789,8 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 		SourceQuery:             sourceQuery,
 		QueryHash:               queryHash,
 			WhereClause:             strings.TrimSpace(req.Source.WhereClause),
+			SelectColumns:           req.Source.SelectColumns,
+			ColumnTypes:             req.Source.ColumnTypes,
 		SourceName:              sourceName,
 		CursorColumn:            cursorColumn,
 		Incremental:             req.Source.Incremental,

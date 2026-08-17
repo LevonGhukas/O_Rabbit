@@ -37,6 +37,8 @@ type CursorQuery struct {
 	UpperInclusive  bool
 	SnapshotContext string
 	WhereClause     string
+	SelectColumns   []string
+	ColumnTypes     map[string]string
 }
 
 // SnapshotExporter allows exporting a consistent read snapshot (e.g. PG snapshot ID, Oracle SCN).
