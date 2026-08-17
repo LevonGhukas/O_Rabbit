@@ -84,17 +84,43 @@ func TestAutoTuneCursorPlanWithDecisionBytesBasedPlanningWins(t *testing.T) {
 		TableBytes: 500_000_000,
 	}, false, 0)
 
-	if got.PlannedTasks != 5 {
-		t.Fatalf("planned_tasks=%d want=5", got.PlannedTasks)
+	if got.PlannedTasks != 2 {
+		t.Fatalf("planned_tasks=%d want=2", got.PlannedTasks)
 	}
-	if decision.PlannedTasksByBytes != 5 {
-		t.Fatalf("planned_tasks_by_bytes=%d want=5", decision.PlannedTasksByBytes)
+	if decision.PlannedTasksByBytes != 2 {
+		t.Fatalf("planned_tasks_by_bytes=%d want=2", decision.PlannedTasksByBytes)
+	}
+	if decision.TaskTargetBytes != 400_000_000 || decision.FilesPerTask != 4 {
+		t.Fatalf("task target=%d files_per_task=%d", decision.TaskTargetBytes, decision.FilesPerTask)
 	}
 	if decision.PlannedTasksByRows != 10 {
 		t.Fatalf("planned_tasks_by_rows=%d want=10", decision.PlannedTasksByRows)
 	}
 	if decision.SelectedReason != "bytes_based" {
 		t.Fatalf("selected_reason=%q want %q", decision.SelectedReason, "bytes_based")
+	}
+}
+
+func TestManualFileSizePlanningInfersConcurrencyAndKeepsItIndependent(t *testing.T) {
+	t.Parallel()
+
+	got, decision := autoTuneCursorPlanWithDecision(jobopts.Options{
+		AutoTune:           false,
+		MinTasksMultiplier: 1,
+		TargetFileBytes:    30 * 1024 * 1024,
+	}, connectors.CursorDomainInt64, connectors.CursorStats{
+		RowCount:   1_000_000,
+		TableBytes: 480 * 1024 * 1024,
+	}, true, 3)
+
+	if decision.TaskTargetBytes != 120*1024*1024 || decision.FilesPerTask != 4 {
+		t.Fatalf("task target=%d files_per_task=%d", decision.TaskTargetBytes, decision.FilesPerTask)
+	}
+	if got.PlannedTasks < 4 {
+		t.Fatalf("planned_tasks=%d want at least bytes-derived count 4", got.PlannedTasks)
+	}
+	if got.MaxInFlightTasks != 3 || decision.SelectedMaxInFlightReason != "active_workers" {
+		t.Fatalf("inferred concurrency=%d reason=%q", got.MaxInFlightTasks, decision.SelectedMaxInFlightReason)
 	}
 }
 

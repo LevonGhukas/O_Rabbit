@@ -109,11 +109,9 @@ func Parse(raw json.RawMessage) (Options, error) {
 		o.TargetFileBytes = 256 * 1024 * 1024
 	}
 
-	if !o.AutoTune {
-		if o.PlannedTasks <= 0 && o.ChunkSize <= 0 {
-			o.PlannedTasks = 1
-		}
-	}
+	// A missing PlannedTasks deliberately remains zero.  It means "let the
+	// planner choose task ranges" in both automatic and manual file-size mode;
+	// it must not be confused with the worker file-size target.
 	return o, nil
 }
 
