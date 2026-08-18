@@ -200,6 +200,42 @@ func TestBuildQueryModeCursorSQLPostgres(t *testing.T) {
 	}
 }
 
+func TestBuildQueryModeCursorSQLOraclePreservesQuotedResultCase(t *testing.T) {
+	gotSQL, _, err := buildQueryModeCursorSQL("oracle", CursorQuery{
+		SourceQuery:  `SELECT "normal_column" FROM "APP"."ui_stress_test"`,
+		CursorColumn: "normal_column",
+		CursorDomain: CursorDomainInt64,
+	})
+	if err != nil {
+		t.Fatalf("buildQueryModeCursorSQL: %v", err)
+	}
+	wantSQL := `SELECT * FROM (SELECT "normal_column" FROM "APP"."ui_stress_test") orabbit_query ORDER BY orabbit_query."normal_column" ASC`
+	if gotSQL != wantSQL {
+		t.Fatalf("sql=%q want %q", gotSQL, wantSQL)
+	}
+}
+
+func TestBuildQueryModeCursorSQLOracleQuotesSpecialResultName(t *testing.T) {
+	gotSQL, _, err := buildQueryModeCursorSQL("oracle", CursorQuery{
+		SourceQuery:  `SELECT "column.with.dot" FROM "APP"."ui_stress_test"`,
+		CursorColumn: "column.with.dot",
+		CursorDomain: CursorDomainString,
+	})
+	if err != nil {
+		t.Fatalf("buildQueryModeCursorSQL: %v", err)
+	}
+	if !strings.Contains(gotSQL, `orabbit_query."column.with.dot"`) {
+		t.Fatalf("query cursor identifier was not preserved: %q", gotSQL)
+	}
+}
+
+func TestQueryResultColumnIndexPrefersExactCase(t *testing.T) {
+	columns := []string{"NORMAL_COLUMN", "normal_column"}
+	if got := queryResultColumnIndex(columns, "normal_column"); got != 1 {
+		t.Fatalf("column index=%d want exact-case index 1", got)
+	}
+}
+
 func TestIDColumnMatches(t *testing.T) {
 	if !idColumnMatches("RowId", "[dbo].[RowId]") {
 		t.Fatalf("expected RowId to match [dbo].[RowId]")
