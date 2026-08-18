@@ -1098,7 +1098,7 @@ func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 	)
 
 	convertStart := time.Now()
-	total, actualMaxCursor, err := arrowio.RowsToRecordBatches(rows, cols, colTypes, 50_000, alloc, cursorIdx, connectors.NormalizeCursorDomain(ps.CursorDomain), func(schema *arrow.Schema, rec arrow.RecordBatch) error {
+	total, actualMaxCursor, err := arrowio.RowsToRecordBatchesWithOverrides(rows, cols, colTypes, ps.ColumnTypes, 50_000, alloc, cursorIdx, connectors.NormalizeCursorDomain(ps.CursorDomain), func(schema *arrow.Schema, rec arrow.RecordBatch) error {
 		rowsRead += rec.NumRows()
 		if time.Since(lastProg) > 5*time.Second {
 			lastProg = time.Now()

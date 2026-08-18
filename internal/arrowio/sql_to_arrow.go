@@ -475,7 +475,11 @@ func asUint64(v any) (uint64, bool) {
 // The caller owns the record passed to onRecord (must call rec.Retain() if it needs it
 // after onRecord returns; the iterator will Release() it).
 func RowsToRecordBatches(rows *sql.Rows, cols []string, colTypes []*sql.ColumnType, batchSize int, alloc memory.Allocator, cursorIdx int, cursorDomain connectors.CursorDomain, onRecord func(schema *arrow.Schema, rec arrow.RecordBatch) error) (int64, string, error) {
-	plans, schema, err := PlansFromSQL(cols, colTypes)
+	return RowsToRecordBatchesWithOverrides(rows, cols, colTypes, nil, batchSize, alloc, cursorIdx, cursorDomain, onRecord)
+}
+
+func RowsToRecordBatchesWithOverrides(rows *sql.Rows, cols []string, colTypes []*sql.ColumnType, targetTypes map[string]string, batchSize int, alloc memory.Allocator, cursorIdx int, cursorDomain connectors.CursorDomain, onRecord func(schema *arrow.Schema, rec arrow.RecordBatch) error) (int64, string, error) {
+	plans, schema, err := PlansFromSQLWithOverrides(cols, colTypes, targetTypes)
 	if err != nil {
 		return 0, "", err
 	}
