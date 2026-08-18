@@ -657,27 +657,9 @@ func PlansFromSQLWithOverrides(cols []string, colTypes []*sql.ColumnType, target
 				cleanType = strings.TrimSuffix(strings.TrimPrefix(cleanType, "nullable("), ")")
 			}
 			
-			var arrowType arrow.DataType
-			switch strings.ToUpper(cleanType) {
-			case "INT", "INT32", "INTEGER":
-				arrowType = arrow.PrimitiveTypes.Int32
-			case "INT64", "BIGINT":
-				arrowType = arrow.PrimitiveTypes.Int64
-			case "FLOAT", "FLOAT32":
-				arrowType = arrow.PrimitiveTypes.Float32
-			case "FLOAT64", "DOUBLE":
-				arrowType = arrow.PrimitiveTypes.Float64
-			case "BOOLEAN", "BOOL":
-				arrowType = arrow.FixedWidthTypes.Boolean
-			case "DATE":
-				arrowType = arrow.FixedWidthTypes.Date32
-			case "DATETIME", "TIMESTAMP":
-				arrowType = arrow.FixedWidthTypes.Timestamp_us
-			default:
-				arrowType = arrow.BinaryTypes.String
-			}
-			
-			newFields[i] = arrow.Field{Name: f.Name, Type: arrowType, Nullable: nullable}
+			newPlan := planForSQLColumnType(f.Name, strings.ToUpper(cleanType), 0, 0, false)
+			plans[i] = newPlan
+			newFields[i] = arrow.Field{Name: f.Name, Type: newPlan.DataType, Nullable: nullable}
 		}
 	}
 
