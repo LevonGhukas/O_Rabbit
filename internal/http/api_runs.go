@@ -891,6 +891,9 @@ func buildFrontendJobRequest(spec validatedRunSubmitSpec, sourceConnectionID, ta
 		"iceberg_table":          spec.IcebergTable,
 		"iceberg_partition_keys": spec.IcebergPartitionKeys,
 		"consistency_mode":       spec.ConsistencyMode,
+		"where_clause":           spec.WhereClause,
+		"select_columns":         spec.SelectColumns,
+		"column_types":           spec.ColumnTypes,
 	}
 	options = icebergreg.MergeJobConfig(options, icebergreg.JobConfig{
 		Enabled: spec.IcebergEnabled,
