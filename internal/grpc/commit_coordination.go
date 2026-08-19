@@ -45,6 +45,9 @@ func (s *Server) ReconcileCommittingRuns(ctx context.Context) error {
 }
 
 func (s *Server) finalizeRunCommit(ctx context.Context, runID string) error {
+	if run, err := s.st.GetRun(ctx, runID); err == nil && run.Status == "SUCCEEDED" {
+		return nil
+	}
 	if err := s.commitRunFn(ctx, runID); err != nil {
 		class, retryable, operator, component := classifyCommitError(err)
 		_ = s.st.RecordCommitReconciliationFailure(ctx, runID, class, err.Error(), retryable, operator, s.nowFn(), db.CommitReconciliationPolicy{
