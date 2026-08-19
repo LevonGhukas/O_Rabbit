@@ -1051,6 +1051,9 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 	if err != nil {
 		return err
 	}
+	if run.Status == "SUCCEEDED" {
+		return nil
+	}
 	job, err := s.st.GetJob(ctx, run.JobID)
 	if err != nil {
 		return err
