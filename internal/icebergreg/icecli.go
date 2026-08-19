@@ -101,36 +101,35 @@ func WriteTempIceConfigForInsert(baseConfigYAML string, regS3 s3io.Config) (stri
 }
 
 func buildBaseIceConfigYAML(reg RunConfig) (string, error) {
+	root := map[string]any{}
 	if strings.TrimSpace(reg.ConfigYAML) != "" {
-		return reg.ConfigYAML, nil
+		if err := yaml.Unmarshal([]byte(reg.ConfigYAML), &root); err != nil {
+			return "", fmt.Errorf("parse persisted ice config: %w", err)
+		}
+		if root == nil {
+			root = map[string]any{}
+		}
 	}
-
-	if strings.TrimSpace(reg.URI) == "" {
+	hasResolvedCatalog := strings.TrimSpace(reg.URI) != ""
+	uri := strings.TrimSpace(reg.URI)
+	if uri == "" {
+		if persistedURI, ok := root["uri"].(string); ok {
+			uri = strings.TrimSpace(persistedURI)
+		}
+	}
+	if uri == "" {
 		return "", fmt.Errorf("missing persisted ice config content and missing iceberg rest uri in run registration config")
 	}
-
-	root := map[string]any{
-		"uri": strings.TrimSpace(reg.URI),
-	}
+	root["uri"] = uri
 	if token := strings.TrimSpace(reg.BearerToken); token != "" {
 		root["bearerToken"] = token
+	} else if hasResolvedCatalog {
+		delete(root, "bearerToken")
 	}
 
-	s3Cfg := map[string]any{}
-	if endpoint := strings.TrimSpace(reg.S3.Endpoint); endpoint != "" {
-		s3Cfg["endpoint"] = endpoint
+	if _, ok := root["s3"]; !ok {
+		root["s3"] = map[string]any{}
 	}
-	if region := strings.TrimSpace(reg.S3.Region); region != "" {
-		s3Cfg["region"] = region
-	}
-	s3Cfg["pathStyleAccess"] = reg.S3.PathStyleAccess
-	if accessKeyID := strings.TrimSpace(reg.S3.AccessKeyID); accessKeyID != "" {
-		s3Cfg["accessKeyID"] = accessKeyID
-	}
-	if secretAccessKey := strings.TrimSpace(reg.S3.SecretAccessKey); secretAccessKey != "" {
-		s3Cfg["secretAccessKey"] = secretAccessKey
-	}
-	root["s3"] = s3Cfg
 
 	out, err := yaml.Marshal(root)
 	if err != nil {

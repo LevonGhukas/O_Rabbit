@@ -598,15 +598,16 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 			emitPlanEvent(ctx, st, run.ID, "INFO", message, fields)
 		}
 
-		var autoTuneDetails autoTuneDecision
-		if o.AutoTune {
-			activeWorkers := activeWorkerCountBestEffort(ctx, st)
-			o, autoTuneDetails = autoTuneCursorPlanWithDecision(o, cv.Domain, stats, localTarget, activeWorkers)
-		}
+		// Both modes infer omitted task ranges and concurrency from the same safe
+		// planner heuristics. auto_tune controls whether the caller delegates the
+		// whole performance policy, not whether a manual file-size request must
+		// expose scheduler internals.
+		activeWorkers := activeWorkerCountBestEffort(ctx, st)
+		o, autoTuneDetails := autoTuneCursorPlanWithDecision(o, cv.Domain, stats, localTarget, activeWorkers)
 		_ = persistTunedOptionsBestEffort(ctx, st, job, o)
 
-		if o.AutoTune {
-			emitPlanEvent(ctx, st, run.ID, "INFO", "auto_tune", map[string]any{
+		{
+			emitPlanEvent(ctx, st, run.ID, "INFO", "performance_plan", map[string]any{
 				"source_mode":                     sourceMode,
 				"table":                           o.Table,
 				"query_hash":                      o.QueryHash,
@@ -615,15 +616,19 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 				"from_hwm":                        fromHWM,
 				"min_cursor":                      stats.MinValue,
 				"max_cursor":                      stats.MaxValue,
-				"auto_tune":                       true,
+				"auto_tune":                       o.AutoTune,
 				"row_count_estimate":              stats.RowCount,
 				"table_bytes_estimate":            stats.TableBytes,
 				"estimated_rows":                  autoTuneDetails.EstimatedRows,
 				"active_workers":                  autoTuneDetails.ActiveWorkers,
 				"table_bytes":                     autoTuneDetails.TableBytes,
 				"target_file_bytes":               autoTuneDetails.TargetFileBytes,
+				"task_target_bytes":               autoTuneDetails.TaskTargetBytes,
+				"files_per_task":                  autoTuneDetails.FilesPerTask,
 				"planning_max_in_flight_tasks":    autoTuneDetails.PlanningMaxInFlightTasks,
+				"effective_concurrency":           autoTuneDetails.EffectiveMinTaskConcurrency,
 				"max_in_flight_tasks":             autoTuneDetails.MaxInFlightTasks,
+				"minimum_tasks":                   autoTuneDetails.MinimumTasks,
 				"planned_tasks":                   o.PlannedTasks,
 				"final_planned_tasks":             autoTuneDetails.FinalPlannedTasks,
 				"planned_tasks_by_bytes":          autoTuneDetails.PlannedTasksByBytes,
@@ -632,6 +637,8 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 				"target_rows_per_task":            autoTuneDetails.TargetRowsPerTask,
 				"selected_fallback_rows_per_task": autoTuneDetails.SelectedFallbackRowsPerTask,
 				"selected_reason":                 autoTuneDetails.SelectedReason,
+				"task_count_explicit":             autoTuneDetails.SelectedReason == "user_override",
+				"concurrency_explicit":            autoTuneDetails.SelectedMaxInFlightReason == "user_override",
 				"min_tasks_multiplier":            o.MinTasksMultiplier,
 			})
 		}
@@ -818,6 +825,7 @@ const (
 	smallTableRowsThreshold   int64 = 1_000_000
 	mediumTableRowsThreshold  int64 = 10_000_000
 	defaultTargetFileBytes    int64 = 256 * 1024 * 1024
+	filesPerPlannedTask             = 4
 )
 
 type autoTuneDecision struct {
@@ -825,19 +833,39 @@ type autoTuneDecision struct {
 	ActiveWorkers               int
 	TableBytes                  int64
 	TargetFileBytes             int64
+	TaskTargetBytes             int64
+	FilesPerTask                int
 	TargetRowsPerTask           int64
 	SelectedFallbackRowsPerTask int64
 	PlannedTasksByBytes         int
 	PlannedTasksByRows          int
 	FinalPlannedTasks           int
 	PlanningMaxInFlightTasks    int
+	EffectiveMinTaskConcurrency int
 	MaxInFlightTasks            int
+	MinimumTasks                int64
 	SelectedMaxInFlightReason   string
 	SelectedReason              string
 }
 
 func autoTuneCursorPlanWithDecision(o jobopts.Options, domain connectors.CursorDomain, st connectors.CursorStats, localTarget bool, activeWorkers int) (jobopts.Options, autoTuneDecision) {
+	return autoTuneCursorPlanWithDecisionUsingHeuristic(o, domain, st, localTarget, activeWorkers, heuristicMaxInFlightTasks)
+}
+
+// autoTuneCursorPlanWithDecisionUsingHeuristic keeps the host heuristic injectable
+// for deterministic planner tests. Production always uses heuristicMaxInFlightTasks.
+func autoTuneCursorPlanWithDecisionUsingHeuristic(o jobopts.Options, domain connectors.CursorDomain, st connectors.CursorStats, localTarget bool, activeWorkers int, inferredMaxInFlight func(connectors.CursorStats, bool) int) (jobopts.Options, autoTuneDecision) {
+	// Resolved values remain in job options for current-run scheduling, but are
+	// marked so a later run recalculates them from current source statistics and
+	// target-file policy instead of mistaking them for caller overrides.
+	if o.PlannedTasksWasInferred() {
+		o.PlannedTasks = 0
+	}
+	if o.MaxInFlightTasksWasInferred() {
+		o.MaxInFlightTasks = 0
+	}
 	explicitMaxInFlight := o.MaxInFlightTasks > 0
+	explicitPlannedTasks := o.PlannedTasks > 0
 	decision := autoTuneDecision{
 		EstimatedRows:     st.RowCount,
 		ActiveWorkers:     activeWorkers,
@@ -850,7 +878,7 @@ func autoTuneCursorPlanWithDecision(o jobopts.Options, domain connectors.CursorD
 	// NOTE: MaxInFlightTasks controls *end-to-end* task concurrency (DB read + convert + upload).
 	// On local laptop stacks (SQL source + MinIO in Docker/Colima), high concurrency is often slower and less stable.
 	if o.MaxInFlightTasks <= 0 {
-		o.MaxInFlightTasks = heuristicMaxInFlightTasks(st, localTarget)
+		o.MaxInFlightTasks = inferredMaxInFlight(st, localTarget)
 		decision.SelectedMaxInFlightReason = "host_heuristic"
 	} else {
 		decision.SelectedMaxInFlightReason = "user_override"
@@ -858,11 +886,29 @@ func autoTuneCursorPlanWithDecision(o jobopts.Options, domain connectors.CursorD
 	decision.PlanningMaxInFlightTasks = o.MaxInFlightTasks
 	decision.MaxInFlightTasks = o.MaxInFlightTasks
 
-	// If caller already set both, don't override.
-	if o.PlannedTasks > 0 {
+	// Only inferred concurrency is constrained by the workers presently available.
+	// Keep the host-derived value for target-file policy and the max-task cap, but
+	// use the effective scheduler concurrency for the minimum task lower bound.
+	// An explicit user concurrency value remains authoritative.
+	effectiveMinTaskConcurrency := o.MaxInFlightTasks
+	if !explicitMaxInFlight && activeWorkers > 0 {
+		effectiveMinTaskConcurrency = minInt(effectiveMinTaskConcurrency, activeWorkers)
+	}
+	decision.EffectiveMinTaskConcurrency = effectiveMinTaskConcurrency
+
+	// PlannedTasks controls independent leased source ranges. It is a distinct
+	// advanced override from MaxInFlightTasks (scheduler concurrency) and from
+	// TargetFileBytes (physical Parquet file goal).
+	if explicitPlannedTasks {
 		decision.SelectedReason = "user_override"
 		decision.FinalPlannedTasks = o.PlannedTasks
 		decision.TargetFileBytes = o.TargetFileBytes
+		o.PlannedTasksSource = jobopts.PerformanceValueSourceExplicit
+		if explicitMaxInFlight {
+			o.MaxInFlightTasksSource = jobopts.PerformanceValueSourceExplicit
+		} else {
+			o.MaxInFlightTasksSource = jobopts.PerformanceValueSourceInferred
+		}
 		return o, decision
 	}
 
@@ -924,20 +970,27 @@ func autoTuneCursorPlanWithDecision(o jobopts.Options, domain connectors.CursorD
 		o.TargetFileBytes = targetFileBytes
 	}
 	decision.TargetFileBytes = targetFileBytes
+	taskTargetBytes := targetFileBytes * filesPerPlannedTask
+	if taskTargetBytes <= 0 || taskTargetBytes/filesPerPlannedTask != targetFileBytes {
+		taskTargetBytes = targetFileBytes
+	}
+	decision.TaskTargetBytes = taskTargetBytes
+	decision.FilesPerTask = filesPerPlannedTask
 
-	minTasks := int64(o.MaxInFlightTasks * o.MinTasksMultiplier)
-	if minTasks < int64(o.MaxInFlightTasks) {
-		minTasks = int64(o.MaxInFlightTasks)
+	minTasks := int64(effectiveMinTaskConcurrency) * int64(o.MinTasksMultiplier)
+	if minTasks < int64(effectiveMinTaskConcurrency) {
+		minTasks = int64(effectiveMinTaskConcurrency)
 	}
 	if minTasks < 1 {
 		minTasks = 1
 	}
+	decision.MinimumTasks = minTasks
 
 	var tasks int64 = 0
 
 	// Primary: bytes-based
 	if estBytes > 0 {
-		tasks = int64(math.Ceil(float64(estBytes) / float64(targetFileBytes)))
+		tasks = int64(math.Ceil(float64(estBytes) / float64(taskTargetBytes)))
 		decision.PlannedTasksByBytes = int(tasks)
 	}
 
@@ -986,8 +1039,8 @@ func autoTuneCursorPlanWithDecision(o jobopts.Options, domain connectors.CursorD
 		o.PlannedTasks = 1
 	}
 
-	// Keep planned_tasks and target_file_bytes behavior stable by computing them against the
-	// existing heuristic first. Once the final task count is known, align scheduler concurrency
+	// Keep target_file_bytes behavior stable by computing it against the existing
+	// heuristic. Once the final task count is known, align scheduler concurrency
 	// to active workers when the caller did not set max_in_flight_tasks explicitly.
 	if !explicitMaxInFlight && activeWorkers > 0 && o.PlannedTasks > 0 {
 		o.MaxInFlightTasks = minInt(o.PlannedTasks, activeWorkers)
@@ -996,6 +1049,12 @@ func autoTuneCursorPlanWithDecision(o jobopts.Options, domain connectors.CursorD
 
 	decision.FinalPlannedTasks = o.PlannedTasks
 	decision.MaxInFlightTasks = o.MaxInFlightTasks
+	o.PlannedTasksSource = jobopts.PerformanceValueSourceInferred
+	if explicitMaxInFlight {
+		o.MaxInFlightTasksSource = jobopts.PerformanceValueSourceExplicit
+	} else {
+		o.MaxInFlightTasksSource = jobopts.PerformanceValueSourceInferred
+	}
 
 	return o, decision
 }

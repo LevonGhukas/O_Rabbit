@@ -1429,7 +1429,8 @@ func (s *Store) ListEventsForRun(ctx context.Context, runID string, limit int) (
 }
 
 // MaxPartIndexForJob scans completed task outputs for a job and returns the max part number
-// found in object keys like ".../part-000123.parquet".
+// found in object keys like ".../part-000123-000.parquet". It also accepts
+// the legacy base-file form so existing completed runs remain visible.
 //
 // This is used to keep part numbering monotonically increasing when writing into a shared prefix.
 func (s *Store) MaxPartIndexForJob(ctx context.Context, jobID string) (int, error) {
@@ -1443,7 +1444,7 @@ func (s *Store) MaxPartIndexForJob(ctx context.Context, jobID string) (int, erro
 	}
 	defer rows.Close()
 
-	re := regexp.MustCompile(`part-(\d+)\.parquet`)
+	re := regexp.MustCompile(`(?:^|/)part-(\d+)(?:-\d+)?\.parquet$`)
 	max := 0
 	for rows.Next() {
 		var raw string

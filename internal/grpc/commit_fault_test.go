@@ -184,7 +184,7 @@ func newCommitFixtureWithOutput(t *testing.T, suffix string, registrationEnabled
 	st := openGRPCTestStore(t)
 	runID, jobID := "run-"+suffix, "job-"+suffix
 	prefix := "cert/" + suffix
-	parquetKey := prefix + "/_runs/run-" + runID + "/part-000001.parquet"
+	parquetKey := prefix + "/_runs/run-" + runID + "/part-000001-000.parquet"
 	datasetKey := dataset.StorageKey("http://minio:9000", "bucket1", prefix)
 	srcID, tgtID := "src-"+suffix, "tgt-"+suffix
 	srcSecret, err := crypto.Encrypt(crypto.Key{}, []byte(`{"dsn":"sqlserver://example"}`), []byte(srcID))

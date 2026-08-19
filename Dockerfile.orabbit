@@ -1,50 +1,123 @@
+# syntax=docker/dockerfile:1
+
 ARG ICE_VERSION=0.17.0
 
-FROM golang:1.25-bookworm AS source
+
+FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS source
 
 WORKDIR /src
 
 COPY go.mod go.sum ./
+
 RUN --mount=type=cache,id=orabbit-go-mod,target=/go/pkg/mod,sharing=locked \
     go mod download
 
 COPY cmd ./cmd
 COPY internal ./internal
 
+
+# ------------------------------------------------------------
+# Build master
+# ------------------------------------------------------------
+
 FROM source AS build-master
-RUN --mount=type=cache,id=orabbit-go-build,target=/root/.cache/go-build,sharing=locked \
+
+ARG TARGETOS
+ARG TARGETARCH
+
+RUN --mount=type=cache,id=orabbit-go-build-${TARGETOS}-${TARGETARCH},target=/root/.cache/go-build,sharing=locked \
     --mount=type=cache,id=orabbit-go-mod,target=/go/pkg/mod,sharing=locked \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/orabbit-master ./cmd/master
+    CGO_ENABLED=0 \
+    GOOS=${TARGETOS} \
+    GOARCH=${TARGETARCH} \
+    go build \
+      -trimpath \
+      -ldflags="-s -w" \
+      -o /out/orabbit-master \
+      ./cmd/master
+
+
+# ------------------------------------------------------------
+# Build worker
+# ------------------------------------------------------------
 
 FROM source AS build-worker
-RUN --mount=type=cache,id=orabbit-go-build,target=/root/.cache/go-build,sharing=locked \
+
+ARG TARGETOS
+ARG TARGETARCH
+
+RUN --mount=type=cache,id=orabbit-go-build-${TARGETOS}-${TARGETARCH},target=/root/.cache/go-build,sharing=locked \
     --mount=type=cache,id=orabbit-go-mod,target=/go/pkg/mod,sharing=locked \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/orabbit-worker ./cmd/worker
+    CGO_ENABLED=0 \
+    GOOS=${TARGETOS} \
+    GOARCH=${TARGETARCH} \
+    go build \
+      -trimpath \
+      -ldflags="-s -w" \
+      -o /out/orabbit-worker \
+      ./cmd/worker
+
+
+# ------------------------------------------------------------
+# Worker runtime base
+# ------------------------------------------------------------
 
 FROM debian:bookworm-slim AS runtime-base
+
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates tzdata \
-  && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tzdata \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /var/lib/orabbit
 
+
+# ------------------------------------------------------------
+# Ice binary
+# ------------------------------------------------------------
+
 ARG ICE_VERSION
+
 FROM altinity/ice:${ICE_VERSION} AS ice-bin
 
+
+# ------------------------------------------------------------
+# Master runtime base
+# ------------------------------------------------------------
+
 FROM eclipse-temurin:21-jre-jammy AS master-runtime-base
+
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates tzdata \
-  && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tzdata \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ice-bin /usr/local/bin/ice /usr/local/bin/ice
+
 RUN chmod +x /usr/local/bin/ice
 
 WORKDIR /var/lib/orabbit
 
+
+# ------------------------------------------------------------
+# Master
+# ------------------------------------------------------------
+
 FROM master-runtime-base AS master
+
 COPY --from=build-master /out/orabbit-master /usr/local/bin/orabbit-master
+
 ENTRYPOINT ["/usr/local/bin/orabbit-master"]
 
+
+# ------------------------------------------------------------
+# Worker
+# ------------------------------------------------------------
+
 FROM runtime-base AS worker
+
 COPY --from=build-worker /out/orabbit-worker /usr/local/bin/orabbit-worker
+
 ENTRYPOINT ["/usr/local/bin/orabbit-worker"]
