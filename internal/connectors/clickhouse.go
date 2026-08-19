@@ -51,7 +51,32 @@ func (c *ClickHouse) Close() error { return c.db.Close() }
 func (c *ClickHouse) DescribeQuery(ctx context.Context, query string) ([]string, []*sql.ColumnType, error) {
 	qctx, cancel := context.WithTimeout(ctx, clickHouseValidateTimeout)
 	defer cancel()
-	return describeQuery(qctx, c.db, "clickhouse", query)
+
+	columns, dataTypes, err := describeClickHouseQueryColumns(qctx, c.db, query)
+	if err != nil {
+		return nil, nil, err
+	}
+	probeSQL, err := buildClickHouseQueryTypeProbeSQL(dataTypes)
+	if err != nil {
+		return nil, nil, err
+	}
+	rows, err := c.db.QueryContext(qctx, probeSQL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("probe ClickHouse query result types: %w", err)
+	}
+	defer rows.Close()
+	columnTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(columns) != len(columnTypes) {
+		return nil, nil, fmt.Errorf(
+			"ClickHouse query metadata mismatch: columns=%d types=%d",
+			len(columns),
+			len(columnTypes),
+		)
+	}
+	return columns, columnTypes, nil
 }
 
 func (c *ClickHouse) DescribeTable(
@@ -243,7 +268,106 @@ func (c *ClickHouse) DiscoverCursorStats(ctx context.Context, table, cursorColum
 func (c *ClickHouse) ValidateQueryCursorColumn(ctx context.Context, query, cursorColumn string) (CursorColumnValidation, error) {
 	vctx, cancel := context.WithTimeout(ctx, clickHouseValidateTimeout)
 	defer cancel()
-	return validateQueryCursorColumn(vctx, c.db, "clickhouse", query, cursorColumn)
+
+	columns, dataTypes, err := describeClickHouseQueryColumns(vctx, c.db, query)
+	if err != nil {
+		return CursorColumnValidation{}, err
+	}
+	return validateClickHouseQueryCursorColumn(columns, dataTypes, cursorColumn), nil
+}
+
+func describeClickHouseQueryColumns(ctx context.Context, db *sql.DB, query string) ([]string, []string, error) {
+	sqlText, err := buildClickHouseDescribeQuerySQL(query)
+	if err != nil {
+		return nil, nil, err
+	}
+	rows, err := db.QueryContext(ctx, sqlText)
+	if err != nil {
+		return nil, nil, fmt.Errorf("describe ClickHouse query result: %w", err)
+	}
+	defer rows.Close()
+
+	describeColumns, err := rows.Columns()
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(describeColumns) < 2 {
+		return nil, nil, fmt.Errorf("ClickHouse DESCRIBE returned %d columns; expected at least name and type", len(describeColumns))
+	}
+
+	columns := make([]string, 0)
+	dataTypes := make([]string, 0)
+	for rows.Next() {
+		values := make([]sql.RawBytes, len(describeColumns))
+		dest := make([]any, len(describeColumns))
+		for i := range values {
+			dest[i] = &values[i]
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return nil, nil, err
+		}
+		name := strings.TrimSpace(string(values[0]))
+		dataType := strings.TrimSpace(string(values[1]))
+		if name == "" || dataType == "" {
+			return nil, nil, fmt.Errorf("ClickHouse DESCRIBE returned an empty column name or type")
+		}
+		columns = append(columns, name)
+		dataTypes = append(dataTypes, dataType)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return columns, dataTypes, nil
+}
+
+func buildClickHouseDescribeQuerySQL(query string) (string, error) {
+	sourceQuery, err := NormalizeReadOnlySQLQuery(query)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("DESCRIBE TABLE (%s);", sourceQuery), nil
+}
+
+func buildClickHouseQueryTypeProbeSQL(dataTypes []string) (string, error) {
+	if len(dataTypes) == 0 {
+		return "", fmt.Errorf("ClickHouse query returned no columns")
+	}
+	expressions := make([]string, 0, len(dataTypes))
+	for i, dataType := range dataTypes {
+		dataType = strings.TrimSpace(dataType)
+		if dataType == "" {
+			return "", fmt.Errorf("ClickHouse query returned an empty column type")
+		}
+		escapedType := strings.ReplaceAll(dataType, "'", "''")
+		expressions = append(
+			expressions,
+			fmt.Sprintf("defaultValueOfTypeName('%s') AS orabbit_column_%d", escapedType, i),
+		)
+	}
+	return "SELECT " + strings.Join(expressions, ", ") + ";", nil
+}
+
+func validateClickHouseQueryCursorColumn(columns, dataTypes []string, cursorColumn string) CursorColumnValidation {
+	out := CursorColumnValidation{}
+	leaf := identLeaf(cursorColumn)
+	for i, column := range columns {
+		if !cursorColumnMatches(column, leaf) {
+			continue
+		}
+		out.Found = true
+		out.ResolvedName = column
+		if i < len(dataTypes) {
+			out.DataType = strings.TrimSpace(dataTypes[i])
+			class := ClassifySQLCursorType(out.DataType)
+			out.Domain = class.Domain
+			out.Orderable = class.Orderable
+			out.RangeCapable = class.RangeCapable
+			out.NullableKnown = true
+			out.Nullable = strings.HasPrefix(strings.ToUpper(out.DataType), "NULLABLE(")
+		}
+		break
+	}
+	return out
 }
 func (c *ClickHouse) ValidateCursorColumn(
 	ctx context.Context,

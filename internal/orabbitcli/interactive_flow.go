@@ -46,6 +46,9 @@ func buildRunReviewSummary(cfg ranConfig, availableWorkers int, workersKnown boo
 	}
 	if cfg.AutoIceberg {
 		lines = append(lines, "Iceberg destination table: "+summaryOrUnknown(effectiveIceTable(cfg)))
+		if cfg.IceOptions.URI != nil {
+			lines = append(lines, "Iceberg REST catalog: "+summaryOrUnknown(*cfg.IceOptions.URI))
+		}
 	}
 	lines = append(lines,
 		"Automatic performance tuning: "+yesNo(cfg.AutoTune),
@@ -60,7 +63,7 @@ func buildRunReviewSummary(cfg ranConfig, availableWorkers int, workersKnown boo
 			"S3 prefix override: "+summaryOrUnknown(strings.TrimSpace(cfg.S3Prefix)),
 			"S3 force path style: "+yesNo(cfg.S3ForcePathStyle),
 			"Iceberg engine: "+summaryOrUnknown(registrationEngine(cfg)),
-			"Iceberg config file: "+summaryOrUnknown(cfg.IceConfig),
+			"Iceberg defaults file: "+summaryOrUnknown(cfg.IceConfig),
 		)
 		if !cfg.AutoTune {
 			lines = append(lines,

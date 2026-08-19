@@ -140,6 +140,7 @@ func TestMaxPartNumberSupportsRolledTaskSuffixes(t *testing.T) {
 	keys := []string{
 		"exports/orders/_runs/run-1/part-000001.parquet",
 		"exports/orders/_runs/run-1/part-000001-001.parquet",
+		"exports/orders/_runs/run-1/part-000002-000.parquet",
 		"exports/orders/_runs/run-1/part-000005-002.parquet",
 		"exports/orders/_runs/run-1/not-a-part.parquet",
 	}

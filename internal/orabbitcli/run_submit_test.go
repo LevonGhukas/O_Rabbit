@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 )
 
 func TestCmdRunSubmitFromFile(t *testing.T) {
@@ -38,6 +40,7 @@ func TestCmdRunSubmitFromFile(t *testing.T) {
 		mu          sync.Mutex
 		connections []capturedConnection
 		jobReq      capturedJob
+		runReq      runStartPayload
 	)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,6 +69,9 @@ func TestCmdRunSubmitFromFile(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"id":"job-1"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/jobs/job-1/runs":
+			if err := json.NewDecoder(r.Body).Decode(&runReq); err != nil {
+				t.Fatalf("decode run request: %v", err)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"run":{"id":"run-1"},"tasks":[{},{}]}`)
 		default:
@@ -101,6 +107,28 @@ job:
   auto_tune: true
   max_in_flight_tasks: 8
   target_rows_per_task: 200000
+iceberg:
+  enabled: true
+  engine: rest-go
+  table: analytics.orders
+  options:
+    uri: http://catalog:8181
+    partition_spec:
+      - source: CreatedAt
+        transform: day
+    schema_evolution: additive
+    target_file_size: 134217728
+    distribution_mode: hash
+    metrics_mode: full
+    metadata_retention:
+      min_snapshots_to_keep: 3
+    upsert:
+      enabled: true
+      keys: [RowId]
+      mode: merge-on-read
+    credential_vending:
+      enabled: true
+      required: true
 `, server.URL))
 
 	code, stdout, stderr := captureCommandOutput(t, func() int {
@@ -157,6 +185,19 @@ job:
 	}
 	if got := int(jobReq.OptionsJSON["max_in_flight_tasks"].(float64)); got != 8 {
 		t.Fatalf("max_in_flight_tasks=%d want=8", got)
+	}
+	if got := int64(jobReq.OptionsJSON["target_file_bytes"].(float64)); got != 134217728 {
+		t.Fatalf("target_file_bytes=%d want=134217728", got)
+	}
+	registration, err := icebergreg.ParseRunConfig(runReq.RegistrationConfig)
+	if err != nil {
+		t.Fatalf("ParseRunConfig: %v", err)
+	}
+	if registration.URI != "http://catalog:8181" || registration.Table != "analytics.orders" || registration.SchemaEvolution != "additive" {
+		t.Fatalf("registration=%+v", registration)
+	}
+	if len(registration.PartitionSpec) != 1 || !registration.Upsert.Enabled || !registration.CredentialVending.Required {
+		t.Fatalf("partition_spec=%+v upsert=%+v vending=%+v", registration.PartitionSpec, registration.Upsert, registration.CredentialVending)
 	}
 }
 

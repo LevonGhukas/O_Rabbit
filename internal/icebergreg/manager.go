@@ -420,11 +420,11 @@ func (m *Manager) registerVerifiedEmpty(ctx context.Context, req RunRequest, reg
 			return RunResult{}, err
 		}
 		if action == "REPLACE_EMPTY" {
-			if err := replaceRESTGoTableWithEmpty(ctx, tbl, req); err != nil {
+			if err := replaceRESTGoTableWithEmpty(ctx, tbl, req, reg, table); err != nil {
 				return RunResult{}, err
 			}
 		} else {
-			if _, err := createRESTGoTable(ctx, cat, ident, req, basePrefix); err != nil {
+			if _, err := createRESTGoTable(ctx, cat, ident, req, reg, basePrefix); err != nil {
 				return RunResult{}, err
 			}
 		}
@@ -521,7 +521,7 @@ func openRESTCatalog(ctx context.Context, req RunRequest, reg RunConfig, regS3 s
 	cat, err := restcatalog.NewCatalog(ctx, "rest", uri,
 		restcatalog.WithOAuthToken(strings.TrimSpace(reg.BearerToken)),
 		restcatalog.WithWarehouseLocation("s3://"+req.DatasetS3.Bucket),
-		restcatalog.WithAdditionalProps(icebergRegistrationS3Props(regS3)),
+		restcatalog.WithAdditionalProps(icebergRegistrationS3Props(regS3, reg.CredentialVending.Required)),
 	)
 	if err != nil {
 		return nil, nil, err
@@ -545,7 +545,7 @@ func openRESTCatalog(ctx context.Context, req RunRequest, reg RunConfig, regS3 s
 	return cat, ident, nil
 }
 
-func replaceRESTGoTableWithEmpty(ctx context.Context, tbl *icetable.Table, req RunRequest) error {
+func replaceRESTGoTableWithEmpty(ctx context.Context, tbl *icetable.Table, req RunRequest, reg RunConfig, table string) error {
 	var existingFiles []string
 	if snap := tbl.CurrentSnapshot(); snap != nil {
 		fs, err := tbl.FS(ctx)
@@ -566,12 +566,38 @@ func replaceRESTGoTableWithEmpty(ctx context.Context, tbl *icetable.Table, req R
 			}
 		}
 	}
+	schemaTx := tbl.NewTransaction()
+	var sourceSchema *iceberg.Schema
+	var err error
+	if reg.SchemaEvolution == "additive" {
+		sourceSchema, err = inferRunIcebergSchema(ctx, req, table)
+		if err != nil {
+			return err
+		}
+	}
+	if err := applySchemaOptions(schemaTx, tbl.Schema(), sourceSchema, reg); err != nil {
+		return err
+	}
+	tbl, err = schemaTx.Commit(ctx)
+	if err != nil {
+		return err
+	}
 	tx := tbl.NewTransaction()
+	currentSpec := tbl.Spec()
+	if err := applyPartitionSpec(tx, &currentSpec, reg.PartitionSpec, tbl.Schema()); err != nil {
+		return err
+	}
+	if err := tx.SetProperties(tableOptionProperties(reg)); err != nil {
+		return err
+	}
+	if err := applyMetadataRetention(tx, reg.MetadataRetention); err != nil {
+		return err
+	}
 	identity := OperationIdentity{RegistrationID: req.RegistrationID, RunID: req.RunID, CommitID: req.CommitID, ArtifactSetDigest: req.ArtifactSetDigest, ManifestKey: req.ManifestKey}
 	if err := applyRESTGoFileMutation(ctx, tx, true, existingFiles, nil, iceberg.Properties(identity.Properties())); err != nil {
 		return err
 	}
-	_, err := tx.Commit(ctx)
+	_, err = tx.Commit(ctx)
 	return err
 }
 
@@ -855,7 +881,7 @@ func normalizeLocalhost(raw string) string {
 	return raw
 }
 
-func icebergRegistrationS3Props(regS3 s3io.Config) iceberg.Properties {
+func icebergRegistrationS3Props(regS3 s3io.Config, credentialVending bool) iceberg.Properties {
 	props := iceberg.Properties{}
 	if ep := strings.TrimSuffix(strings.TrimSpace(regS3.Endpoint), "/"); ep != "" {
 		props["s3.endpoint"] = normalizeLocalhost(ep)
@@ -863,11 +889,13 @@ func icebergRegistrationS3Props(regS3 s3io.Config) iceberg.Properties {
 	if region := strings.TrimSpace(regS3.Region); region != "" {
 		props["s3.region"] = region
 	}
-	if accessKey := strings.TrimSpace(regS3.AccessKeyID); accessKey != "" {
-		props["s3.access-key-id"] = accessKey
-	}
-	if secretKey := strings.TrimSpace(regS3.SecretAccessKey); secretKey != "" {
-		props["s3.secret-access-key"] = secretKey
+	if !credentialVending {
+		if accessKey := strings.TrimSpace(regS3.AccessKeyID); accessKey != "" {
+			props["s3.access-key-id"] = accessKey
+		}
+		if secretKey := strings.TrimSpace(regS3.SecretAccessKey); secretKey != "" {
+			props["s3.secret-access-key"] = secretKey
+		}
 	}
 	if regS3.ForcePathStyle {
 		props["s3.force-virtual-addressing"] = "false"
@@ -878,81 +906,24 @@ func icebergRegistrationS3Props(regS3 s3io.Config) iceberg.Properties {
 }
 
 func prepareRESTGoTable(ctx context.Context, log *slog.Logger, req RunRequest, reg RunConfig, table string, regS3 s3io.Config, basePrefix string) (*icetable.Table, error) {
-	uri := normalizeLocalhost(reg.URI)
-	token := strings.TrimSpace(reg.BearerToken)
-	if uri == "" {
-		return nil, fmt.Errorf("missing iceberg rest uri in persisted run registration config")
-	}
-	if parsed, err := url.Parse(uri); err == nil {
-		parsed.Path = strings.TrimSuffix(parsed.Path, "/v1")
-		parsed.Path = strings.TrimSuffix(parsed.Path, "/")
-		uri = parsed.String()
-	}
-
 	if strings.TrimSpace(os.Getenv("AWS_EC2_METADATA_DISABLED")) == "" {
 		_ = os.Setenv("AWS_EC2_METADATA_DISABLED", "true")
 	}
-
-	cat, err := restcatalog.NewCatalog(ctx, "rest", uri,
-		restcatalog.WithOAuthToken(token),
-		restcatalog.WithWarehouseLocation("s3://"+req.DatasetS3.Bucket),
-		restcatalog.WithAdditionalProps(icebergRegistrationS3Props(regS3)),
-	)
+	cat, ident, err := openRESTCatalog(ctx, req, reg, regS3, table)
 	if err != nil {
 		return nil, err
 	}
-
-	parts := strings.Split(table, ".")
-	for i := range parts {
-		parts[i] = strings.TrimSpace(parts[i])
-	}
-	if len(parts) < 2 {
-		return nil, fmt.Errorf("invalid iceberg table %q (expected namespace.table)", table)
-	}
-
-	ident := icetable.Identifier(parts)
-	ns := ident[:len(ident)-1]
-	if ok, err := cat.CheckNamespaceExists(ctx, ns); err == nil && !ok {
-		if err := cat.CreateNamespace(ctx, ns, iceberg.Properties{}); err != nil {
-			return nil, err
-		}
-	} else if err != nil {
-		return nil, err
-	}
-
-	return loadOrCreateRESTGoTable(ctx, log, cat, ident, req, table, basePrefix)
+	return loadOrCreateRESTGoTable(ctx, log, cat, ident, req, reg, table, basePrefix)
 }
 
 // dropAndRecreateCatalogTable drops the Iceberg table via the REST catalog and
 // immediately recreates it empty. Used during Full Refresh for the ice engine
 // so that the subsequent ice insert appends into a clean snapshot.
 func dropAndRecreateCatalogTable(ctx context.Context, log *slog.Logger, req RunRequest, reg RunConfig, table string, regS3 s3io.Config, basePrefix string) error {
-	uri := normalizeLocalhost(reg.URI)
-	token := strings.TrimSpace(reg.BearerToken)
-	if uri == "" {
-		return fmt.Errorf("missing iceberg rest uri in persisted run registration config")
-	}
-	if parsed, err := url.Parse(uri); err == nil {
-		parsed.Path = strings.TrimSuffix(parsed.Path, "/v1")
-		parsed.Path = strings.TrimSuffix(parsed.Path, "/")
-		uri = parsed.String()
-	}
-	cat, err := restcatalog.NewCatalog(ctx, "rest", uri,
-		restcatalog.WithOAuthToken(token),
-		restcatalog.WithWarehouseLocation("s3://"+req.DatasetS3.Bucket),
-		restcatalog.WithAdditionalProps(icebergRegistrationS3Props(regS3)),
-	)
+	cat, ident, err := openRESTCatalog(ctx, req, reg, regS3, table)
 	if err != nil {
 		return err
 	}
-	parts := strings.Split(table, ".")
-	for i := range parts {
-		parts[i] = strings.TrimSpace(parts[i])
-	}
-	if len(parts) < 2 {
-		return fmt.Errorf("invalid iceberg table %q (expected namespace.table)", table)
-	}
-	ident := icetable.Identifier(parts)
 	if dropErr := cat.DropTable(ctx, ident); dropErr != nil && !errors.Is(dropErr, icecatalog.ErrNoSuchTable) {
 		return fmt.Errorf("drop iceberg table %s: %w", table, dropErr)
 	}
@@ -960,7 +931,7 @@ func dropAndRecreateCatalogTable(ctx context.Context, log *slog.Logger, req RunR
 		slog.String("run_id", req.RunID),
 		slog.String("table", table),
 	)
-	_, err = createRESTGoTable(ctx, cat, ident, req, basePrefix)
+	_, err = createRESTGoTable(ctx, cat, ident, req, reg, basePrefix)
 	return err
 }
 
@@ -985,7 +956,29 @@ func runRESTGoRegister(ctx context.Context, log *slog.Logger, req RunRequest, re
 	)
 
 	tx := tbl.NewTransaction()
+	currentSpec := tbl.Spec()
+	if err := applyPartitionSpec(tx, &currentSpec, reg.PartitionSpec, tbl.Schema()); err != nil {
+		return err
+	}
+	if err := tx.SetProperties(tableOptionProperties(reg)); err != nil {
+		return err
+	}
+	if err := applyMetadataRetention(tx, reg.MetadataRetention); err != nil {
+		return err
+	}
 	identity := OperationIdentity{RegistrationID: req.RegistrationID, RunID: req.RunID, CommitID: req.CommitID, ArtifactSetDigest: req.ArtifactSetDigest, ManifestKey: req.ManifestKey}
+	snapshotProperties := iceberg.Properties(identity.Properties())
+	if reg.Upsert.Enabled && !isFullRefresh && tbl.CurrentSnapshot() != nil {
+		filter, err := buildUpsertDeleteFilter(ctx, tbl, newFiles, reg.Upsert.Keys)
+		if err != nil {
+			return err
+		}
+		if !filter.Equals(iceberg.AlwaysFalse{}) {
+			if err := tx.Delete(ctx, filter, snapshotProperties); err != nil {
+				return fmt.Errorf("iceberg upsert delete existing rows: %w", err)
+			}
+		}
+	}
 	var existingFiles []string
 	if isFullRefresh {
 		// Collect all existing data files from the current snapshot so we can
@@ -1017,7 +1010,25 @@ func runRESTGoRegister(ctx context.Context, log *slog.Logger, req RunRequest, re
 			slog.Int("files_to_add", len(newFiles)),
 		)
 	}
-	if err := applyRESTGoFileMutation(ctx, tx, isFullRefresh, existingFiles, newFiles, iceberg.Properties(identity.Properties())); err != nil {
+	partitionedTable := !currentSpec.IsUnpartitioned() || len(reg.PartitionSpec) > 0
+	if partitionedTable {
+		fs, err := tbl.FS(ctx)
+		if err != nil {
+			return err
+		}
+		reader, err := newParquetRecordReader(ctx, fs, newFiles)
+		if err != nil {
+			return err
+		}
+		defer reader.Release()
+		if isFullRefresh {
+			if err := tx.Overwrite(ctx, reader, snapshotProperties); err != nil {
+				return fmt.Errorf("iceberg partitioned full refresh: %w", err)
+			}
+		} else if err := tx.Append(ctx, reader, snapshotProperties); err != nil {
+			return fmt.Errorf("iceberg partitioned append: %w", err)
+		}
+	} else if err := applyRESTGoFileMutation(ctx, tx, isFullRefresh, existingFiles, newFiles, snapshotProperties); err != nil {
 		return err
 	}
 	_, err = tx.Commit(ctx)
@@ -1042,13 +1053,31 @@ func applyRESTGoFileMutation(ctx context.Context, tx restGoFileMutation, fullRef
 	return nil
 }
 
-func loadOrCreateRESTGoTable(ctx context.Context, log *slog.Logger, cat *restcatalog.Catalog, ident icetable.Identifier, req RunRequest, table, basePrefix string) (*icetable.Table, error) {
+func loadOrCreateRESTGoTable(ctx context.Context, log *slog.Logger, cat *restcatalog.Catalog, ident icetable.Identifier, req RunRequest, reg RunConfig, table, basePrefix string) (*icetable.Table, error) {
 	tbl, err := cat.LoadTable(ctx, ident)
 	if err == nil {
-		return tbl, nil
+		if reg.Upsert.Enabled && tbl.Metadata().Version() < 2 {
+			return nil, fmt.Errorf("upsert requires Iceberg format version 2 or newer")
+		}
+		var sourceSchema *iceberg.Schema
+		if reg.SchemaEvolution == "additive" {
+			sourceSchema, err = inferRunIcebergSchema(ctx, req, table)
+			if err != nil {
+				return nil, err
+			}
+		}
+		schemaTx := tbl.NewTransaction()
+		if err := applySchemaOptions(schemaTx, tbl.Schema(), sourceSchema, reg); err != nil {
+			return nil, err
+		}
+		tbl, err = schemaTx.Commit(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return applySortOrder(ctx, cat, ident, tbl, reg.SortOrder)
 	}
 	if errors.Is(err, icecatalog.ErrNoSuchTable) {
-		return createRESTGoTable(ctx, cat, ident, req, basePrefix)
+		return createRESTGoTable(ctx, cat, ident, req, reg, basePrefix)
 	}
 
 	tableLoc := restGoTableLocation(req.DatasetS3.Bucket, basePrefix)
@@ -1064,10 +1093,41 @@ func loadOrCreateRESTGoTable(ctx context.Context, log *slog.Logger, cat *restcat
 	if dropErr := cat.DropTable(ctx, ident); dropErr != nil && !errors.Is(dropErr, icecatalog.ErrNoSuchTable) {
 		return nil, fmt.Errorf("drop broken iceberg table %s: %w", table, dropErr)
 	}
-	return createRESTGoTable(ctx, cat, ident, req, basePrefix)
+	return createRESTGoTable(ctx, cat, ident, req, reg, basePrefix)
 }
 
-func createRESTGoTable(ctx context.Context, cat *restcatalog.Catalog, ident icetable.Identifier, req RunRequest, basePrefix string) (*icetable.Table, error) {
+func createRESTGoTable(ctx context.Context, cat *restcatalog.Catalog, ident icetable.Identifier, req RunRequest, reg RunConfig, basePrefix string) (*icetable.Table, error) {
+	iceSchema, err := inferRunIcebergSchema(ctx, req, strings.Join(ident, "."))
+	if err != nil {
+		return nil, err
+	}
+
+	if reg.Upsert.Enabled {
+		iceSchema, err = schemaWithIdentifierFields(iceSchema, reg.Upsert.Keys)
+		if err != nil {
+			return nil, err
+		}
+	}
+	spec, err := buildPartitionSpec(iceSchema, reg.PartitionSpec)
+	if err != nil {
+		return nil, err
+	}
+	order, err := buildSortOrder(iceSchema, reg.SortOrder, icetable.InitialSortOrderID)
+	if err != nil {
+		return nil, err
+	}
+	props := tableOptionProperties(reg)
+	props["format-version"] = "2"
+	loc := restGoTableLocation(req.DatasetS3.Bucket, basePrefix)
+	return cat.CreateTable(ctx, ident, iceSchema,
+		icecatalog.WithLocation(loc),
+		icecatalog.WithPartitionSpec(&spec),
+		icecatalog.WithSortOrder(order),
+		icecatalog.WithProperties(props),
+	)
+}
+
+func inferRunIcebergSchema(ctx context.Context, req RunRequest, tableName string) (*iceberg.Schema, error) {
 	mode := normalizedRunRequestSourceMode(req.SourceMode)
 	if mode == "query" {
 		if !connectors.SupportsQueryMode(req.SourceEngine) {
@@ -1078,7 +1138,7 @@ func createRESTGoTable(ctx context.Context, cat *restcatalog.Catalog, ident icet
 			return nil, fmt.Errorf("cannot infer Iceberg schema for query-mode run: query mode is not supported for %s", engine)
 		}
 	} else if !connectors.SupportsOrderedCursor(req.SourceEngine) && !connectors.SupportsDocumentReader(req.SourceEngine) {
-		return nil, fmt.Errorf("auto-create Iceberg table is only implemented for SQL ordered-cursor and document sources; create %s before running registration", strings.Join(ident, "."))
+		return nil, fmt.Errorf("auto-create Iceberg table is only implemented for SQL ordered-cursor and document sources; create %s before running registration", tableName)
 	}
 
 	var iceSchema *iceberg.Schema
@@ -1149,13 +1209,7 @@ func createRESTGoTable(ctx context.Context, cat *restcatalog.Catalog, ident icet
 		}
 	}
 
-	loc := restGoTableLocation(req.DatasetS3.Bucket, basePrefix)
-	spec := iceberg.NewPartitionSpec()
-	return cat.CreateTable(ctx, ident, iceSchema,
-		icecatalog.WithLocation(loc),
-		icecatalog.WithPartitionSpec(&spec),
-		icecatalog.WithProperties(iceberg.Properties{"format-version": "2"}),
-	)
+	return iceSchema, nil
 }
 
 // InferDurableIcebergSchema snapshots the source/query schema in Iceberg's
