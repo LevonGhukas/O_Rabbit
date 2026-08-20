@@ -149,6 +149,8 @@ func (o Options) MergeInto(existing map[string]any) map[string]any {
 	m["max_in_flight_tasks"] = o.MaxInFlightTasks
 	if o.MaxInFlightTasksSource != "" {
 		m["max_in_flight_tasks_source"] = o.MaxInFlightTasksSource
+	} else {
+		delete(m, "max_in_flight_tasks_source")
 	}
 	m["target_rows_per_task"] = o.TargetRowsPerTask
 	m["min_tasks_multiplier"] = o.MinTasksMultiplier
@@ -167,15 +169,21 @@ func (o Options) MergeInto(existing map[string]any) map[string]any {
 	m["planned_tasks"] = o.PlannedTasks
 	if o.PlannedTasksSource != "" {
 		m["planned_tasks_source"] = o.PlannedTasksSource
+	} else {
+		delete(m, "planned_tasks_source")
 	}
 	m["id_column"] = o.EffectiveCursorColumn()
 	m["chunk_size"] = o.ChunkSize
 	m["target_file_bytes"] = o.TargetFileBytes
 	if len(o.PartitionKeys) > 0 {
 		m["partition_keys"] = o.PartitionKeys
+	} else {
+		delete(m, "partition_keys")
 	}
 	if v := strings.TrimSpace(o.ConsistencyMode); v != "" {
 		m["consistency_mode"] = strings.ToUpper(v)
+	} else {
+		delete(m, "consistency_mode")
 	}
 	return m
 }
