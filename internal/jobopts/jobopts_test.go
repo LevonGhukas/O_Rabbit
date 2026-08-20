@@ -206,6 +206,32 @@ func TestMergeIntoPreservesPlanningProvenance(t *testing.T) {
 	}
 }
 
+func TestMergeIntoClearsStaleOptionalSettings(t *testing.T) {
+	existing := map[string]any{
+		"planned_tasks_source":       PerformanceValueSourceInferred,
+		"max_in_flight_tasks_source": PerformanceValueSourceInferred,
+		"partition_keys":             []any{"tenant_id"},
+		"consistency_mode":           "SNAPSHOT",
+		"unrelated_setting":          true,
+	}
+
+	got := (Options{}).MergeInto(existing)
+
+	for _, key := range []string{
+		"planned_tasks_source",
+		"max_in_flight_tasks_source",
+		"partition_keys",
+		"consistency_mode",
+	} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("%s was retained after clearing options: %v", key, got[key])
+		}
+	}
+	if got["unrelated_setting"] != true {
+		t.Fatalf("unrelated setting was not preserved: %#v", got)
+	}
+}
+
 func TestParseNilEqualsEmptyJSON(t *testing.T) {
 	nilOpts, err := Parse(nil)
 	if err != nil {
