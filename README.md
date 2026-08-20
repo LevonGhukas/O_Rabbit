@@ -460,6 +460,18 @@ job:
   table: public.people
   id_column: id
   auto_tune: true
+
+iceberg:
+  enabled: true
+  engine: rest-go
+  table: demo.people
+  options:
+    uri: http://catalog:8181
+    schema_evolution: additive
+    target_file_size: 268435456
+    partition_spec:
+      - source: created_at
+        transform: day
 ```
 
 Submit and follow the run:
@@ -473,6 +485,83 @@ When `auto_tune` is `false`, set `max_in_flight_tasks`, `fetch_limit`, and at
 least one of `planned_tasks` or `chunk_size`. FlightSQL requires `source.sql`,
 `incremental: false`, `auto_tune: false`, no `id_column`, and no manual planning
 fields.
+
+### Iceberg defaults and per-run options
+
+`.ice.yaml` is optional and acts only as a defaults file. Every setting can be
+supplied for one run under `iceberg.options`; explicit run values win over the
+defaults file. The resolved configuration is persisted with the run, so retries
+do not depend on the file.
+
+The HTTP run endpoints use the same model:
+
+```json
+{
+  "iceberg": {
+    "enabled": true,
+    "engine": "rest-go",
+    "table": "demo.people",
+    "config_yaml": "uri: http://default-catalog:8181\n",
+    "options": {
+      "uri": "http://run-catalog:8181",
+      "schema_evolution": "additive",
+      "target_file_size": 268435456,
+      "upsert": {
+        "enabled": true,
+        "keys": ["id"],
+        "mode": "merge-on-read"
+      }
+    }
+  }
+}
+```
+
+The optional defaults file accepts table metadata and write policy options in
+addition to `uri`, `bearerToken`, and `s3`:
+
+```yaml
+uri: http://catalog:8181
+bearerToken: token
+
+partition_spec:
+  - source: created_at
+    name: created_day
+    transform: day
+
+sort_order:
+  - source: created_at
+    direction: desc
+    null_order: nulls_last
+
+schema_evolution: additive
+target_file_size: 268435456
+distribution_mode: range
+metrics_mode: truncate(32)
+
+metadata_retention:
+  delete_after_commit: true
+  previous_versions_max: 10
+  min_snapshots_to_keep: 3
+  max_snapshot_age_ms: 604800000
+
+upsert:
+  enabled: true
+  keys: [id]
+  mode: merge-on-read
+
+credential_vending:
+  enabled: true
+  required: true
+```
+
+Partition transforms support `identity`, `year`, `month`, `day`, `hour`,
+`bucket[N]`, and `truncate[N]`. Schema evolution is `strict` by default;
+`additive` adds optional columns and permits Iceberg-compatible type promotion.
+Upsert requires Iceberg format v2 and non-null, unique keys in every incoming
+run. When credential vending is required, static S3 credentials are not passed
+to the catalog-backed table filesystem. Partitioned registration rewrites the
+committed source Parquet stream into Iceberg-managed partitioned files; the
+unpartitioned path remains zero-copy.
 
 Cancel a run explicitly:
 

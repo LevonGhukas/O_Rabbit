@@ -31,6 +31,7 @@ type parquetRollingWriter struct {
 	currentPath         string
 	currentRows         int64
 	currentLogicalBytes int64
+	currentEncodedBytes int64
 	currentSchema       *arrow.Schema
 
 	files   []parquetOutputFile
@@ -51,27 +52,63 @@ func (w *parquetRollingWriter) Write(schema *arrow.Schema, rec arrow.RecordBatch
 	if err := w.ensureOpen(schema); err != nil {
 		return err
 	}
+	// A record batch is the rollover boundary. Use encoded bytes accumulated
+	// from completed Parquet row groups to decide whether this batch belongs in
+	// the current file. This permits a bounded overshoot and avoids eagerly
+	// creating a tiny tail file after every target crossing.
+	recBytes := recordLogicalBytes(rec)
+	if w.shouldRollBefore(recBytes) {
+		if err := w.closeCurrent(); err != nil {
+			return err
+		}
+		if err := w.ensureOpen(schema); err != nil {
+			return err
+		}
+	}
 	if err := w.current.Write(rec); err != nil {
 		return err
 	}
 	w.currentRows += rec.NumRows()
+	w.currentLogicalBytes += recBytes
+	// This excludes the footer, which is intentionally covered by the
+	// tolerance below. It tracks compression rather than Arrow memory layout.
+	w.currentEncodedBytes = w.current.CompressedBytes()
+	return nil
+}
 
-	var recBytes int64
+const parquetRollOvershootFraction = int64(20) // permit up to 20% at a batch boundary
+
+func recordLogicalBytes(rec arrow.RecordBatch) int64 {
+	var total int64
 	for i := 0; i < int(rec.NumCols()); i++ {
 		arr := rec.Column(i)
 		if arr != nil && arr.Data() != nil {
-			recBytes += int64(arr.Data().SizeInBytes())
+			total += int64(arr.Data().SizeInBytes())
 		}
 	}
-	w.currentLogicalBytes += recBytes
+	return total
+}
 
-	if w.targetFileBytes <= 0 {
-		w.targetFileBytes = 256 * 1024 * 1024
+func (w *parquetRollingWriter) shouldRollBefore(nextLogicalBytes int64) bool {
+	if w.current == nil || w.currentRows == 0 {
+		return false
 	}
-	if shouldRollParquetFile(w.currentRows, w.currentLogicalBytes, w.targetFileBytes) {
-		return w.closeCurrent()
+	target := w.targetFileBytes
+	if target <= 0 {
+		target = 256 * 1024 * 1024
 	}
-	return nil
+	// Predict only from this file's observed compression ratio. A conservative
+	// fallback treats the next batch as incompressible until a ratio is known.
+	predictedNext := nextLogicalBytes
+	if w.currentLogicalBytes > 0 && w.currentEncodedBytes > 0 {
+		predictedNext = nextLogicalBytes * w.currentEncodedBytes / w.currentLogicalBytes
+	}
+	maxBytes := target + target*parquetRollOvershootFraction/100
+	// Do not split a merely growing file too early. Once it is close to target,
+	// however, start the next batch in a fresh file if it would exceed bounded
+	// overshoot. A single large batch is still allowed through intact.
+	nearTarget := w.currentEncodedBytes >= target-target*parquetRollOvershootFraction/100
+	return nearTarget && w.currentEncodedBytes+predictedNext > maxBytes
 }
 
 func (w *parquetRollingWriter) Close() error {
@@ -95,6 +132,7 @@ func (w *parquetRollingWriter) Abort() {
 	w.files = nil
 	w.currentRows = 0
 	w.currentLogicalBytes = 0
+	w.currentEncodedBytes = 0
 	w.currentSchema = nil
 }
 
@@ -165,18 +203,9 @@ func (w *parquetRollingWriter) closeCurrent() error {
 	w.currentPath = ""
 	w.currentRows = 0
 	w.currentLogicalBytes = 0
+	w.currentEncodedBytes = 0
 	w.currentSchema = nil
 	return nil
-}
-
-func shouldRollParquetFile(rows, bytes, targetFileBytes int64) bool {
-	if rows == 0 {
-		return false
-	}
-	if targetFileBytes > 0 && bytes >= targetFileBytes {
-		return true
-	}
-	return false
 }
 
 func buildTaskParquetObjectKeys(runPrefix string, partNo int64, fileCount int) []string {
@@ -186,11 +215,7 @@ func buildTaskParquetObjectKeys(runPrefix string, partNo int64, fileCount int) [
 	base := strings.TrimSuffix(strings.TrimSpace(runPrefix), "/")
 	keys := make([]string, 0, fileCount)
 	for i := 0; i < fileCount; i++ {
-		suffix := ""
-		if i > 0 {
-			suffix = fmt.Sprintf("-%03d", i)
-		}
-		keys = append(keys, fmt.Sprintf("%s/part-%06d%s.parquet", base, partNo, suffix))
+		keys = append(keys, fmt.Sprintf("%s/part-%06d-%03d.parquet", base, partNo, i))
 	}
 	return keys
 }

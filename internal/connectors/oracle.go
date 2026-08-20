@@ -342,7 +342,10 @@ func buildOracleCursorQuery(q CursorQuery) (string, []any, error) {
 		return "", nil, fmt.Errorf("cursor domain is required")
 	}
 
-	clauses := make([]string, 0, 2)
+	clauses := make([]string, 0, 3)
+	if strings.TrimSpace(q.WhereClause) != "" {
+		clauses = append(clauses, fmt.Sprintf("(%s)", q.WhereClause))
+	}
 	args := make([]any, 0, 2)
 	argPos := 1
 	if strings.TrimSpace(q.LowerBound) != "" {
@@ -371,7 +374,7 @@ func buildOracleCursorQuery(q CursorQuery) (string, []any, error) {
 		args = append(args, upperArg)
 	}
 
-	query := fmt.Sprintf("SELECT * FROM %s", qt)
+	query := fmt.Sprintf("SELECT %s FROM %s", buildOracleSelectClause(q.SelectColumns), qt)
 	if scn := strings.TrimSpace(q.SnapshotContext); scn != "" {
 		// Optional: Oracle requires AS OF SCN directly after the table identifier.
 		query += fmt.Sprintf(" AS OF SCN %s", scn)
@@ -754,4 +757,25 @@ func oracleDSNIsLocal(dsn string) bool {
 	}
 	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+func buildOracleSelectClause(cols []string) string {
+	if len(cols) == 0 {
+		return "*"
+	}
+	quoted := make([]string, 0, len(cols))
+	for _, c := range cols {
+		c = strings.TrimSpace(c)
+		if c != "" {
+			if q, err := quoteOracleMultipartIdent(c); err == nil {
+				quoted = append(quoted, q)
+			} else {
+				quoted = append(quoted, c)
+			}
+		}
+	}
+	if len(quoted) == 0 {
+		return "*"
+	}
+	return strings.Join(quoted, ", ")
 }

@@ -1,11 +1,93 @@
 package planner
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/connectors"
 	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 )
+
+func TestInferredPlanningIsRecomputedAfterOptionsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	first, firstDecision := autoTuneCursorPlanWithDecision(jobopts.Options{
+		AutoTune:           false,
+		MaxInFlightTasks:   1,
+		MinTasksMultiplier: 1,
+		TargetFileBytes:    30 * 1024 * 1024,
+	}, connectors.CursorDomainInt64, connectors.CursorStats{
+		RowCount:   1_000_000,
+		TableBytes: 960 * 1024 * 1024,
+	}, false, 0)
+	if first.PlannedTasks != 8 || firstDecision.TaskTargetBytes != 120*1024*1024 {
+		t.Fatalf("first plan tasks=%d task_target=%d", first.PlannedTasks, firstDecision.TaskTargetBytes)
+	}
+	if first.PlannedTasksSource != jobopts.PerformanceValueSourceInferred {
+		t.Fatalf("planned source=%q", first.PlannedTasksSource)
+	}
+
+	raw, err := json.Marshal(first.MergeInto(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := jobopts.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulates a caller changing the target policy before the next run.
+	next.TargetFileBytes = 64 * 1024 * 1024
+	next, nextDecision := autoTuneCursorPlanWithDecision(next, connectors.CursorDomainInt64, connectors.CursorStats{
+		RowCount:   1_000_000,
+		TableBytes: 960 * 1024 * 1024,
+	}, false, 0)
+	if next.PlannedTasks != 4 || nextDecision.TaskTargetBytes != 256*1024*1024 {
+		t.Fatalf("next plan tasks=%d task_target=%d", next.PlannedTasks, nextDecision.TaskTargetBytes)
+	}
+}
+
+func TestExplicitPlanningSurvivesOptionsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	got, decision := autoTuneCursorPlanWithDecision(jobopts.Options{
+		AutoTune:           false,
+		MaxInFlightTasks:   2,
+		MinTasksMultiplier: 1,
+		PlannedTasks:       16,
+		TargetFileBytes:    64 * 1024 * 1024,
+	}, connectors.CursorDomainInt64, connectors.CursorStats{TableBytes: 960 * 1024 * 1024}, false, 0)
+	if got.PlannedTasks != 16 || decision.SelectedReason != "user_override" {
+		t.Fatalf("tasks=%d reason=%q", got.PlannedTasks, decision.SelectedReason)
+	}
+	if got.PlannedTasksSource != jobopts.PerformanceValueSourceExplicit || got.MaxInFlightTasksSource != jobopts.PerformanceValueSourceExplicit {
+		t.Fatalf("sources planned=%q concurrency=%q", got.PlannedTasksSource, got.MaxInFlightTasksSource)
+	}
+}
+
+func TestInferredConcurrencyDoesNotBecomeAnOverride(t *testing.T) {
+	t.Parallel()
+
+	first, _ := autoTuneCursorPlanWithDecision(jobopts.Options{
+		AutoTune:           false,
+		MinTasksMultiplier: 1,
+		TargetFileBytes:    30 * 1024 * 1024,
+	}, connectors.CursorDomainInt64, connectors.CursorStats{RowCount: 1_000_000}, false, 0)
+	if first.MaxInFlightTasks <= 0 || first.MaxInFlightTasksSource != jobopts.PerformanceValueSourceInferred {
+		t.Fatalf("first concurrency=%d source=%q", first.MaxInFlightTasks, first.MaxInFlightTasksSource)
+	}
+	raw, err := json.Marshal(first.MergeInto(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := jobopts.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, decision := autoTuneCursorPlanWithDecision(next, connectors.CursorDomainInt64, connectors.CursorStats{RowCount: 1_000_000}, false, 0)
+	if decision.SelectedMaxInFlightReason == "user_override" || next.MaxInFlightTasksSource != jobopts.PerformanceValueSourceInferred {
+		t.Fatalf("concurrency incorrectly treated as explicit: reason=%q source=%q", decision.SelectedMaxInFlightReason, next.MaxInFlightTasksSource)
+	}
+}
 
 func TestAutoTuneCursorPlanWithDecisionAdaptiveRowFallback(t *testing.T) {
 	t.Parallel()
@@ -84,17 +166,43 @@ func TestAutoTuneCursorPlanWithDecisionBytesBasedPlanningWins(t *testing.T) {
 		TableBytes: 500_000_000,
 	}, false, 0)
 
-	if got.PlannedTasks != 5 {
-		t.Fatalf("planned_tasks=%d want=5", got.PlannedTasks)
+	if got.PlannedTasks != 2 {
+		t.Fatalf("planned_tasks=%d want=2", got.PlannedTasks)
 	}
-	if decision.PlannedTasksByBytes != 5 {
-		t.Fatalf("planned_tasks_by_bytes=%d want=5", decision.PlannedTasksByBytes)
+	if decision.PlannedTasksByBytes != 2 {
+		t.Fatalf("planned_tasks_by_bytes=%d want=2", decision.PlannedTasksByBytes)
+	}
+	if decision.TaskTargetBytes != 400_000_000 || decision.FilesPerTask != 4 {
+		t.Fatalf("task target=%d files_per_task=%d", decision.TaskTargetBytes, decision.FilesPerTask)
 	}
 	if decision.PlannedTasksByRows != 10 {
 		t.Fatalf("planned_tasks_by_rows=%d want=10", decision.PlannedTasksByRows)
 	}
 	if decision.SelectedReason != "bytes_based" {
 		t.Fatalf("selected_reason=%q want %q", decision.SelectedReason, "bytes_based")
+	}
+}
+
+func TestManualFileSizePlanningInfersConcurrencyAndKeepsItIndependent(t *testing.T) {
+	t.Parallel()
+
+	got, decision := autoTuneCursorPlanWithDecision(jobopts.Options{
+		AutoTune:           false,
+		MinTasksMultiplier: 1,
+		TargetFileBytes:    30 * 1024 * 1024,
+	}, connectors.CursorDomainInt64, connectors.CursorStats{
+		RowCount:   1_000_000,
+		TableBytes: 480 * 1024 * 1024,
+	}, true, 3)
+
+	if decision.TaskTargetBytes != 120*1024*1024 || decision.FilesPerTask != 4 {
+		t.Fatalf("task target=%d files_per_task=%d", decision.TaskTargetBytes, decision.FilesPerTask)
+	}
+	if got.PlannedTasks < 4 {
+		t.Fatalf("planned_tasks=%d want at least bytes-derived count 4", got.PlannedTasks)
+	}
+	if got.MaxInFlightTasks != 3 || decision.SelectedMaxInFlightReason != "active_workers" {
+		t.Fatalf("inferred concurrency=%d reason=%q", got.MaxInFlightTasks, decision.SelectedMaxInFlightReason)
 	}
 }
 
@@ -242,5 +350,89 @@ func TestAutoTuneCursorPlanWithDecisionPreservesExplicitMaxInFlight(t *testing.T
 	}
 	if decision.SelectedMaxInFlightReason != "user_override" {
 		t.Fatalf("selected_max_in_flight_reason=%q want=%q", decision.SelectedMaxInFlightReason, "user_override")
+	}
+}
+
+func TestInferredConcurrencyUsesActiveWorkersForMinimumTasks(t *testing.T) {
+	t.Parallel()
+
+	got, decision := autoTuneCursorPlanWithDecisionUsingHeuristic(jobopts.Options{
+		AutoTune:           false,
+		MinTasksMultiplier: 2,
+		TargetFileBytes:    30 * 1024 * 1024,
+	}, connectors.CursorDomainInt64, connectors.CursorStats{
+		RowCount:   100_000,
+		TableBytes: 30 * 1024 * 1024,
+	}, true, 2, func(connectors.CursorStats, bool) int { return 4 })
+
+	if decision.PlanningMaxInFlightTasks != 4 {
+		t.Fatalf("planning concurrency=%d want=4", decision.PlanningMaxInFlightTasks)
+	}
+	if decision.EffectiveMinTaskConcurrency != 2 || decision.MinimumTasks != 4 {
+		t.Fatalf("effective concurrency=%d minimum tasks=%d want 2 and 4", decision.EffectiveMinTaskConcurrency, decision.MinimumTasks)
+	}
+	if got.PlannedTasks != 4 || got.MaxInFlightTasks != 2 {
+		t.Fatalf("planned=%d max_in_flight=%d want 4 and 2", got.PlannedTasks, got.MaxInFlightTasks)
+	}
+}
+
+func TestExplicitConcurrencyRemainsAuthoritativeForMinimumTasks(t *testing.T) {
+	t.Parallel()
+
+	got, decision := autoTuneCursorPlanWithDecisionUsingHeuristic(jobopts.Options{
+		AutoTune:           false,
+		MaxInFlightTasks:   4,
+		MinTasksMultiplier: 2,
+		TargetFileBytes:    30 * 1024 * 1024,
+	}, connectors.CursorDomainInt64, connectors.CursorStats{
+		RowCount:   100_000,
+		TableBytes: 30 * 1024 * 1024,
+	}, true, 2, func(connectors.CursorStats, bool) int { return 1 })
+
+	if decision.EffectiveMinTaskConcurrency != 4 || decision.MinimumTasks != 8 {
+		t.Fatalf("effective concurrency=%d minimum tasks=%d want 4 and 8", decision.EffectiveMinTaskConcurrency, decision.MinimumTasks)
+	}
+	if got.PlannedTasks != 8 || got.MaxInFlightTasks != 4 {
+		t.Fatalf("planned=%d max_in_flight=%d want 8 and 4", got.PlannedTasks, got.MaxInFlightTasks)
+	}
+}
+
+func TestByteDerivedTasksWinOverInferredMinimum(t *testing.T) {
+	t.Parallel()
+
+	got, decision := autoTuneCursorPlanWithDecisionUsingHeuristic(jobopts.Options{
+		AutoTune:           true,
+		MinTasksMultiplier: 2,
+		TargetFileBytes:    30 * 1024 * 1024,
+	}, connectors.CursorDomainInt64, connectors.CursorStats{
+		RowCount:   1_000_000,
+		TableBytes: 600 * 1024 * 1024,
+	}, true, 2, func(connectors.CursorStats, bool) int { return 4 })
+
+	if decision.PlannedTasksByBytes != 5 || decision.MinimumTasks != 4 {
+		t.Fatalf("byte tasks=%d minimum tasks=%d want 5 and 4", decision.PlannedTasksByBytes, decision.MinimumTasks)
+	}
+	if got.PlannedTasks != 5 {
+		t.Fatalf("planned=%d want=5", got.PlannedTasks)
+	}
+}
+
+func TestInferredConcurrencyWithoutActiveWorkersUsesHostMinimum(t *testing.T) {
+	t.Parallel()
+
+	got, decision := autoTuneCursorPlanWithDecisionUsingHeuristic(jobopts.Options{
+		AutoTune:           true,
+		MinTasksMultiplier: 2,
+		TargetFileBytes:    30 * 1024 * 1024,
+	}, connectors.CursorDomainInt64, connectors.CursorStats{
+		RowCount:   100_000,
+		TableBytes: 30 * 1024 * 1024,
+	}, true, 0, func(connectors.CursorStats, bool) int { return 4 })
+
+	if decision.EffectiveMinTaskConcurrency != 4 || decision.MinimumTasks != 8 {
+		t.Fatalf("effective concurrency=%d minimum tasks=%d want 4 and 8", decision.EffectiveMinTaskConcurrency, decision.MinimumTasks)
+	}
+	if got.PlannedTasks != 8 || got.MaxInFlightTasks != 4 {
+		t.Fatalf("planned=%d max_in_flight=%d want 8 and 4", got.PlannedTasks, got.MaxInFlightTasks)
 	}
 }

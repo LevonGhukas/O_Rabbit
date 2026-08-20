@@ -1,0 +1,63 @@
+name: Orabbit - Build & Push
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: levonghukas/orabbit
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # -----------------------------------------------
+      # Master
+      # -----------------------------------------------
+
+      - name: Build & push master
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.orabbit
+          target: master
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest-master
+          cache-from: type=gha,scope=orabbit-master
+          cache-to: type=gha,mode=max,scope=orabbit-master
+
+      # -----------------------------------------------
+      # Worker
+      # -----------------------------------------------
+
+      - name: Build & push worker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.orabbit
+          target: worker
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest-worker
+          cache-from: type=gha,scope=orabbit-worker
+          cache-to: type=gha,mode=max,scope=orabbit-worker
