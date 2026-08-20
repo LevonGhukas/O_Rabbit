@@ -133,12 +133,12 @@ func (d queryModeDialect) sourceExpr(query string) string {
 }
 
 func (d queryModeDialect) quoteCursorColumn(cursorColumn string) (string, error) {
-	leaf := identLeaf(cursorColumn)
+	leaf := queryResultColumnName(cursorColumn)
 	if leaf == "" {
 		return "", fmt.Errorf("cursor column is required")
 	}
 	if d.engine == "oracle" {
-		qc, err := quoteOracleCursorIdent(leaf)
+		qc, err := quoteOracleQueryResultIdentifier(leaf)
 		if err != nil {
 			return "", err
 		}
@@ -263,12 +263,7 @@ func queryModeCursor(ctx context.Context, db *sql.DB, engine string, q CursorQue
 		return nil, nil, nil, -1, err
 	}
 	cursorIdx := -1
-	for i, c := range cols {
-		if cursorColumnMatches(c, q.CursorColumn) {
-			cursorIdx = i
-			break
-		}
-	}
+	cursorIdx = queryResultColumnIndex(cols, q.CursorColumn)
 	return rows, cols, ct, cursorIdx, nil
 }
 
@@ -326,11 +321,10 @@ func validateQueryCursorColumn(ctx context.Context, db *sql.DB, engine, query, c
 		return out, err
 	}
 
-	leaf := identLeaf(cursorColumn)
-	for i, c := range cols {
-		if !cursorColumnMatches(c, leaf) {
-			continue
-		}
+	columnIdx := queryResultColumnIndex(cols, cursorColumn)
+	if columnIdx >= 0 {
+		i := columnIdx
+		c := cols[i]
 		out.Found = true
 		out.ResolvedName = c
 		if i < len(ct) && ct[i] != nil {
@@ -347,9 +341,59 @@ func validateQueryCursorColumn(ctx context.Context, db *sql.DB, engine, query, c
 				out.Nullable = true
 			}
 		}
-		break
 	}
 	return out, nil
+}
+
+// Query-mode cursors address a column in the derived query result, not a
+// schema-qualified source column. Preserve dots, spaces, Unicode and case in
+// that result name; splitting on '.' corrupts valid quoted Oracle aliases.
+func queryResultColumnName(raw string) string {
+	name := strings.TrimSpace(raw)
+	if len(name) >= 2 {
+		switch {
+		case strings.HasPrefix(name, `"`) && strings.HasSuffix(name, `"`):
+			return strings.ReplaceAll(name[1:len(name)-1], `""`, `"`)
+		case strings.HasPrefix(name, "`") && strings.HasSuffix(name, "`"):
+			return strings.ReplaceAll(name[1:len(name)-1], "``", "`")
+		case strings.HasPrefix(name, "[") && strings.HasSuffix(name, "]"):
+			return strings.ReplaceAll(name[1:len(name)-1], "]]", "]")
+		}
+	}
+	return name
+}
+
+func queryResultColumnIndex(columns []string, cursorColumn string) int {
+	requested := queryResultColumnName(cursorColumn)
+	for i, column := range columns {
+		if strings.TrimSpace(column) == requested {
+			return i
+		}
+	}
+	for i, column := range columns {
+		if strings.EqualFold(strings.TrimSpace(column), requested) {
+			return i
+		}
+	}
+	// Backwards compatibility for old clients that sent a qualified cursor.
+	leaf := identLeaf(cursorColumn)
+	for i, column := range columns {
+		if strings.EqualFold(strings.TrimSpace(column), leaf) {
+			return i
+		}
+	}
+	return -1
+}
+
+func quoteOracleQueryResultIdentifier(name string) (string, error) {
+	name = queryResultColumnName(name)
+	if name == "" {
+		return "", fmt.Errorf("empty identifier")
+	}
+	if strings.ContainsRune(name, '\x00') {
+		return "", fmt.Errorf("unsafe identifier")
+	}
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`, nil
 }
 
 func classifyQueryCursorType(engine, dataType string, ct *sql.ColumnType) SQLCursorTypeClass {
