@@ -53,7 +53,10 @@ type runSubmitSourceRequest struct {
 	Table        string `json:"table"`
 	Query        string `json:"query"`
 	CursorColumn string `json:"cursor_column"`
-	Incremental  bool   `json:"incremental"`
+	Incremental  bool   `json:"incremental"` 
+	WhereClause  string `json:"where_clause,omitempty"` 
+	SelectColumns []string          `json:"select_columns,omitempty"` 
+	ColumnTypes   map[string]string `json:"column_types,omitempty"`
 }
 
 type runSubmitTargetRequest struct {
@@ -95,6 +98,9 @@ type validatedRunSubmitSpec struct {
 	SourceTable             string
 	SourceQuery             string
 	QueryHash               string
+	WhereClause             string
+	SelectColumns           []string
+	ColumnTypes             map[string]string
 	SourceName              string
 	CursorColumn            string
 	Incremental             bool
@@ -364,6 +370,9 @@ func (s *Server) handleRunValidate(w http.ResponseWriter, r *http.Request) {
 			"source_connection_name": spec.SourceConnectionName,
 			"source_name":            spec.SourceName,
 			"query_hash":             spec.QueryHash,
+		"where_clause":           spec.WhereClause,
+		"select_columns":         spec.SelectColumns,
+		"column_types":           spec.ColumnTypes,
 			"target_connection_name": spec.TargetConnectionName,
 			"target_prefix":          spec.TargetPrefix,
 			"iceberg_table":          spec.IcebergTable,
@@ -763,6 +772,9 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 			SourceTable:             sourceTable,
 			SourceQuery:             sourceQuery,
 			QueryHash:               queryHash,
+			WhereClause:             strings.TrimSpace(req.Source.WhereClause),
+			SelectColumns:           req.Source.SelectColumns,
+			ColumnTypes:             req.Source.ColumnTypes,
 			SourceName:              sourceName,
 			CursorColumn:            cursorColumn,
 			Incremental:             req.Source.Incremental,
@@ -804,6 +816,9 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 		SourceTable:             sourceTable,
 		SourceQuery:             sourceQuery,
 		QueryHash:               queryHash,
+			WhereClause:             strings.TrimSpace(req.Source.WhereClause),
+			SelectColumns:           req.Source.SelectColumns,
+			ColumnTypes:             req.Source.ColumnTypes,
 		SourceName:              sourceName,
 		CursorColumn:            cursorColumn,
 		Incremental:             req.Source.Incremental,
@@ -905,6 +920,9 @@ func buildFrontendJobRequest(spec validatedRunSubmitSpec, sourceConnectionID, ta
 		"iceberg_partition_keys": spec.IcebergPartitionKeys,
 		"partition_keys":         spec.IcebergPartitionKeys,
 		"consistency_mode":       spec.ConsistencyMode,
+		"where_clause":           spec.WhereClause,
+		"select_columns":         spec.SelectColumns,
+		"column_types":           spec.ColumnTypes,
 	}
 	options = icebergreg.MergeJobConfig(options, icebergreg.JobConfig{
 		Enabled: spec.IcebergEnabled,
