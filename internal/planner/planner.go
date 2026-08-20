@@ -526,6 +526,9 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 		if cv.NullableKnown && cv.Nullable {
 			return db.Run{}, nil, fmt.Errorf("cursor column %q is nullable; nullable cursor columns can skip rows in incremental mode. Choose a NOT NULL ordered key or run full load", cursorColumn)
 		}
+		if cv.ResolvedName != "" {
+			cursorColumn = cv.ResolvedName
+		}
 		o.CursorColumn = cursorColumn
 		o.IDColumn = cursorColumn
 		o.CursorDomain = string(cv.Domain)
