@@ -52,6 +52,8 @@ type RunRequest struct {
 	SourceMode   string
 	SourceTable  string
 	SourceQuery  string
+	ColumnTypes  map[string]string
+	SelectColumns []string
 	QueryHash    string
 	Incremental  bool
 	WriteMode    string
@@ -1193,7 +1195,7 @@ func inferRunIcebergSchema(ctx context.Context, req RunRequest, tableName string
 		if err != nil {
 			return nil, err
 		}
-		_, arrSchema, err = arrowio.PlansFromSQL(cols, colTypes)
+		_, arrSchema, err = arrowio.PlansFromSQLWithOverrides(cols, colTypes, req.ColumnTypes)
 		if err != nil {
 			return nil, fmt.Errorf("sql->arrow schema: %w", err)
 		}
@@ -1306,6 +1308,24 @@ func describeSourceSchemaForAutoCreate(ctx context.Context, reader connectors.Ta
 	cols, colTypes, err := reader.DescribeTable(ctx, req.SourceTable)
 	if err != nil {
 		return nil, nil, fmt.Errorf("describe table for iceberg auto-create: %w", err)
+	}
+	if len(req.SelectColumns) > 0 {
+		selMap := make(map[string]int)
+		for idx, c := range cols {
+			selMap[strings.ToLower(c)] = idx
+		}
+		filteredCols := make([]string, 0, len(req.SelectColumns))
+		filteredColTypes := make([]*sql.ColumnType, 0, len(req.SelectColumns))
+		for _, sc := range req.SelectColumns {
+			scClean := strings.TrimSpace(sc)
+			if idx, ok := selMap[strings.ToLower(scClean)]; ok {
+				filteredCols = append(filteredCols, cols[idx])
+				filteredColTypes = append(filteredColTypes, colTypes[idx])
+			}
+		}
+		if len(filteredCols) > 0 {
+			return filteredCols, filteredColTypes, nil
+		}
 	}
 	return cols, colTypes, nil
 }

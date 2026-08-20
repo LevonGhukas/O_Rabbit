@@ -475,7 +475,11 @@ func asUint64(v any) (uint64, bool) {
 // The caller owns the record passed to onRecord (must call rec.Retain() if it needs it
 // after onRecord returns; the iterator will Release() it).
 func RowsToRecordBatches(rows *sql.Rows, cols []string, colTypes []*sql.ColumnType, batchSize int, alloc memory.Allocator, cursorIdx int, cursorDomain connectors.CursorDomain, onRecord func(schema *arrow.Schema, rec arrow.RecordBatch) error) (int64, string, error) {
-	plans, schema, err := PlansFromSQL(cols, colTypes)
+	return RowsToRecordBatchesWithOverrides(rows, cols, colTypes, nil, batchSize, alloc, cursorIdx, cursorDomain, onRecord)
+}
+
+func RowsToRecordBatchesWithOverrides(rows *sql.Rows, cols []string, colTypes []*sql.ColumnType, targetTypes map[string]string, batchSize int, alloc memory.Allocator, cursorIdx int, cursorDomain connectors.CursorDomain, onRecord func(schema *arrow.Schema, rec arrow.RecordBatch) error) (int64, string, error) {
+	plans, schema, err := PlansFromSQLWithOverrides(cols, colTypes, targetTypes)
 	if err != nil {
 		return 0, "", err
 	}
@@ -629,4 +633,35 @@ func RowsToRecordBatches(rows *sql.Rows, cols []string, colTypes []*sql.ColumnTy
 		}
 	}
 	return rowsTotal, maxCursor, nil
+}
+
+// PlansFromSQLWithOverrides returns Arrow plans and schema updated with requested target types and nullability.
+func PlansFromSQLWithOverrides(cols []string, colTypes []*sql.ColumnType, targetTypes map[string]string) ([]ColumnPlan, *arrow.Schema, error) {
+	plans, schema, err := PlansFromSQL(cols, colTypes)
+	if err != nil || len(targetTypes) == 0 {
+		return plans, schema, err
+	}
+
+	fields := schema.Fields()
+	newFields := make([]arrow.Field, len(fields))
+	copy(newFields, fields)
+
+	for i, f := range fields {
+		if targetTypeStr, ok := targetTypes[f.Name]; ok && strings.TrimSpace(targetTypeStr) != "" {
+			tStr := strings.TrimSpace(targetTypeStr)
+			nullable := strings.HasPrefix(strings.ToLower(tStr), "nullable(")
+			
+			cleanType := tStr
+			if nullable {
+				cleanType = strings.TrimSuffix(strings.TrimPrefix(tStr, "Nullable("), ")")
+				cleanType = strings.TrimSuffix(strings.TrimPrefix(cleanType, "nullable("), ")")
+			}
+			
+			newPlan := planForSQLColumnType(f.Name, strings.ToUpper(cleanType), 0, 0, false)
+			plans[i] = newPlan
+			newFields[i] = arrow.Field{Name: f.Name, Type: newPlan.DataType, Nullable: nullable}
+		}
+	}
+
+	return plans, arrow.NewSchema(newFields, nil), nil
 }
