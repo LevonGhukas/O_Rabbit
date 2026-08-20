@@ -514,6 +514,12 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 			}
 			return run, tasks, nil
 		}
+		// Query result identifiers may be quoted and case-sensitive. The reader
+		// has already resolved the exact output name, so use it for stats and all
+		// worker cursor queries instead of the user-provided spelling.
+		if sourceMode == "query" && strings.TrimSpace(cv.ResolvedName) != "" {
+			cursorColumn = cv.ResolvedName
+		}
 		if !cv.Orderable || cv.Domain == connectors.CursorDomainUnknown {
 			return db.Run{}, nil, fmt.Errorf("cursor column %q has unsupported type %q; choose an orderable numeric, decimal, date, timestamp, or text column", cursorColumn, cv.DataType)
 		}
