@@ -123,8 +123,8 @@ func TestParseDefaults(t *testing.T) {
 		t.Fatalf("target file bytes=%d", got.TargetFileBytes)
 	}
 
-	if got.PlannedTasks != 1 {
-		t.Fatalf("planned tasks=%d", got.PlannedTasks)
+	if got.PlannedTasks != 0 {
+		t.Fatalf("planned tasks=%d; zero means planner inference", got.PlannedTasks)
 	}
 }
 
@@ -191,6 +191,18 @@ func TestMergeInto(t *testing.T) {
 
 	if got["cursor_column"] != "id" {
 		t.Fatalf("cursor_column=%v", got["cursor_column"])
+	}
+}
+
+func TestMergeIntoPreservesPlanningProvenance(t *testing.T) {
+	got := (Options{
+		PlannedTasks:           8,
+		PlannedTasksSource:     PerformanceValueSourceInferred,
+		MaxInFlightTasks:       4,
+		MaxInFlightTasksSource: PerformanceValueSourceExplicit,
+	}).MergeInto(nil)
+	if got["planned_tasks_source"] != PerformanceValueSourceInferred || got["max_in_flight_tasks_source"] != PerformanceValueSourceExplicit {
+		t.Fatalf("provenance=%v", got)
 	}
 }
 

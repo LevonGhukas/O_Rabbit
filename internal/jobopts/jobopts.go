@@ -5,6 +5,11 @@ import (
 	"strings"
 )
 
+const (
+	PerformanceValueSourceExplicit = "explicit"
+	PerformanceValueSourceInferred = "inferred"
+)
+
 // Options represents job.options_json.
 //
 // This struct is shared by the planner (master) and worker assignment.
@@ -14,9 +19,10 @@ type Options struct {
 
 	// Auto-tuning (master-side). When enabled, the master may fill in missing (0)
 	// values for partitioning, fetch batch size, and effective concurrency.
-	AutoTune          bool  `json:"auto_tune"`
-	MaxInFlightTasks  int   `json:"max_in_flight_tasks"`
-	TargetRowsPerTask int64 `json:"target_rows_per_task"`
+	AutoTune               bool   `json:"auto_tune"`
+	MaxInFlightTasks       int    `json:"max_in_flight_tasks"`
+	MaxInFlightTasksSource string `json:"max_in_flight_tasks_source,omitempty"`
+	TargetRowsPerTask      int64  `json:"target_rows_per_task"`
 
 	// Optional: encourage planning more tasks than concurrency for better load balancing.
 	// If 0, planner will pick a good default.
@@ -28,6 +34,9 @@ type Options struct {
 	Table        string `json:"table"`
 	Query        string `json:"query,omitempty"`
 	QueryHash    string `json:"query_hash,omitempty"`
+	WhereClause  string `json:"where_clause,omitempty"`
+	SelectColumns []string          `json:"select_columns,omitempty"` 
+	ColumnTypes   map[string]string `json:"column_types,omitempty"` 
 	CursorColumn string `json:"cursor_column,omitempty"`
 	CursorDomain string `json:"cursor_domain,omitempty"`
 	PlannedTasks int    `json:"planned_tasks,omitempty"`
@@ -77,6 +86,18 @@ func (o Options) NormalizedPartitionStrategy() string {
 	}
 }
 
+// PlannedTasksWasInferred identifies a resolved planner decision retained for
+// the current run, rather than caller intent for future runs.
+func (o Options) PlannedTasksWasInferred() bool {
+	return o.PlannedTasksSource == PerformanceValueSourceInferred
+}
+
+// MaxInFlightTasksWasInferred identifies a resolved scheduler limit retained
+// for the current run, rather than caller intent for future runs.
+func (o Options) MaxInFlightTasksWasInferred() bool {
+	return o.MaxInFlightTasksSource == PerformanceValueSourceInferred
+}
+
 // Parse parses job options JSON.
 func Parse(raw json.RawMessage) (Options, error) {
 	if len(raw) == 0 {
@@ -109,11 +130,9 @@ func Parse(raw json.RawMessage) (Options, error) {
 		o.TargetFileBytes = 256 * 1024 * 1024
 	}
 
-	if !o.AutoTune {
-		if o.PlannedTasks <= 0 && o.ChunkSize <= 0 {
-			o.PlannedTasks = 1
-		}
-	}
+	// A missing PlannedTasks deliberately remains zero.  It means "let the
+	// planner choose task ranges" in both automatic and manual file-size mode;
+	// it must not be confused with the worker file-size target.
 	return o, nil
 }
 
@@ -128,14 +147,27 @@ func (o Options) MergeInto(existing map[string]any) map[string]any {
 	m["source_name"] = strings.TrimSpace(o.SourceName)
 	m["auto_tune"] = o.AutoTune
 	m["max_in_flight_tasks"] = o.MaxInFlightTasks
+	if o.MaxInFlightTasksSource != "" {
+		m["max_in_flight_tasks_source"] = o.MaxInFlightTasksSource
+	}
 	m["target_rows_per_task"] = o.TargetRowsPerTask
 	m["min_tasks_multiplier"] = o.MinTasksMultiplier
 	m["table"] = o.Table
 	m["query"] = strings.TrimSpace(o.Query)
 	m["query_hash"] = strings.TrimSpace(o.QueryHash)
+	m["where_clause"] = strings.TrimSpace(o.WhereClause)
+	if len(o.SelectColumns) > 0 {
+		m["select_columns"] = o.SelectColumns
+	}
+	if len(o.ColumnTypes) > 0 {
+		m["column_types"] = o.ColumnTypes
+	}
 	m["cursor_column"] = o.EffectiveCursorColumn()
 	m["cursor_domain"] = strings.TrimSpace(o.CursorDomain)
 	m["planned_tasks"] = o.PlannedTasks
+	if o.PlannedTasksSource != "" {
+		m["planned_tasks_source"] = o.PlannedTasksSource
+	}
 	m["id_column"] = o.EffectiveCursorColumn()
 	m["chunk_size"] = o.ChunkSize
 	m["target_file_bytes"] = o.TargetFileBytes

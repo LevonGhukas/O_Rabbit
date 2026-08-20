@@ -69,6 +69,17 @@ func (w *Writer) Schema() *arrow.Schema {
 	return w.schema
 }
 
+// CompressedBytes reports encoded Parquet payload bytes written so far. It is
+// safe to query after Write: pqarrow closes the preceding record's row group
+// before starting the next one. The final file is slightly larger because its
+// footer is emitted by Close.
+func (w *Writer) CompressedBytes() int64 {
+	if w == nil || w.pw == nil {
+		return 0
+	}
+	return w.pw.TotalCompressedBytes()
+}
+
 func (w *Writer) Close() error {
 	if w == nil {
 		return nil

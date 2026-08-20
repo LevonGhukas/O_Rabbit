@@ -162,7 +162,10 @@ func (p *Postgres) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, [
 		return nil, nil, nil, -1, fmt.Errorf("cursor domain is required")
 	}
 
-	clauses := make([]string, 0, 2)
+	clauses := make([]string, 0, 3)
+	if strings.TrimSpace(q.WhereClause) != "" {
+		clauses = append(clauses, fmt.Sprintf("(%s)", q.WhereClause))
+	}
 	args := make([]any, 0, 2)
 	argPos := 1
 	if strings.TrimSpace(q.LowerBound) != "" {
@@ -191,7 +194,7 @@ func (p *Postgres) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, [
 		args = append(args, upperArg)
 	}
 
-	query := fmt.Sprintf("SELECT * FROM %s", qt)
+	query := fmt.Sprintf("SELECT %s FROM %s", buildPostgresSelectClause(q.SelectColumns), qt)
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -470,4 +473,25 @@ func postgresHostFromKVDSN(dsn string) (string, bool) {
 		return strings.ToLower(host), true
 	}
 	return "", false
+}
+
+func buildPostgresSelectClause(cols []string) string {
+	if len(cols) == 0 {
+		return "*"
+	}
+	quoted := make([]string, 0, len(cols))
+	for _, c := range cols {
+		c = strings.TrimSpace(c)
+		if c != "" {
+			if q, err := quotePostgresMultipartIdent(c); err == nil {
+				quoted = append(quoted, q)
+			} else {
+				quoted = append(quoted, c)
+			}
+		}
+	}
+	if len(quoted) == 0 {
+		return "*"
+	}
+	return strings.Join(quoted, ", ")
 }

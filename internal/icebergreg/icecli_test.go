@@ -43,6 +43,32 @@ func TestBuildBaseIceConfigYAMLFallsBackToResolvedRunConfig(t *testing.T) {
 	}
 }
 
+func TestBuildBaseIceConfigYAMLAppliesRunOverridesToDefaults(t *testing.T) {
+	raw, err := buildBaseIceConfigYAML(RunConfig{
+		Enabled:     true,
+		Engine:      "ice",
+		URI:         "http://run-catalog:8181",
+		BearerToken: "",
+		ConfigYAML:  "uri: http://default-catalog:8181\nbearerToken: default-token\nhttpCacheDir: data/ice/http/cache\n",
+	})
+	if err != nil {
+		t.Fatalf("buildBaseIceConfigYAML: %v", err)
+	}
+	var cfg map[string]any
+	if err := yaml.Unmarshal([]byte(raw), &cfg); err != nil {
+		t.Fatalf("yaml unmarshal: %v", err)
+	}
+	if cfg["uri"] != "http://run-catalog:8181" {
+		t.Fatalf("uri=%v", cfg["uri"])
+	}
+	if _, ok := cfg["bearerToken"]; ok {
+		t.Fatalf("bearerToken should be cleared: %#v", cfg)
+	}
+	if cfg["httpCacheDir"] != "data/ice/http/cache" {
+		t.Fatalf("httpCacheDir=%v", cfg["httpCacheDir"])
+	}
+}
+
 func TestRunIceCLIRegisterUsesPersistedSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	argsPath := filepath.Join(dir, "args.txt")
@@ -101,8 +127,8 @@ httpCacheDir: data/ice/http/cache
 		SessionToken:    "session-token",
 	}
 	objs := []icebergObj{
-		{key: "exports/orders/part-000001.parquet"},
-		{key: "exports/orders/part-000002.parquet"},
+		{key: "exports/orders/part-000001-000.parquet"},
+		{key: "exports/orders/part-000002-000.parquet"},
 	}
 
 	if err := runIceCLIRegister(context.Background(), exec.CommandContext, scriptPath, req, req.Registration, "mssql.orders", regS3, objs); err != nil {
@@ -131,8 +157,8 @@ httpCacheDir: data/ice/http/cache
 		t.Fatalf("read stdin: %v", err)
 	}
 	wantStdin := "" +
-		"s3://bucket1/exports/orders/part-000001.parquet\n" +
-		"s3://bucket1/exports/orders/part-000002.parquet\n"
+		"s3://bucket1/exports/orders/part-000001-000.parquet\n" +
+		"s3://bucket1/exports/orders/part-000002-000.parquet\n"
 	if string(stdinRaw) != wantStdin {
 		t.Fatalf("stdin=%q want=%q", string(stdinRaw), wantStdin)
 	}
