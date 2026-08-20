@@ -232,6 +232,36 @@ func TestMergeIntoClearsStaleOptionalSettings(t *testing.T) {
 	}
 }
 
+func TestMergeIntoUpdatesOwnedOptionalSettings(t *testing.T) {
+	existing := map[string]any{
+		"planned_tasks_source":       PerformanceValueSourceInferred,
+		"max_in_flight_tasks_source": PerformanceValueSourceInferred,
+		"partition_keys":             []any{"old_tenant"},
+		"consistency_mode":           "EVENTUAL",
+		"unrelated_setting":          true,
+	}
+
+	got := (Options{
+		PlannedTasksSource:     PerformanceValueSourceExplicit,
+		MaxInFlightTasksSource: PerformanceValueSourceExplicit,
+		PartitionKeys:          []string{"tenant_id", "region"},
+		ConsistencyMode:        " snapshot ",
+	}).MergeInto(existing)
+
+	if got["planned_tasks_source"] != PerformanceValueSourceExplicit || got["max_in_flight_tasks_source"] != PerformanceValueSourceExplicit {
+		t.Fatalf("planning provenance was not updated: %#v", got)
+	}
+	if !reflect.DeepEqual(got["partition_keys"], []string{"tenant_id", "region"}) {
+		t.Fatalf("partition keys were not updated: %#v", got["partition_keys"])
+	}
+	if got["consistency_mode"] != "SNAPSHOT" {
+		t.Fatalf("consistency mode was not normalized: %#v", got["consistency_mode"])
+	}
+	if got["unrelated_setting"] != true {
+		t.Fatalf("unrelated setting was not preserved: %#v", got)
+	}
+}
+
 func TestParseNilEqualsEmptyJSON(t *testing.T) {
 	nilOpts, err := Parse(nil)
 	if err != nil {
