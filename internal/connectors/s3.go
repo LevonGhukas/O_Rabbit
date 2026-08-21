@@ -1,6 +1,7 @@
 package connectors
 
 import (
+	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -12,7 +13,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/file"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -23,7 +30,7 @@ type S3Reader struct {
 	client    *s3.Client
 	bucket    string
 	key       string
-	format    string // "csv" or "json"
+	format    string // "csv", "json", "xml", "excel", "parquet"
 	objectRes *s3.GetObjectOutput
 }
 
@@ -166,8 +173,25 @@ func (r *S3Reader) StreamDocuments(ctx context.Context, collection string, filte
 			headers: headers,
 		}, nil
 	case "parquet":
-		// Parquet not implemented as a document stream natively here yet
-		return nil, errors.New("parquet source format not yet implemented in s3 stream")
+		data, err := io.ReadAll(out.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read parquet body: %w", err)
+		}
+		parquetReader, err := file.NewParquetReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("read parquet metadata: %w", err)
+		}
+		arrowReader, err := pqarrow.NewFileReader(parquetReader, pqarrow.ArrowReadProperties{BatchSize: 2048}, memory.DefaultAllocator)
+		if err != nil {
+			return nil, fmt.Errorf("open parquet arrow reader: %w", err)
+		}
+		recReader, err := arrowReader.GetRecordReader(ctx, nil, nil)
+		if err != nil {
+			return nil, fmt.Errorf("get parquet record reader: %w", err)
+		}
+		return &s3ParquetIterator{
+			recReader: recReader,
+		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported S3 file format: %s", r.format)
 	}
@@ -304,8 +328,23 @@ func (it *s3JSONIterator) Close() error {
 	return nil
 }
 
+func parseScalar(val string) any {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return nil
+	}
+	if iVal, err := strconv.ParseInt(val, 10, 64); err == nil {
+		return iVal
+	}
+	if fVal, err := strconv.ParseFloat(val, 64); err == nil {
+		return fVal
+	}
+	return val
+}
+
 type s3XMLIterator struct {
 	decoder *xml.Decoder
+	depth   int
 	nextDoc map[string]any
 	err     error
 }
@@ -319,19 +358,63 @@ func (it *s3XMLIterator) Next(ctx context.Context) bool {
 			}
 			return false
 		}
-		if se, ok := t.(xml.StartElement); ok {
-			var doc map[string]string
-			if err := it.decoder.DecodeElement(&doc, &se); err != nil {
-				it.err = err
-				return false
-			}
 
-			res := make(map[string]any, len(doc))
-			for k, v := range doc {
-				res[k] = v
+		switch elem := t.(type) {
+		case xml.StartElement:
+			it.depth++
+			if it.depth == 2 {
+				// Record-level element (e.g. <row>, <item>, <record>)
+				doc := make(map[string]any)
+				for _, attr := range elem.Attr {
+					doc[attr.Name.Local] = parseScalar(attr.Value)
+				}
+
+				recordDepth := 1
+				var currentChildTag string
+				var currentChildText strings.Builder
+				hasChildren := false
+
+				for recordDepth > 0 {
+					subT, subErr := it.decoder.Token()
+					if subErr != nil {
+						if subErr != io.EOF {
+							it.err = subErr
+						}
+						return false
+					}
+
+					switch subElem := subT.(type) {
+					case xml.StartElement:
+						recordDepth++
+						if recordDepth == 2 {
+							hasChildren = true
+							currentChildTag = subElem.Name.Local
+							currentChildText.Reset()
+							for _, attr := range subElem.Attr {
+								doc[currentChildTag+"_"+attr.Name.Local] = parseScalar(attr.Value)
+							}
+						}
+					case xml.CharData:
+						if recordDepth == 2 {
+							currentChildText.Write(subElem)
+						}
+					case xml.EndElement:
+						if recordDepth == 2 && currentChildTag != "" {
+							doc[currentChildTag] = parseScalar(currentChildText.String())
+							currentChildTag = ""
+						}
+						recordDepth--
+					}
+				}
+
+				it.depth-- // Account for the record end element consumed in loop
+				if len(doc) > 0 || hasChildren {
+					it.nextDoc = doc
+					return true
+				}
 			}
-			it.nextDoc = res
-			return true
+		case xml.EndElement:
+			it.depth--
 		}
 	}
 }
@@ -393,5 +476,123 @@ func (it *s3ExcelIterator) Err() error {
 }
 
 func (it *s3ExcelIterator) Close() error {
+	return nil
+}
+
+func arrowValueToAny(col arrow.Array, row int) any {
+	if col.IsNull(row) {
+		return nil
+	}
+	switch arr := col.(type) {
+	case *array.Boolean:
+		return arr.Value(row)
+	case *array.Int8:
+		return int64(arr.Value(row))
+	case *array.Int16:
+		return int64(arr.Value(row))
+	case *array.Int32:
+		return int64(arr.Value(row))
+	case *array.Int64:
+		return arr.Value(row)
+	case *array.Uint8:
+		return uint64(arr.Value(row))
+	case *array.Uint16:
+		return uint64(arr.Value(row))
+	case *array.Uint32:
+		return uint64(arr.Value(row))
+	case *array.Uint64:
+		return arr.Value(row)
+	case *array.Float32:
+		return float64(arr.Value(row))
+	case *array.Float64:
+		return arr.Value(row)
+	case *array.String:
+		return arr.Value(row)
+	case *array.LargeString:
+		return arr.Value(row)
+	case *array.Binary:
+		return arr.Value(row)
+	case *array.LargeBinary:
+		return arr.Value(row)
+	case *array.Date32:
+		return arr.Value(row).ToTime().Format("2006-01-02")
+	case *array.Date64:
+		return arr.Value(row).ToTime().Format("2006-01-02")
+	case *array.Timestamp:
+		unit := arr.DataType().(*arrow.TimestampType).Unit
+		return arr.Value(row).ToTime(unit).Format(time.RFC3339Nano)
+	case *array.Time32:
+		return arr.Value(row).FormattedString(arrow.Nanosecond)
+	case *array.Time64:
+		return arr.Value(row).FormattedString(arrow.Nanosecond)
+	default:
+		return col.ValueStr(row)
+	}
+}
+
+type s3ParquetIterator struct {
+	recReader  pqarrow.RecordReader
+	currentRec arrow.RecordBatch
+	rowIndex   int
+	numRows    int
+	schema     *arrow.Schema
+	nextDoc    map[string]any
+	err        error
+}
+
+func (it *s3ParquetIterator) Next(ctx context.Context) bool {
+	for it.currentRec == nil || it.rowIndex >= it.numRows {
+		if it.currentRec != nil {
+			it.currentRec.Release()
+			it.currentRec = nil
+		}
+		if it.recReader == nil {
+			return false
+		}
+		if !it.recReader.Next() {
+			if err := it.recReader.Err(); err != nil && err != io.EOF {
+				it.err = err
+			}
+			return false
+		}
+		rec := it.recReader.Record()
+		if rec == nil || rec.NumRows() == 0 {
+			continue
+		}
+		rec.Retain()
+		it.currentRec = rec
+		it.numRows = int(rec.NumRows())
+		it.rowIndex = 0
+		it.schema = rec.Schema()
+	}
+
+	doc := make(map[string]any, it.schema.NumFields())
+	for colIdx := 0; colIdx < it.schema.NumFields(); colIdx++ {
+		field := it.schema.Field(colIdx)
+		col := it.currentRec.Column(colIdx)
+		doc[field.Name] = arrowValueToAny(col, it.rowIndex)
+	}
+	it.rowIndex++
+	it.nextDoc = doc
+	return true
+}
+
+func (it *s3ParquetIterator) Decode() (map[string]any, error) {
+	return it.nextDoc, nil
+}
+
+func (it *s3ParquetIterator) Err() error {
+	return it.err
+}
+
+func (it *s3ParquetIterator) Close() error {
+	if it.currentRec != nil {
+		it.currentRec.Release()
+		it.currentRec = nil
+	}
+	if it.recReader != nil {
+		it.recReader.Release()
+		it.recReader = nil
+	}
 	return nil
 }

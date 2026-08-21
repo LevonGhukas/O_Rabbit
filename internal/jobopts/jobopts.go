@@ -40,6 +40,7 @@ type Options struct {
 	CursorColumn string `json:"cursor_column,omitempty"`
 	CursorDomain string `json:"cursor_domain,omitempty"`
 	PlannedTasks int    `json:"planned_tasks,omitempty"`
+	PlannedTasksSource string `json:"planned_tasks_source,omitempty"`
 
 	// Legacy alias kept for older jobs/clients.
 	IDColumn string `json:"id_column,omitempty"`
