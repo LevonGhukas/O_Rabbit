@@ -556,7 +556,14 @@ func (u *Uploader) uploadFile(ctx context.Context, key string, path string, meta
 		select {
 		case sem <- struct{}{}:
 		case <-gctx.Done():
+			// errgroup cancels gctx when a worker returns an error. Wait for
+			// that worker before returning so its upload error is not replaced
+			// by the cancellation used to stop sibling work.
+			err := g.Wait()
 			_ = abort()
+			if err != nil {
+				return UploadResult{}, err
+			}
 			return UploadResult{}, gctx.Err()
 		}
 
