@@ -29,19 +29,17 @@ type Options struct {
 	MinTasksMultiplier int `json:"min_tasks_multiplier"`
 
 	// Ordered-cursor SQL extraction.
-	SourceMode    string            `json:"source_mode,omitempty"` // "table" (default) or "query"
-	SourceName    string            `json:"source_name,omitempty"`
-	Table         string            `json:"table"`
-	Query         string            `json:"query,omitempty"`
-	QueryHash     string            `json:"query_hash,omitempty"`
-	WhereClause   string            `json:"where_clause,omitempty"`
-	SelectColumns []string          `json:"select_columns,omitempty"`
-	ColumnTypes   map[string]string `json:"column_types,omitempty"`
-	CursorColumn  string            `json:"cursor_column,omitempty"`
-	CursorDomain  string            `json:"cursor_domain,omitempty"`
-	PlannedTasks  int               `json:"planned_tasks,omitempty"`
-	// PlannedTasksSource records whether PlannedTasks was supplied by the caller
-	// or resolved by the planner for the current run.
+	SourceMode   string `json:"source_mode,omitempty"` // "table" (default) or "query"
+	SourceName   string `json:"source_name,omitempty"`
+	Table        string `json:"table"`
+	Query        string `json:"query,omitempty"`
+	QueryHash    string `json:"query_hash,omitempty"`
+	WhereClause  string `json:"where_clause,omitempty"`
+	SelectColumns []string          `json:"select_columns,omitempty"` 
+	ColumnTypes   map[string]string `json:"column_types,omitempty"` 
+	CursorColumn string `json:"cursor_column,omitempty"`
+	CursorDomain string `json:"cursor_domain,omitempty"`
+	PlannedTasks int    `json:"planned_tasks,omitempty"`
 	PlannedTasksSource string `json:"planned_tasks_source,omitempty"`
 
 	// Legacy alias kept for older jobs/clients.
