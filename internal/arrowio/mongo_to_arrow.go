@@ -1,6 +1,7 @@
 package arrowio
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
@@ -26,13 +27,26 @@ func InferMongoSchema(docs []map[string]any) (*arrow.Schema, error) {
 
 	fieldTypes := map[string]arrow.DataType{}
 
+	// First pass: inspect non-null values to determine concrete BSON types
 	for _, doc := range docs {
 		for key, val := range doc {
+			if val == nil {
+				continue
+			}
 			if _, seen := fieldTypes[key]; seen {
 				continue
 			}
 			dt, _, _ := mongoValueToArrowType(val)
 			fieldTypes[key] = dt
+		}
+	}
+
+	// Second pass: for fields that were only ever null across all inspected documents, default to String
+	for _, doc := range docs {
+		for key := range doc {
+			if _, seen := fieldTypes[key]; !seen {
+				fieldTypes[key] = arrow.BinaryTypes.String
+			}
 		}
 	}
 
@@ -178,15 +192,29 @@ func mongoValueToArrowType(v any) (arrow.DataType, func(memory.Allocator) array.
 					b.(*array.TimestampBuilder).AppendNull()
 				}
 			}
+	case primitive.Timestamp:
+		tsType := &arrow.TimestampType{Unit: arrow.Millisecond, TimeZone: "UTC"}
+		return tsType,
+			func(mem memory.Allocator) array.Builder { return array.NewTimestampBuilder(mem, tsType) },
+			func(b array.Builder, val any) {
+				if ts, ok := val.(primitive.Timestamp); ok {
+					b.(*array.TimestampBuilder).Append(arrow.Timestamp(int64(ts.T) * 1000))
+				} else {
+					b.(*array.TimestampBuilder).AppendNull()
+				}
+			}
 	case primitive.Decimal128:
-		return arrow.BinaryTypes.String,
-			func(mem memory.Allocator) array.Builder { return array.NewStringBuilder(mem) },
+		decType := &arrow.Decimal128Type{Precision: 38, Scale: 18}
+		return decType,
+			func(mem memory.Allocator) array.Builder { return array.NewDecimal128Builder(mem, decType) },
 			func(b array.Builder, val any) {
 				if d, ok := val.(primitive.Decimal128); ok {
-					b.(*array.StringBuilder).Append(d.String())
-				} else {
-					b.(*array.StringBuilder).Append(fmt.Sprint(val))
+					if num, ok := asDecimal128(d.String(), 38, 18); ok {
+						b.(*array.Decimal128Builder).Append(num)
+						return
+					}
 				}
+				b.(*array.Decimal128Builder).AppendNull()
 			}
 	case primitive.Binary:
 		return arrow.BinaryTypes.Binary,
@@ -248,6 +276,18 @@ func mongoBuilderFromArrowType(dt arrow.DataType) (func(memory.Allocator) array.
 					b.(*array.Float64Builder).AppendNull()
 				}
 			}
+	case arrow.DECIMAL128:
+		decType := dt.(*arrow.Decimal128Type)
+		return func(mem memory.Allocator) array.Builder { return array.NewDecimal128Builder(mem, decType) },
+			func(b array.Builder, val any) {
+				if d, ok := val.(primitive.Decimal128); ok {
+					if num, ok := asDecimal128(d.String(), decType.Precision, decType.Scale); ok {
+						b.(*array.Decimal128Builder).Append(num)
+						return
+					}
+				}
+				b.(*array.Decimal128Builder).AppendNull()
+			}
 	case arrow.BOOL:
 		return func(mem memory.Allocator) array.Builder { return array.NewBooleanBuilder(mem) },
 			func(b array.Builder, val any) {
@@ -267,6 +307,8 @@ func mongoBuilderFromArrowType(dt arrow.DataType) (func(memory.Allocator) array.
 					b.(*array.TimestampBuilder).Append(arrow.Timestamp(v.UTC().UnixMilli()))
 				case primitive.DateTime:
 					b.(*array.TimestampBuilder).Append(arrow.Timestamp(v))
+				case primitive.Timestamp:
+					b.(*array.TimestampBuilder).Append(arrow.Timestamp(int64(v.T) * 1000))
 				case int64:
 					b.(*array.TimestampBuilder).Append(arrow.Timestamp(v))
 				default:
@@ -323,7 +365,12 @@ func mongoValueToString(val any) string {
 	case primitive.JavaScript:
 		return string(v)
 	case primitive.CodeWithScope:
-		return string(v.Code)
+		scopeBytes, err := bson.MarshalExtJSON(v.Scope, true, false)
+		if err == nil {
+			return fmt.Sprintf(`{"$code":%q,"$scope":%s}`, v.Code, string(scopeBytes))
+		}
+		jsonScope, _ := json.Marshal(v.Scope)
+		return fmt.Sprintf(`{"$code":%q,"$scope":%s}`, v.Code, string(jsonScope))
 	case primitive.MinKey:
 		return "$MinKey"
 	case primitive.MaxKey:
