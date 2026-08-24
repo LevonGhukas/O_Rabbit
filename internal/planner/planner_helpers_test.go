@@ -1,12 +1,31 @@
 package planner
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 )
+
+func TestPartitionSpecSQLCursorSinglePreservesTableProjectionMetadata(t *testing.T) {
+	part := partitionSpecSQLCursorSingle(
+		"default.users", "table", "", "active = 1",
+		[]string{"id", "name"}, map[string]string{"id": "UInt64"},
+		"id", "int64", "", false, "",
+	)
+	var got map[string]any
+	if err := json.Unmarshal(part, &got); err != nil {
+		t.Fatal(err)
+	}
+	if columns, ok := got["select_columns"].([]any); !ok || len(columns) != 2 {
+		t.Fatalf("select_columns=%#v", got["select_columns"])
+	}
+	if types, ok := got["column_types"].(map[string]any); !ok || types["id"] != "UInt64" {
+		t.Fatalf("column_types=%#v", got["column_types"])
+	}
+}
 
 func TestNewID(t *testing.T) {
 	a := newID()
