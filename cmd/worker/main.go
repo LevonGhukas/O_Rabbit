@@ -53,6 +53,7 @@ type partitionSpec struct {
 	WhereClause    string `json:"where_clause,omitempty"` 
 	SelectColumns []string          `json:"select_columns,omitempty"` 
 	ColumnTypes   map[string]string `json:"column_types,omitempty"`
+	RecordPath    string            `json:"record_path,omitempty"`
 	IDColumn       string `json:"id_column"` // legacy alias
 	From           int64  `json:"from"`      // legacy alias
 	To             int64  `json:"to"`        // legacy alias
@@ -1252,6 +1253,12 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 		res.CursorDomain = ps.CursorDomain
 		res.PartitionLower = ps.Lower
 		res.PartitionUpper = ps.Upper
+	}
+	if sourceEngine == "s3" && strings.TrimSpace(ps.RecordPath) != "" {
+		if filter == nil {
+			filter = make(map[string]any)
+		}
+		filter["record_path"] = strings.TrimSpace(ps.RecordPath)
 	}
 
 	it, err := src.StreamDocuments(qctx, collection, filter, batchSize)

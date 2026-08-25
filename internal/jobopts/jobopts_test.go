@@ -194,6 +194,20 @@ func TestMergeInto(t *testing.T) {
 	}
 }
 
+func TestRecordPathRoundTrip(t *testing.T) {
+	parsed, err := Parse(json.RawMessage(`{"record_path":"/data/items"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.RecordPath != "/data/items" {
+		t.Fatalf("record_path=%q", parsed.RecordPath)
+	}
+	merged := parsed.MergeInto(nil)
+	if merged["record_path"] != "/data/items" {
+		t.Fatalf("record_path=%v", merged["record_path"])
+	}
+}
+
 func TestMergeIntoPreservesPlanningProvenance(t *testing.T) {
 	got := (Options{
 		PlannedTasks:           8,

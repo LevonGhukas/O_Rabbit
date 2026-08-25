@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"encoding/xml"
 	"os"
 	"strings"
@@ -62,7 +63,68 @@ func TestS3ExcelIteratorFieldOrder(t *testing.T) {
 	}
 }
 
+func TestS3JSONIteratorRecordPath(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		recordPath string
+		wantIDs    []float64
+		wantErr    string
+	}{
+		{"root array remains compatible", `[{"id":1},{"id":2}]`, "", []float64{1, 2}, ""},
+		{"object wrapped array", `{"airports":[{"id":1},{"id":2}]}`, "/airports", []float64{1, 2}, ""},
+		{"nested object path", `{"data":{"items":[{"id":1}]}}`, "/data/items", []float64{1}, ""},
+		{"escaped pointer key", `{"a/b":[{"id":1}]}`, "/a~1b", []float64{1}, ""},
+		{"object root requires path", `{"airports":[{"id":1}],"countries":[{"id":2}]}`, "", nil, "record_path is required"},
+		{"malformed path", `{"airports":[{"id":1}]}`, "airports", nil, "must start with /"},
+		{"missing path", `{"airports":[{"id":1}]}`, "/missing", nil, `record_path "/missing" was not found`},
+		{"scalar path", `{"airports":42}`, "/airports", nil, "must resolve to an array"},
+		{"object path", `{"airports":{"id":1}}`, "/airports", nil, "must resolve to an array"},
+		{"array of scalars", `{"airports":[1,2]}`, "/airports", nil, "elements must be objects"},
+		{"empty selected array", `{"airports":[]}`, "/airports", []float64{}, ""},
+		{"malformed JSON", `{"airports":[`, "/airports", nil, "EOF"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			it := &s3JSONIterator{decoder: json.NewDecoder(strings.NewReader(tc.input)), recordPath: tc.recordPath}
+			var gotIDs []float64
+			for it.Next(context.Background()) {
+				doc, err := it.Decode()
+				if err != nil {
+					t.Fatal(err)
+				}
+				gotIDs = append(gotIDs, doc["id"].(float64))
+			}
+			if tc.wantErr != "" {
+				if it.Err() == nil || !strings.Contains(it.Err().Error(), tc.wantErr) {
+					t.Fatalf("error=%v, want %q", it.Err(), tc.wantErr)
+				}
+				return
+			}
+			if it.Err() != nil {
+				t.Fatal(it.Err())
+			}
+			if !equalFloat64s(gotIDs, tc.wantIDs) {
+				t.Fatalf("ids=%v want %v", gotIDs, tc.wantIDs)
+			}
+		})
+	}
+}
+
 func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalFloat64s(got, want []float64) bool {
 	if len(got) != len(want) {
 		return false
 	}

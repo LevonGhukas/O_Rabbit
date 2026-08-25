@@ -169,6 +169,7 @@ func (s *Server) runIcebergRegistrationWithHooks(ctx context.Context, runID, reg
 		SourceQuery:   sourceQuery,
 		QueryHash:     strings.TrimSpace(opts.QueryHash),
 		ColumnTypes:   opts.ColumnTypes,
+		RecordPath:    opts.RecordPath,
 		SelectColumns: opts.SelectColumns,
 		Incremental:   job.Incremental,
 		WriteMode:     job.WriteMode,
