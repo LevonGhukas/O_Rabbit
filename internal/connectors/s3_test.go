@@ -19,6 +19,10 @@ import (
 )
 
 func TestS3CSVIteratorFieldOrder(t *testing.T) {
+	format, err := resolveS3Format("csv", "events.log")
+	if err != nil || format != "csv" {
+		t.Fatalf("format=%q err=%v", format, err)
+	}
 	reader := csv.NewReader(strings.NewReader("id,date,age\n1,2026-01-01,30\n"))
 	headers, err := reader.Read()
 	if err != nil {
@@ -27,6 +31,24 @@ func TestS3CSVIteratorFieldOrder(t *testing.T) {
 	it := &s3CSVIterator{reader: reader, headers: headers}
 	if got := it.FieldOrder(); !equalStrings(got, []string{"id", "date", "age"}) {
 		t.Fatalf("field order=%v", got)
+	}
+}
+
+func TestS3JSONFormatWithRecordPath(t *testing.T) {
+	format, err := resolveS3Format("json", "data.txt")
+	if err != nil || format != "json" {
+		t.Fatalf("format=%q err=%v", format, err)
+	}
+	it := &s3JSONIterator{
+		decoder:    json.NewDecoder(strings.NewReader(`{"airports":[{"id":1}]}`)),
+		recordPath: "/airports",
+	}
+	if !it.Next(context.Background()) {
+		t.Fatalf("next=false err=%v", it.Err())
+	}
+	doc, err := it.Decode()
+	if err != nil || doc["id"] != float64(1) {
+		t.Fatalf("doc=%v err=%v", doc, err)
 	}
 }
 
@@ -212,6 +234,43 @@ func TestOpenS3_Formats(t *testing.T) {
 		if s3Reader.format != tc.format {
 			t.Errorf("expected format %q, got %q for %s", tc.format, s3Reader.format, tc.dsn)
 		}
+	}
+}
+
+func TestResolveS3Format(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured string
+		key        string
+		want       string
+		wantErr    string
+	}{
+		{"explicit json overrides txt", "json", "data.txt", "json", ""},
+		{"explicit csv supports log", "csv", "events.log", "csv", ""},
+		{"explicit csv overrides json", "csv", "data.json", "csv", ""},
+		{"xlsx alias", "xlsx", "data.txt", "excel", ""},
+		{"invalid explicit format", "banana", "data.csv", "", `unsupported S3 file format "banana"`},
+		{"legacy csv", "", "data.csv", "csv", ""},
+		{"legacy json", "", "data.json", "json", ""},
+		{"legacy xml", "", "data.xml", "xml", ""},
+		{"legacy xlsx", "", "data.xlsx", "excel", ""},
+		{"legacy xls", "", "data.xls", "excel", ""},
+		{"legacy parquet", "", "data.parquet", "parquet", ""},
+		{"legacy unknown extension fallback", "", "data.foo", "csv", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveS3Format(tc.configured, tc.key)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error=%v want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("format=%q err=%v want %q", got, err, tc.want)
+			}
+		})
 	}
 }
 

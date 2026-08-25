@@ -38,6 +38,7 @@ type Options struct {
 	SelectColumns []string          `json:"select_columns,omitempty"` 
 	ColumnTypes   map[string]string `json:"column_types,omitempty"` 
 	RecordPath    string            `json:"record_path,omitempty"`
+	FileFormat    string            `json:"format,omitempty"`
 	CursorColumn string `json:"cursor_column,omitempty"`
 	CursorDomain string `json:"cursor_domain,omitempty"`
 	PlannedTasks int    `json:"planned_tasks,omitempty"`
@@ -164,6 +165,11 @@ func (o Options) MergeInto(existing map[string]any) map[string]any {
 		m["record_path"] = v
 	} else {
 		delete(m, "record_path")
+	}
+	if v := strings.TrimSpace(o.FileFormat); v != "" {
+		m["format"] = v
+	} else {
+		delete(m, "format")
 	}
 	if len(o.SelectColumns) > 0 {
 		m["select_columns"] = o.SelectColumns
