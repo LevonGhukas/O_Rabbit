@@ -1259,6 +1259,10 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 		return res, fmt.Errorf("%s stream: %w", sourceEngine, err)
 	}
 	defer it.Close()
+	var fieldOrder []string
+	if ordered, ok := it.(connectors.OrderedDocumentIterator); ok {
+		fieldOrder = ordered.FieldOrder()
+	}
 
 	var (
 		docBuf []map[string]any
@@ -1273,7 +1277,7 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 		docBuf = append(docBuf, doc)
 
 		if !schemaInferred && len(docBuf) >= batchSize {
-			schema, err = arrowio.InferMongoSchema(docBuf)
+			schema, err = arrowio.InferMongoSchemaWithFieldOrder(docBuf, fieldOrder)
 			if err != nil {
 				return res, fmt.Errorf("infer schema: %w", err)
 			}
@@ -1311,7 +1315,7 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 	// Flush remaining docs.
 	if len(docBuf) > 0 {
 		if !schemaInferred {
-			schema, err = arrowio.InferMongoSchema(docBuf)
+			schema, err = arrowio.InferMongoSchemaWithFieldOrder(docBuf, fieldOrder)
 			if err != nil {
 				return res, fmt.Errorf("infer schema: %w", err)
 			}

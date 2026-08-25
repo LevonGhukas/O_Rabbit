@@ -276,6 +276,10 @@ func (it *s3CSVIterator) Close() error {
 	return nil
 }
 
+func (it *s3CSVIterator) FieldOrder() []string {
+	return append([]string(nil), it.headers...)
+}
+
 type s3JSONIterator struct {
 	decoder *json.Decoder
 	inArray bool
@@ -477,6 +481,10 @@ func (it *s3ExcelIterator) Err() error {
 
 func (it *s3ExcelIterator) Close() error {
 	return nil
+}
+
+func (it *s3ExcelIterator) FieldOrder() []string {
+	return append([]string(nil), it.headers...)
 }
 
 func arrowValueToAny(col arrow.Array, row int) any {

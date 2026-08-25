@@ -1167,6 +1167,10 @@ func inferRunIcebergSchema(ctx context.Context, req RunRequest, tableName string
 			return nil, fmt.Errorf("stream documents for iceberg auto-create: %w", err)
 		}
 		defer it.Close()
+		var fieldOrder []string
+		if ordered, ok := it.(connectors.OrderedDocumentIterator); ok {
+			fieldOrder = ordered.FieldOrder()
+		}
 
 		var docBuf []map[string]any
 		for it.Next(ctx) {
@@ -1180,7 +1184,7 @@ func inferRunIcebergSchema(ctx context.Context, req RunRequest, tableName string
 			}
 		}
 
-		arrSchema, err = arrowio.InferMongoSchema(docBuf)
+		arrSchema, err = arrowio.InferMongoSchemaWithFieldOrder(docBuf, fieldOrder)
 		if err != nil {
 			return nil, fmt.Errorf("infer document schema for iceberg auto-create: %w", err)
 		}
@@ -1227,6 +1231,10 @@ func InferDurableIcebergSchema(ctx context.Context, engine, dsn, mode, table, qu
 			return nil, fmt.Errorf("stream documents for durable schema: %w", err)
 		}
 		defer it.Close()
+		var fieldOrder []string
+		if ordered, ok := it.(connectors.OrderedDocumentIterator); ok {
+			fieldOrder = ordered.FieldOrder()
+		}
 		var docs []map[string]any
 		for it.Next(ctx) && len(docs) < 1000 {
 			doc, decodeErr := it.Decode()
@@ -1235,7 +1243,7 @@ func InferDurableIcebergSchema(ctx context.Context, engine, dsn, mode, table, qu
 			}
 			docs = append(docs, doc)
 		}
-		arrSchema, err := arrowio.InferMongoSchema(docs)
+		arrSchema, err := arrowio.InferMongoSchemaWithFieldOrder(docs, fieldOrder)
 		if err != nil {
 			return nil, fmt.Errorf("infer document durable schema: %w", err)
 		}

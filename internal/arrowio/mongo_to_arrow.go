@@ -20,6 +20,14 @@ type mongoFieldPlan struct {
 }
 
 func InferMongoSchema(docs []map[string]any) (*arrow.Schema, error) {
+	return InferMongoSchemaWithFieldOrder(docs, nil)
+}
+
+// InferMongoSchemaWithFieldOrder builds a document schema using fieldOrder
+// when a source parser has already supplied an authoritative order. Fields not
+// present in fieldOrder retain the deterministic alphabetical fallback used by
+// generic document sources.
+func InferMongoSchemaWithFieldOrder(docs []map[string]any, fieldOrder []string) (*arrow.Schema, error) {
 	if len(docs) == 0 {
 		return nil, fmt.Errorf("cannot infer schema from empty documents")
 	}
@@ -37,10 +45,26 @@ func InferMongoSchema(docs []map[string]any) (*arrow.Schema, error) {
 	}
 
 	keys := make([]string, 0, len(fieldTypes))
+	seen := make(map[string]struct{}, len(fieldTypes))
+	for _, key := range fieldOrder {
+		if _, exists := fieldTypes[key]; !exists {
+			continue
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		keys = append(keys, key)
+		seen[key] = struct{}{}
+	}
 	for k := range fieldTypes {
+		if _, exists := seen[k]; exists {
+			continue
+		}
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	if len(keys) > len(seen) {
+		sort.Strings(keys[len(seen):])
+	}
 
 	fields := make([]arrow.Field, len(keys))
 	for i, k := range keys {
