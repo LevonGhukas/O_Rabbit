@@ -44,8 +44,12 @@ func canceledObjectFixture(t *testing.T, suffix string) (*Store, Task, time.Time
 func TestCanceledObjectCandidateQuarantineAndDryRun(t *testing.T) {
 	ctx := context.Background()
 	st, task, _, candidateID := canceledObjectFixture(t, "canceled-object")
-	initial, _ := st.GetCanceledObjectCandidate(ctx, candidateID)
-	deadline, _ := time.Parse(time.RFC3339Nano, initial.QuarantineUntil)
+	// A one-nanosecond deadline exercises the old variable-width RFC3339Nano
+	// comparison bug: the prior instant formats without a fractional component.
+	deadline := time.Date(2030, 1, 2, 3, 4, 5, 1, time.UTC)
+	if _, err := st.db.ExecContext(ctx, `UPDATE canceled_object_candidates SET quarantine_until=? WHERE id=?`, canceledObjectTimestamp(deadline), candidateID); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, ok, err := st.ClaimCanceledObjectCleanup(ctx, deadline.Add(-time.Nanosecond), time.Minute); err != nil || ok {
 		t.Fatalf("claimed before quarantine=%v err=%v", ok, err)
 	}
