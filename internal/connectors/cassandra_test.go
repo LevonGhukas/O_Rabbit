@@ -108,7 +108,7 @@ func TestQuoteCassandraIdent(t *testing.T) {
 		{"uppercase", "Table1", `"Table1"`, false},
 		{"already quoted", `"my_table"`, `"my_table"`, false},
 		{"spaces", "my table", `"my table"`, false},
-		{"sql injection is escaped", "table;", `"table;"`, false},
+		{"embedded quote", `O"Rayelly`, `"O""Rayelly"`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -136,8 +136,8 @@ func TestSplitCassandraTableIdent(t *testing.T) {
 		{"my_ks.my_table", "def_ks", "my_ks", "my_table", false},
 		{`"my_ks"."my_table"`, "def_ks", "my_ks", "my_table", false},
 		{"invalid.ks.table", "def_ks", "", "", true},
-		{"bad table", "def_ks", "", "", true},
-		{"my_ks.bad table", "def_ks", "", "", true},
+		{"bad table", "def_ks", "def_ks", "bad table", false},
+		{"my_ks.bad table", "def_ks", "my_ks", "bad table", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.in, func(t *testing.T) {

@@ -143,10 +143,25 @@ func (d queryModeDialect) quoteCursorColumn(cursorColumn string) (string, error)
 		}
 		return queryModeAlias + "." + qc, nil
 	}
-	if d.quoteQualified == nil {
-		return "", fmt.Errorf("identifier rendering is not available for %s", d.engine)
+	alias, err := d.quoteIdent(queryModeAlias)
+	if err != nil {
+		return "", err
 	}
-	return d.quoteQualified(queryModeAlias, leaf)
+	var column string
+	switch d.engine {
+	case "mysql", "mariadb", "clickhouse":
+		column, err = quoteIdentifierPart(leaf, backtickDialect())
+	case "mssql":
+		column, err = quoteIdentifierPart(leaf, bracketDialect())
+	case "postgres", "trino", "cassandra":
+		column, err = quoteIdentifierPart(leaf, doubleQuoteDialect())
+	default:
+		return "", fmt.Errorf("query mode is not supported for %s", d.engine)
+	}
+	if err != nil {
+		return "", err
+	}
+	return alias + "." + column, nil
 }
 
 // QueryHash returns a short stable hash of the normalized query for state,

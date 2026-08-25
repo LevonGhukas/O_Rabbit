@@ -157,3 +157,24 @@ func mariadbOrderedRangeReadsEnabled() bool {
 	})
 	return mariadbOrderedReads
 }
+
+func buildMariaDBSelectClause(cols []string) string {
+	if len(cols) == 0 {
+		return "*"
+	}
+	quoted := make([]string, 0, len(cols))
+	for _, c := range cols {
+		c = strings.TrimSpace(c)
+		if c != "" {
+			q, err := quoteIdentifierPart(c, backtickDialect())
+			if err != nil {
+				return ""
+			}
+			quoted = append(quoted, q)
+		}
+	}
+	if len(quoted) == 0 {
+		return "*"
+	}
+	return strings.Join(quoted, ", ")
+}

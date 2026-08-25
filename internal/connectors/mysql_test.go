@@ -94,6 +94,7 @@ func TestQuoteMySQLMultipartIdent(t *testing.T) {
 		{in: "table", want: "`table`"},
 		{in: "db.table", want: "`db`.`table`"},
 		{in: "`db`.`table`", want: "`db`.`table`"},
+		{in: "db.`some``column`", want: "`db`.`some``column`"},
 	}
 	for _, tc := range tests {
 		got, err := quoteMySQLMultipartIdent(tc.in)

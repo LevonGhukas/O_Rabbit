@@ -80,7 +80,7 @@ func (t *Trino) DescribeTable(ctx context.Context, table string) ([]string, []*s
 }
 
 func quoteTrinoMultipartIdent(s string) (string, error) {
-	return trinoIdentifierRenderer.legacyQualified(s)
+	return quoteQualifiedIdentifier(s, doubleQuoteDialect())
 }
 
 func (t *Trino) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []string, []*sql.ColumnType, int, error) {
@@ -92,7 +92,7 @@ func (t *Trino) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []st
 	if err != nil {
 		return nil, nil, nil, -1, err
 	}
-	qc, err := quoteTrinoMultipartIdent(q.CursorColumn)
+	qc, err := quoteIdentifierPart(q.CursorColumn, doubleQuoteDialect())
 	if err != nil {
 		return nil, nil, nil, -1, err
 	}
@@ -182,7 +182,7 @@ func (t *Trino) DiscoverCursorStats(ctx context.Context, table, cursorColumn str
 	if err != nil {
 		return CursorStats{}, err
 	}
-	qc, err := quoteTrinoMultipartIdent(cursorColumn)
+	qc, err := quoteIdentifierPart(cursorColumn, doubleQuoteDialect())
 	if err != nil {
 		return CursorStats{}, err
 	}
@@ -286,4 +286,25 @@ func trinoDSNIsLocal(dsn string) bool {
 	}
 	h := strings.ToLower(strings.TrimSpace(u.Hostname()))
 	return h == "localhost" || h == "127.0.0.1" || h == "::1"
+}
+
+func buildTrinoSelectClause(cols []string) string {
+	if len(cols) == 0 {
+		return "*"
+	}
+	quoted := make([]string, 0, len(cols))
+	for _, c := range cols {
+		c = strings.TrimSpace(c)
+		if c != "" {
+			q, err := quoteIdentifierPart(c, doubleQuoteDialect())
+			if err != nil {
+				return ""
+			}
+			quoted = append(quoted, q)
+		}
+	}
+	if len(quoted) == 0 {
+		return "*"
+	}
+	return strings.Join(quoted, ", ")
 }

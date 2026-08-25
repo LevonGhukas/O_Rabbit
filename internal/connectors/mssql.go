@@ -88,7 +88,7 @@ func (m *MSSQL) DescribeTable(ctx context.Context, table string) ([]string, []*s
 
 // quoteMSSQLMultipartIdent safely quotes a multipart MSSQL identifier (e.g., database.schema.table).
 func quoteMSSQLMultipartIdent(s string) (string, error) {
-	return mssqlIdentifierRenderer.legacyQualified(s)
+	return quoteQualifiedIdentifier(s, bracketDialect())
 }
 
 // QueryCursor executes a query to fetch rows using ordered cursor bounds.
@@ -101,7 +101,7 @@ func (m *MSSQL) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []st
 	if err != nil {
 		return nil, nil, nil, -1, err
 	}
-	qc, err := quoteMSSQLMultipartIdent(q.CursorColumn)
+	qc, err := quoteIdentifierPart(q.CursorColumn, bracketDialect())
 	if err != nil {
 		return nil, nil, nil, -1, err
 	}
@@ -196,7 +196,7 @@ func (m *MSSQL) DiscoverCursorStats(ctx context.Context, table, cursorColumn str
 	if err != nil {
 		return CursorStats{}, err
 	}
-	qc, err := quoteMSSQLMultipartIdent(cursorColumn)
+	qc, err := quoteIdentifierPart(cursorColumn, bracketDialect())
 	if err != nil {
 		return CursorStats{}, err
 	}
@@ -427,4 +427,25 @@ func mssqlHostFromKVDSN(dsn string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func buildMSSQLSelectClause(cols []string) string {
+	if len(cols) == 0 {
+		return "*"
+	}
+	quoted := make([]string, 0, len(cols))
+	for _, c := range cols {
+		c = strings.TrimSpace(c)
+		if c != "" {
+			q, err := quoteIdentifierPart(c, bracketDialect())
+			if err != nil {
+				return ""
+			}
+			quoted = append(quoted, q)
+		}
+	}
+	if len(quoted) == 0 {
+		return "*"
+	}
+	return strings.Join(quoted, ", ")
 }

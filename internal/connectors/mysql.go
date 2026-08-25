@@ -80,7 +80,7 @@ func (m *MySQL) DescribeTable(ctx context.Context, table string) ([]string, []*s
 }
 
 func quoteMySQLMultipartIdent(s string) (string, error) {
-	return mysqlIdentifierRenderer.legacyQualified(s)
+	return quoteQualifiedIdentifier(s, backtickDialect())
 }
 
 func (m *MySQL) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []string, []*sql.ColumnType, int, error) {
@@ -92,7 +92,7 @@ func (m *MySQL) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []st
 	if err != nil {
 		return nil, nil, nil, -1, err
 	}
-	qc, err := quoteMySQLMultipartIdent(q.CursorColumn)
+	qc, err := quoteIdentifierPart(q.CursorColumn, backtickDialect())
 	if err != nil {
 		return nil, nil, nil, -1, err
 	}
@@ -183,7 +183,7 @@ func (m *MySQL) DiscoverCursorStats(ctx context.Context, table, cursorColumn str
 	if err != nil {
 		return CursorStats{}, err
 	}
-	qc, err := quoteMySQLMultipartIdent(cursorColumn)
+	qc, err := quoteIdentifierPart(cursorColumn, backtickDialect())
 	if err != nil {
 		return CursorStats{}, err
 	}
@@ -380,4 +380,25 @@ func mysqlHostFromDSN(dsn string) (string, bool) {
 		return strings.ToLower(h), true
 	}
 	return "", false
+}
+
+func buildMySQLSelectClause(cols []string) string {
+	if len(cols) == 0 {
+		return "*"
+	}
+	quoted := make([]string, 0, len(cols))
+	for _, c := range cols {
+		c = strings.TrimSpace(c)
+		if c != "" {
+			q, err := quoteIdentifierPart(c, backtickDialect())
+			if err != nil {
+				return ""
+			}
+			quoted = append(quoted, q)
+		}
+	}
+	if len(quoted) == 0 {
+		return "*"
+	}
+	return strings.Join(quoted, ", ")
 }

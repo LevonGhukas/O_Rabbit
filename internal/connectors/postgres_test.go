@@ -15,9 +15,9 @@ func TestQuotePostgresMultipartIdent(t *testing.T) {
 		t.Fatalf("unexpected quoted ident: %q", got)
 	}
 
-	got, err = quotePostgresMultipartIdent(`public.wide-table`)
+	got, err = quotePostgresMultipartIdent(`public."wide-table"`)
 	if err != nil || got != `"public"."wide-table"` {
-		t.Fatalf("special identifier = %q, %v", got, err)
+		t.Fatalf("quoted unusual identifier = %q, %v", got, err)
 	}
 }
 

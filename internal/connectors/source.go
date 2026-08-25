@@ -430,7 +430,14 @@ func OpenIntRangeReader(ctx context.Context, engine, dsn string) (TableReader, e
 }
 
 func cursorColumnMatches(resultColumn, cursorColumn string) bool {
-	return strings.EqualFold(strings.TrimSpace(resultColumn), identLeaf(cursorColumn))
+	result := strings.TrimSpace(resultColumn)
+	requested := identLeaf(cursorColumn)
+	if strings.EqualFold(result, requested) {
+		return true
+	}
+	// Compatibility for older callers that sent a qualified cursor column.
+	// The exact comparison above keeps a literal dot in a raw identifier intact.
+	return strings.EqualFold(result, legacyIdentifierLeaf(cursorColumn))
 }
 
 func idColumnMatches(resultColumn, idColumn string) bool {
@@ -1172,8 +1179,10 @@ func identLeaf(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	parts := strings.Split(raw, ".")
-	leaf := strings.TrimSpace(parts[len(parts)-1])
-	leaf = strings.Trim(leaf, "[]\"`")
-	return leaf
+	return queryResultColumnName(raw)
+}
+
+func legacyIdentifierLeaf(raw string) string {
+	parts := strings.Split(strings.TrimSpace(raw), ".")
+	return queryResultColumnName(parts[len(parts)-1])
 }

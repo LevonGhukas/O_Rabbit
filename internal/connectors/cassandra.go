@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
@@ -37,8 +36,6 @@ const (
 	cassandraStatsTimeout    = 2 * time.Minute
 	cassandraValidateTimeout = 20 * time.Second
 )
-
-var cassandraIdentPartRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 
 // cassandraDSN holds the parsed fields from a cassandra:// DSN.
 type cassandraDSN struct {
@@ -496,14 +493,14 @@ func (c *Cassandra) ValidateCursorColumn(ctx context.Context, table, cursorColum
 // ---------------------------------------------------------------------------
 
 func quoteCassandraIdent(s string) (string, error) {
-	parts, err := splitLegacyIdentifier(s, `"`, `"`)
+	parts, err := parseQualifiedIdentifier(s, doubleQuoteDialect())
 	if err != nil {
 		return "", err
 	}
 	if len(parts) != 1 {
-		return "", fmt.Errorf("cassandra identifier must be one part")
+		return "", fmt.Errorf("cassandra identifier must be a single identifier")
 	}
-	return cassandraIdentifierRenderer.part(parts[0])
+	return quoteIdentifierPart(parts[0].name, doubleQuoteDialect())
 }
 
 func quoteCassandraMultipartIdent(table, defaultKeyspace string) (string, error) {
@@ -511,15 +508,31 @@ func quoteCassandraMultipartIdent(table, defaultKeyspace string) (string, error)
 	if table == "" {
 		return "", fmt.Errorf("empty cassandra table identifier")
 	}
-	parts, err := splitLegacyIdentifier(table, `"`, `"`)
+	parts, err := parseQualifiedIdentifier(table, doubleQuoteDialect())
 	if err != nil {
 		return "", err
 	}
 	switch len(parts) {
 	case 1:
-		return cassandraIdentifierRenderer.qualified(defaultKeyspace, parts[0])
+		tq, err := quoteCassandraIdent(parts[0].name)
+		if err != nil {
+			return "", err
+		}
+		kq, err := quoteCassandraIdent(defaultKeyspace)
+		if err != nil {
+			return "", err
+		}
+		return kq + "." + tq, nil
 	case 2:
-		return cassandraIdentifierRenderer.qualified(parts[0], parts[1])
+		kq, err := quoteCassandraIdent(parts[0].name)
+		if err != nil {
+			return "", err
+		}
+		tq, err := quoteCassandraIdent(parts[1].name)
+		if err != nil {
+			return "", err
+		}
+		return kq + "." + tq, nil
 	default:
 		return "", fmt.Errorf("cassandra table identifier has too many parts: %q", table)
 	}
@@ -529,24 +542,15 @@ func quoteCassandraMultipartIdent(table, defaultKeyspace string) (string, error)
 // qualified "keyspace.table" or bare "table" identifier.
 func splitCassandraTableIdent(defaultKeyspace, table string) (string, string, error) {
 	table = strings.TrimSpace(table)
-	parts := strings.SplitN(table, ".", 2)
+	parts, err := parseQualifiedIdentifier(table, doubleQuoteDialect())
+	if err != nil {
+		return "", "", err
+	}
 	switch len(parts) {
 	case 1:
-		t := strings.Trim(parts[0], `"`)
-		if !cassandraIdentPartRe.MatchString(t) {
-			return "", "", fmt.Errorf("unsafe cassandra table name %q", parts[0])
-		}
-		return defaultKeyspace, t, nil
+		return defaultKeyspace, parts[0].name, nil
 	case 2:
-		k := strings.Trim(parts[0], `"`)
-		t := strings.Trim(parts[1], `"`)
-		if !cassandraIdentPartRe.MatchString(k) {
-			return "", "", fmt.Errorf("unsafe cassandra keyspace name %q", parts[0])
-		}
-		if !cassandraIdentPartRe.MatchString(t) {
-			return "", "", fmt.Errorf("unsafe cassandra table name %q", parts[1])
-		}
-		return k, t, nil
+		return parts[0].name, parts[1].name, nil
 	default:
 		return "", "", fmt.Errorf("cassandra table identifier has too many parts: %q", table)
 	}

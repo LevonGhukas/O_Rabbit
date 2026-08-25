@@ -451,15 +451,7 @@ func parseOracleObjectIdent(raw string) (oracleObjectIdent, error) {
 }
 
 func parseOracleCursorIdent(raw string) (oracleIdentPart, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return oracleIdentPart{}, fmt.Errorf("empty identifier")
-	}
-	parts, err := splitLegacyIdentifier(raw, `"`, `"`)
-	if err != nil {
-		return oracleIdentPart{}, err
-	}
-	return parseOracleIdentPart(parts[len(parts)-1])
+	return parseOracleIdentPart(raw)
 }
 
 func parseOracleMultipartIdent(raw string, maxParts int) ([]oracleIdentPart, error) {
@@ -467,7 +459,7 @@ func parseOracleMultipartIdent(raw string, maxParts int) ([]oracleIdentPart, err
 	if raw == "" {
 		return nil, fmt.Errorf("empty identifier")
 	}
-	parts, err := splitLegacyIdentifier(raw, `"`, `"`)
+	parts, err := parseQualifiedIdentifier(raw, doubleQuoteDialect())
 	if err != nil {
 		return nil, err
 	}
@@ -476,7 +468,7 @@ func parseOracleMultipartIdent(raw string, maxParts int) ([]oracleIdentPart, err
 	}
 	out := make([]oracleIdentPart, 0, len(parts))
 	for _, part := range parts {
-		parsed, err := parseOracleIdentPart(part)
+		parsed, err := oracleIdentPartFromRaw(part.name, part.quoted)
 		if err != nil {
 			return nil, err
 		}
@@ -486,18 +478,33 @@ func parseOracleMultipartIdent(raw string, maxParts int) ([]oracleIdentPart, err
 }
 
 func parseOracleIdentPart(raw string) (oracleIdentPart, error) {
-	part := strings.TrimSpace(raw)
-	if part == "" {
-		return oracleIdentPart{}, fmt.Errorf("empty identifier")
+	parts, err := parseQualifiedIdentifier(raw, doubleQuoteDialect())
+	if err != nil {
+		return oracleIdentPart{}, err
 	}
-	lookup := strings.ToUpper(part)
-	quoted, err := oracleIdentifierRenderer.part(part)
+	if len(parts) != 1 {
+		return oracleIdentPart{}, fmt.Errorf("cursor identifier must be a single identifier")
+	}
+	return oracleIdentPartFromRaw(parts[0].name, parts[0].quoted)
+}
+
+func oracleIdentPartFromRaw(part string, quoted bool) (oracleIdentPart, error) {
+	if part == "" || strings.ContainsRune(part, '\x00') {
+		return oracleIdentPart{}, fmt.Errorf("invalid identifier")
+	}
+	lookup := part
+	sqlName := part
+	if !quoted && oracleIdentPartRe.MatchString(part) {
+		lookup = strings.ToUpper(part)
+		sqlName = lookup
+	}
+	rendered, err := quoteIdentifierPart(sqlName, doubleQuoteDialect())
 	if err != nil {
 		return oracleIdentPart{}, err
 	}
 	return oracleIdentPart{
 		Lookup: lookup,
-		Quoted: quoted,
+		Quoted: rendered,
 	}, nil
 }
 
@@ -763,4 +770,25 @@ func oracleDSNIsLocal(dsn string) bool {
 	}
 	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+func buildOracleSelectClause(cols []string) string {
+	if len(cols) == 0 {
+		return "*"
+	}
+	quoted := make([]string, 0, len(cols))
+	for _, c := range cols {
+		c = strings.TrimSpace(c)
+		if c != "" {
+			q, err := quoteOracleCursorIdent(c)
+			if err != nil {
+				return ""
+			}
+			quoted = append(quoted, q)
+		}
+	}
+	if len(quoted) == 0 {
+		return "*"
+	}
+	return strings.Join(quoted, ", ")
 }

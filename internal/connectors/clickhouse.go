@@ -122,7 +122,7 @@ func (c *ClickHouse) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows,
 	if err != nil {
 		return nil, nil, nil, -1, err
 	}
-	qc, err := quoteClickHouseMultipartIdent(q.CursorColumn)
+	qc, err := quoteIdentifierPart(q.CursorColumn, backtickDialect())
 	if err != nil {
 		return nil, nil, nil, -1, err
 	}
@@ -210,7 +210,7 @@ func (c *ClickHouse) DiscoverCursorStats(ctx context.Context, table, cursorColum
 	if err != nil {
 		return CursorStats{}, err
 	}
-	qc, err := quoteClickHouseMultipartIdent(cursorColumn)
+	qc, err := quoteIdentifierPart(cursorColumn, backtickDialect())
 	if err != nil {
 		return CursorStats{}, err
 	}
@@ -479,7 +479,7 @@ func (c *ClickHouse) currentDatabase(ctx context.Context) (string, error) {
 }
 
 func quoteClickHouseMultipartIdent(s string) (string, error) {
-	return clickHouseIdentifierRenderer.legacyQualified(s)
+	return quoteQualifiedIdentifier(s, backtickDialect())
 }
 
 func splitClickHouseTableIdent(s string) (dbName, tableName string) {
@@ -558,4 +558,25 @@ func clickhouseHostIsLocal(host string) bool {
 	}
 	h := strings.ToLower(strings.TrimSpace(u.Hostname()))
 	return h == "localhost" || h == "127.0.0.1" || h == "::1"
+}
+
+func buildClickHouseSelectClause(cols []string) string {
+	if len(cols) == 0 {
+		return "*"
+	}
+	quoted := make([]string, 0, len(cols))
+	for _, c := range cols {
+		c = strings.TrimSpace(c)
+		if c != "" {
+			q, err := quoteIdentifierPart(c, backtickDialect())
+			if err != nil {
+				return ""
+			}
+			quoted = append(quoted, q)
+		}
+	}
+	if len(quoted) == 0 {
+		return "*"
+	}
+	return strings.Join(quoted, ", ")
 }
