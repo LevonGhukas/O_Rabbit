@@ -58,7 +58,7 @@ func PlanForSQLColumn(engine, name, dbType string, precision, scale int64, hasDe
 		return planMySQLColumn(name, upperType, precision, scale, hasDecimal)
 	case "postgres", "postgresql", "pg":
 		return planPostgresColumn(name, upperType, precision, scale, hasDecimal)
-	case "mssql", "sqlserver":
+	case "mssql", "sqlserver", "ms-sql", "ms_sql":
 		return planMSSQLColumn(name, upperType, precision, scale, hasDecimal)
 	case "oracle", "ora":
 		return planOracleColumn(name, upperType, precision, scale, hasDecimal)
@@ -134,7 +134,7 @@ func PlanForTargetType(name, targetType string) ColumnPlan {
 		return planFloat64(name)
 	case upper == "BOOL" || upper == "BOOLEAN":
 		return planBool(name)
-	case strings.HasPrefix(upper, "DECIMAL"):
+	case strings.HasPrefix(upper, "DECIMAL") || strings.HasPrefix(upper, "NUMERIC") || strings.HasPrefix(upper, "NUMBER"):
 		prec := int32(p)
 		scaleVal := int32(s)
 		if prec <= 0 || prec > 38 {
@@ -147,6 +147,10 @@ func PlanForTargetType(name, targetType string) ColumnPlan {
 			scaleVal = prec
 		}
 		return planDecimal128(name, prec, scaleVal)
+	case upper == "MONEY":
+		return planDecimal128(name, 19, 4)
+	case upper == "SMALLMONEY":
+		return planDecimal128(name, 10, 4)
 	case upper == "DATE" || upper == "DATE32":
 		return planDate32(name)
 	case strings.HasPrefix(upper, "TIME64") || upper == "TIME":
