@@ -3,6 +3,7 @@ package connectors
 import (
 	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/xml"
 	"os"
 	"strings"
@@ -13,7 +14,65 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/xuri/excelize/v2"
 )
+
+func TestS3CSVIteratorFieldOrder(t *testing.T) {
+	reader := csv.NewReader(strings.NewReader("id,date,age\n1,2026-01-01,30\n"))
+	headers, err := reader.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	it := &s3CSVIterator{reader: reader, headers: headers}
+	if got := it.FieldOrder(); !equalStrings(got, []string{"id", "date", "age"}) {
+		t.Fatalf("field order=%v", got)
+	}
+}
+
+func TestS3ExcelIteratorFieldOrder(t *testing.T) {
+	f := excelize.NewFile()
+	defer func() { _ = f.Close() }()
+	if err := f.SetSheetRow("Sheet1", "A1", &[]any{"id", "date", "age"}); err != nil {
+		t.Fatal(err)
+	}
+	var data bytes.Buffer
+	if err := f.Write(&data); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := excelize.OpenReader(bytes.NewReader(data.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = parsed.Close() }()
+	rows, err := parsed.Rows("Sheet1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		t.Fatal("missing header row")
+	}
+	headers, err := rows.Columns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	it := &s3ExcelIterator{rows: rows, headers: headers}
+	if got := it.FieldOrder(); !equalStrings(got, []string{"id", "date", "age"}) {
+		t.Fatalf("field order=%v", got)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
 
 func TestOpenS3_InvalidDSN(t *testing.T) {
 	ctx := context.Background()
