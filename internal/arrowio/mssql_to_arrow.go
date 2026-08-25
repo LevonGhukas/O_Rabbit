@@ -31,7 +31,7 @@ func planMSSQLColumn(name, dbType string, precision, scale int64, hasDecimal boo
 		return planFloat32(name)
 
 	// 4. Exact Decimals & Money
-	case "DECIMAL", "NUMERIC":
+	case "DECIMAL", "NUMERIC", "NUMBER":
 		prec := int32(precision)
 		scaleVal := int32(scale)
 		if prec <= 0 || prec > 38 {

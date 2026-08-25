@@ -44,9 +44,11 @@ func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType
 	}
 
 	plans := make([]ColumnPlan, 0, len(cols))
+	fields := make([]arrow.Field, 0, len(cols))
 	for i := range cols {
 		n := cols[i]
 		dbType := ""
+		nullable := true
 		var (
 			precision  int64
 			scale      int64
@@ -59,13 +61,17 @@ func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType
 				scale = int64(s)
 				hasDecimal = true
 			}
+			if isNullable, ok := colTypes[i].Nullable(); ok {
+				nullable = isNullable
+			}
 		}
 
-		plans = append(plans, PlanForSQLColumn(engine, n, dbType, precision, scale, hasDecimal))
+		plan := PlanForSQLColumn(engine, n, dbType, precision, scale, hasDecimal)
+		plans = append(plans, plan)
+		fields = append(fields, arrow.Field{Name: plan.Name, Type: plan.DataType, Nullable: nullable})
 	}
 
-	schema := schemaFromPlans(plans)
-	return plans, schema, nil
+	return plans, arrow.NewSchema(fields, nil), nil
 }
 
 
