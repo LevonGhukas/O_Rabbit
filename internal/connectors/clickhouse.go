@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
@@ -24,8 +23,6 @@ const (
 	clickHouseStatsTimeout    = 2 * time.Minute
 	clickHouseValidateTimeout = 20 * time.Second
 )
-
-var clickHouseIdentPartRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 
 func OpenClickHouse(ctx context.Context, dsn string) (*ClickHouse, error) {
 	db, err := sql.Open("clickhouse", dsn)
@@ -163,7 +160,11 @@ func (c *ClickHouse) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows,
 		args = append(args, upperArg)
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM %s", buildClickHouseSelectClause(q.SelectColumns), qt)
+	selectClause, err := renderSelectColumns(clickHouseIdentifierRenderer, q.SelectColumns)
+	if err != nil {
+		return nil, nil, nil, -1, err
+	}
+	query := fmt.Sprintf("SELECT %s FROM %s", selectClause, qt)
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -478,21 +479,7 @@ func (c *ClickHouse) currentDatabase(ctx context.Context) (string, error) {
 }
 
 func quoteClickHouseMultipartIdent(s string) (string, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "", fmt.Errorf("empty identifier")
-	}
-	parts := strings.Split(s, ".")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		p = strings.Trim(p, "`\"")
-		if !clickHouseIdentPartRe.MatchString(p) {
-			return "", fmt.Errorf("unsafe identifier %q", s)
-		}
-		out = append(out, "`"+p+"`")
-	}
-	return strings.Join(out, "."), nil
+	return clickHouseIdentifierRenderer.legacyQualified(s)
 }
 
 func splitClickHouseTableIdent(s string) (dbName, tableName string) {
@@ -571,25 +558,4 @@ func clickhouseHostIsLocal(host string) bool {
 	}
 	h := strings.ToLower(strings.TrimSpace(u.Hostname()))
 	return h == "localhost" || h == "127.0.0.1" || h == "::1"
-}
-
-func buildClickHouseSelectClause(cols []string) string {
-	if len(cols) == 0 {
-		return "*"
-	}
-	quoted := make([]string, 0, len(cols))
-	for _, c := range cols {
-		c = strings.TrimSpace(c)
-		if c != "" {
-			if q, err := quoteClickHouseMultipartIdent(c); err == nil {
-				quoted = append(quoted, q)
-			} else {
-				quoted = append(quoted, c)
-			}
-		}
-	}
-	if len(quoted) == 0 {
-		return "*"
-	}
-	return strings.Join(quoted, ", ")
 }

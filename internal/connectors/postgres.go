@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -124,25 +123,8 @@ func (p *Postgres) DescribeTable(ctx context.Context, table string) ([]string, [
 	return cols, ct, nil
 }
 
-var pgIdentPartRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
-
 func quotePostgresMultipartIdent(s string) (string, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "", fmt.Errorf("empty identifier")
-	}
-	parts := strings.Split(s, ".")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		p = strings.TrimPrefix(p, `"`)
-		p = strings.TrimSuffix(p, `"`)
-		if !pgIdentPartRe.MatchString(p) {
-			return "", fmt.Errorf("unsafe identifier %q", s)
-		}
-		out = append(out, `"`+p+`"`)
-	}
-	return strings.Join(out, "."), nil
+	return postgresIdentifierRenderer.legacyQualified(s)
 }
 
 func (p *Postgres) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []string, []*sql.ColumnType, int, error) {
@@ -194,7 +176,11 @@ func (p *Postgres) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, [
 		args = append(args, upperArg)
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM %s", buildPostgresSelectClause(q.SelectColumns), qt)
+	selectClause, err := renderSelectColumns(postgresIdentifierRenderer, q.SelectColumns)
+	if err != nil {
+		return nil, nil, nil, -1, err
+	}
+	query := fmt.Sprintf("SELECT %s FROM %s", selectClause, qt)
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -473,25 +459,4 @@ func postgresHostFromKVDSN(dsn string) (string, bool) {
 		return strings.ToLower(host), true
 	}
 	return "", false
-}
-
-func buildPostgresSelectClause(cols []string) string {
-	if len(cols) == 0 {
-		return "*"
-	}
-	quoted := make([]string, 0, len(cols))
-	for _, c := range cols {
-		c = strings.TrimSpace(c)
-		if c != "" {
-			if q, err := quotePostgresMultipartIdent(c); err == nil {
-				quoted = append(quoted, q)
-			} else {
-				quoted = append(quoted, c)
-			}
-		}
-	}
-	if len(quoted) == 0 {
-		return "*"
-	}
-	return strings.Join(quoted, ", ")
 }

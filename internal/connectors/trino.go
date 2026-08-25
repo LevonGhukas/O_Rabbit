@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -80,24 +79,8 @@ func (t *Trino) DescribeTable(ctx context.Context, table string) ([]string, []*s
 	return cols, ct, nil
 }
 
-var trinoIdentPartRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
-
 func quoteTrinoMultipartIdent(s string) (string, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "", fmt.Errorf("empty identifier")
-	}
-	parts := strings.Split(s, ".")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		p = strings.Trim(p, `"`)
-		if !trinoIdentPartRe.MatchString(p) {
-			return "", fmt.Errorf("unsafe identifier %q", s)
-		}
-		out = append(out, `"`+p+`"`)
-	}
-	return strings.Join(out, "."), nil
+	return trinoIdentifierRenderer.legacyQualified(s)
 }
 
 func (t *Trino) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []string, []*sql.ColumnType, int, error) {
@@ -147,7 +130,11 @@ func (t *Trino) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []st
 		args = append(args, upperArg)
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM %s", buildTrinoSelectClause(q.SelectColumns), qt)
+	selectClause, err := renderSelectColumns(trinoIdentifierRenderer, q.SelectColumns)
+	if err != nil {
+		return nil, nil, nil, -1, err
+	}
+	query := fmt.Sprintf("SELECT %s FROM %s", selectClause, qt)
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -299,25 +286,4 @@ func trinoDSNIsLocal(dsn string) bool {
 	}
 	h := strings.ToLower(strings.TrimSpace(u.Hostname()))
 	return h == "localhost" || h == "127.0.0.1" || h == "::1"
-}
-
-func buildTrinoSelectClause(cols []string) string {
-	if len(cols) == 0 {
-		return "*"
-	}
-	quoted := make([]string, 0, len(cols))
-	for _, c := range cols {
-		c = strings.TrimSpace(c)
-		if c != "" {
-			if q, err := quoteTrinoMultipartIdent(c); err == nil {
-				quoted = append(quoted, q)
-			} else {
-				quoted = append(quoted, c)
-			}
-		}
-	}
-	if len(quoted) == 0 {
-		return "*"
-	}
-	return strings.Join(quoted, ", ")
 }

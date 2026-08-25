@@ -107,8 +107,8 @@ func TestQuoteCassandraIdent(t *testing.T) {
 		{"normal", "my_table", `"my_table"`, false},
 		{"uppercase", "Table1", `"Table1"`, false},
 		{"already quoted", `"my_table"`, `"my_table"`, false},
-		{"spaces invalid", "my table", "", true},
-		{"sql injection", "table;", "", true},
+		{"spaces", "my table", `"my table"`, false},
+		{"sql injection is escaped", "table;", `"table;"`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

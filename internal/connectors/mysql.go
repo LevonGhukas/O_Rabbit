@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -80,24 +79,8 @@ func (m *MySQL) DescribeTable(ctx context.Context, table string) ([]string, []*s
 	return cols, ct, nil
 }
 
-var mysqlIdentPartRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
-
 func quoteMySQLMultipartIdent(s string) (string, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "", fmt.Errorf("empty identifier")
-	}
-	parts := strings.Split(s, ".")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		p = strings.Trim(p, "`")
-		if !mysqlIdentPartRe.MatchString(p) {
-			return "", fmt.Errorf("unsafe identifier %q", s)
-		}
-		out = append(out, "`"+p+"`")
-	}
-	return strings.Join(out, "."), nil
+	return mysqlIdentifierRenderer.legacyQualified(s)
 }
 
 func (m *MySQL) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []string, []*sql.ColumnType, int, error) {
@@ -147,7 +130,11 @@ func (m *MySQL) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []st
 		args = append(args, upperArg)
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM %s", buildMySQLSelectClause(q.SelectColumns), qt)
+	selectClause, err := renderSelectColumns(mysqlIdentifierRenderer, q.SelectColumns)
+	if err != nil {
+		return nil, nil, nil, -1, err
+	}
+	query := fmt.Sprintf("SELECT %s FROM %s", selectClause, qt)
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -393,25 +380,4 @@ func mysqlHostFromDSN(dsn string) (string, bool) {
 		return strings.ToLower(h), true
 	}
 	return "", false
-}
-
-func buildMySQLSelectClause(cols []string) string {
-	if len(cols) == 0 {
-		return "*"
-	}
-	quoted := make([]string, 0, len(cols))
-	for _, c := range cols {
-		c = strings.TrimSpace(c)
-		if c != "" {
-			if q, err := quoteMySQLMultipartIdent(c); err == nil {
-				quoted = append(quoted, q)
-			} else {
-				quoted = append(quoted, c)
-			}
-		}
-	}
-	if len(quoted) == 0 {
-		return "*"
-	}
-	return strings.Join(quoted, ", ")
 }

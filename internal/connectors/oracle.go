@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -24,8 +23,6 @@ const (
 	oracleStatsTimeout    = 2 * time.Minute
 	oracleValidateTimeout = 20 * time.Second
 )
-
-var oracleIdentPartRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 
 type oracleObjectIdent struct {
 	Owner  string
@@ -374,7 +371,11 @@ func buildOracleCursorQuery(q CursorQuery) (string, []any, error) {
 		args = append(args, upperArg)
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM %s", buildOracleSelectClause(q.SelectColumns), qt)
+	selectClause, err := renderSelectColumns(oracleIdentifierRenderer, q.SelectColumns)
+	if err != nil {
+		return "", nil, err
+	}
+	query := fmt.Sprintf("SELECT %s FROM %s", selectClause, qt)
 	if scn := strings.TrimSpace(q.SnapshotContext); scn != "" {
 		// Optional: Oracle requires AS OF SCN directly after the table identifier.
 		query += fmt.Sprintf(" AS OF SCN %s", scn)
@@ -401,19 +402,30 @@ func buildOracleAmbiguousNumberProbeQueries(table, cursorColumn string) (string,
 }
 
 func quoteOracleMultipartIdent(raw string) (string, error) {
-	ident, err := parseOracleObjectIdent(raw)
+	parts, err := splitLegacyIdentifier(raw, `"`, `"`)
 	if err != nil {
 		return "", err
 	}
-	return ident.Quoted, nil
+	// Preserve the case in legacy quoted input and in raw names that contain a
+	// quote. Oracle folds only legacy unquoted identifiers to uppercase.
+	if !strings.Contains(raw, `"`) {
+		for i := range parts {
+			parts[i] = strings.ToUpper(parts[i])
+		}
+	}
+	return oracleIdentifierRenderer.qualified(parts...)
 }
 
 func quoteOracleCursorIdent(raw string) (string, error) {
-	part, err := parseOracleCursorIdent(raw)
+	parts, err := splitLegacyIdentifier(raw, `"`, `"`)
 	if err != nil {
 		return "", err
 	}
-	return part.Quoted, nil
+	part := parts[len(parts)-1]
+	if !strings.Contains(raw, `"`) {
+		part = strings.ToUpper(part)
+	}
+	return oracleIdentifierRenderer.part(part)
 }
 
 func parseOracleObjectIdent(raw string) (oracleObjectIdent, error) {
@@ -443,7 +455,10 @@ func parseOracleCursorIdent(raw string) (oracleIdentPart, error) {
 	if raw == "" {
 		return oracleIdentPart{}, fmt.Errorf("empty identifier")
 	}
-	parts := strings.Split(raw, ".")
+	parts, err := splitLegacyIdentifier(raw, `"`, `"`)
+	if err != nil {
+		return oracleIdentPart{}, err
+	}
 	return parseOracleIdentPart(parts[len(parts)-1])
 }
 
@@ -452,7 +467,10 @@ func parseOracleMultipartIdent(raw string, maxParts int) ([]oracleIdentPart, err
 	if raw == "" {
 		return nil, fmt.Errorf("empty identifier")
 	}
-	parts := strings.Split(raw, ".")
+	parts, err := splitLegacyIdentifier(raw, `"`, `"`)
+	if err != nil {
+		return nil, err
+	}
 	if len(parts) == 0 || len(parts) > maxParts {
 		return nil, fmt.Errorf("oracle identifiers support at most %d parts", maxParts)
 	}
@@ -472,26 +490,14 @@ func parseOracleIdentPart(raw string) (oracleIdentPart, error) {
 	if part == "" {
 		return oracleIdentPart{}, fmt.Errorf("empty identifier")
 	}
-	quoted := strings.HasPrefix(part, `"`) || strings.HasSuffix(part, `"`)
-	if quoted {
-		if len(part) < 2 || !strings.HasPrefix(part, `"`) || !strings.HasSuffix(part, `"`) {
-			return oracleIdentPart{}, fmt.Errorf("unsafe identifier %q", raw)
-		}
-		part = strings.TrimPrefix(part, `"`)
-		part = strings.TrimSuffix(part, `"`)
-	}
-	if !oracleIdentPartRe.MatchString(part) {
-		return oracleIdentPart{}, fmt.Errorf("unsafe identifier %q", raw)
-	}
-	lookup := part
-	sqlName := part
-	if !quoted {
-		lookup = strings.ToUpper(part)
-		sqlName = lookup
+	lookup := strings.ToUpper(part)
+	quoted, err := oracleIdentifierRenderer.part(part)
+	if err != nil {
+		return oracleIdentPart{}, err
 	}
 	return oracleIdentPart{
 		Lookup: lookup,
-		Quoted: `"` + sqlName + `"`,
+		Quoted: quoted,
 	}, nil
 }
 
@@ -757,25 +763,4 @@ func oracleDSNIsLocal(dsn string) bool {
 	}
 	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
-}
-
-func buildOracleSelectClause(cols []string) string {
-	if len(cols) == 0 {
-		return "*"
-	}
-	quoted := make([]string, 0, len(cols))
-	for _, c := range cols {
-		c = strings.TrimSpace(c)
-		if c != "" {
-			if q, err := quoteOracleMultipartIdent(c); err == nil {
-				quoted = append(quoted, q)
-			} else {
-				quoted = append(quoted, c)
-			}
-		}
-	}
-	if len(quoted) == 0 {
-		return "*"
-	}
-	return strings.Join(quoted, ", ")
 }

@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -87,26 +86,9 @@ func (m *MSSQL) DescribeTable(ctx context.Context, table string) ([]string, []*s
 	return cols, ct, nil
 }
 
-var identPartRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
-
 // quoteMSSQLMultipartIdent safely quotes a multipart MSSQL identifier (e.g., database.schema.table).
 func quoteMSSQLMultipartIdent(s string) (string, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "", fmt.Errorf("empty identifier")
-	}
-	parts := strings.Split(s, ".")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		p = strings.TrimPrefix(p, "[")
-		p = strings.TrimSuffix(p, "]")
-		if !identPartRe.MatchString(p) {
-			return "", fmt.Errorf("unsafe identifier %q", s)
-		}
-		out = append(out, "["+p+"]")
-	}
-	return strings.Join(out, "."), nil
+	return mssqlIdentifierRenderer.legacyQualified(s)
 }
 
 // QueryCursor executes a query to fetch rows using ordered cursor bounds.
@@ -159,7 +141,11 @@ func (m *MSSQL) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []st
 		args = append(args, upperArg)
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM %s WITH (NOLOCK)", buildMSSQLSelectClause(q.SelectColumns), qt)
+	selectClause, err := renderSelectColumns(mssqlIdentifierRenderer, q.SelectColumns)
+	if err != nil {
+		return nil, nil, nil, -1, err
+	}
+	query := fmt.Sprintf("SELECT %s FROM %s WITH (NOLOCK)", selectClause, qt)
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -441,25 +427,4 @@ func mssqlHostFromKVDSN(dsn string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-func buildMSSQLSelectClause(cols []string) string {
-	if len(cols) == 0 {
-		return "*"
-	}
-	quoted := make([]string, 0, len(cols))
-	for _, c := range cols {
-		c = strings.TrimSpace(c)
-		if c != "" {
-			if q, err := quoteMSSQLMultipartIdent(c); err == nil {
-				quoted = append(quoted, q)
-			} else {
-				quoted = append(quoted, c)
-			}
-		}
-	}
-	if len(quoted) == 0 {
-		return "*"
-	}
-	return strings.Join(quoted, ", ")
 }

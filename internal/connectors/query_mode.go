@@ -15,7 +15,7 @@ type queryModeDialect struct {
 	engine         string
 	aliasKeyword   string
 	terminator     string
-	quoteIdent     func(string) (string, error)
+	quoteQualified func(...string) (string, error)
 	placeholder    func(int) string
 	orderedReadsOn func() bool
 }
@@ -27,7 +27,7 @@ func queryModeDialectForEngine(engine string) (queryModeDialect, bool) {
 			engine:         "postgres",
 			aliasKeyword:   "AS",
 			terminator:     ";",
-			quoteIdent:     quotePostgresMultipartIdent,
+			quoteQualified: postgresIdentifierRenderer.qualified,
 			placeholder:    func(i int) string { return fmt.Sprintf("$%d", i) },
 			orderedReadsOn: postgresOrderedRangeReadsEnabled,
 		}, true
@@ -36,7 +36,7 @@ func queryModeDialectForEngine(engine string) (queryModeDialect, bool) {
 			engine:         "mysql",
 			aliasKeyword:   "AS",
 			terminator:     ";",
-			quoteIdent:     quoteMySQLMultipartIdent,
+			quoteQualified: mysqlIdentifierRenderer.qualified,
 			placeholder:    func(int) string { return "?" },
 			orderedReadsOn: mysqlOrderedRangeReadsEnabled,
 		}, true
@@ -45,7 +45,7 @@ func queryModeDialectForEngine(engine string) (queryModeDialect, bool) {
 			engine:         "mariadb",
 			aliasKeyword:   "AS",
 			terminator:     ";",
-			quoteIdent:     quoteMySQLMultipartIdent,
+			quoteQualified: mysqlIdentifierRenderer.qualified,
 			placeholder:    func(int) string { return "?" },
 			orderedReadsOn: mariadbOrderedRangeReadsEnabled,
 		}, true
@@ -54,28 +54,28 @@ func queryModeDialectForEngine(engine string) (queryModeDialect, bool) {
 			engine:         "mssql",
 			aliasKeyword:   "AS",
 			terminator:     ";",
-			quoteIdent:     quoteMSSQLMultipartIdent,
+			quoteQualified: mssqlIdentifierRenderer.qualified,
 			placeholder:    func(i int) string { return fmt.Sprintf("@p%d", i) },
 			orderedReadsOn: mssqlOrderedRangeReadsEnabled,
 		}, true
 	case "oracle":
 		return queryModeDialect{
-			engine:       "oracle",
-			aliasKeyword: "",
-			terminator:   "",
-			quoteIdent:   quoteOracleCursorIdent,
-			placeholder:  func(i int) string { return fmt.Sprintf(":%d", i) },
+			engine:         "oracle",
+			aliasKeyword:   "",
+			terminator:     "",
+			quoteQualified: oracleIdentifierRenderer.qualified,
+			placeholder:    func(i int) string { return fmt.Sprintf(":%d", i) },
 			orderedReadsOn: func() bool {
 				return true
 			},
 		}, true
 	case "clickhouse":
 		return queryModeDialect{
-			engine:       "clickhouse",
-			aliasKeyword: "AS",
-			terminator:   ";",
-			quoteIdent:   quoteClickHouseMultipartIdent,
-			placeholder:  func(int) string { return "?" },
+			engine:         "clickhouse",
+			aliasKeyword:   "AS",
+			terminator:     ";",
+			quoteQualified: clickHouseIdentifierRenderer.qualified,
+			placeholder:    func(int) string { return "?" },
 			orderedReadsOn: func() bool {
 				return true
 			},
@@ -85,7 +85,7 @@ func queryModeDialectForEngine(engine string) (queryModeDialect, bool) {
 			engine:         "trino",
 			aliasKeyword:   "AS",
 			terminator:     "",
-			quoteIdent:     quoteTrinoMultipartIdent,
+			quoteQualified: trinoIdentifierRenderer.qualified,
 			placeholder:    func(int) string { return "?" },
 			orderedReadsOn: trinoOrderedRangeReadsEnabled,
 		}, true
@@ -96,11 +96,11 @@ func queryModeDialectForEngine(engine string) (queryModeDialect, bool) {
 		// token()-based scan. orderedReadsOn is false: CQL ORDER BY only works
 		// within a single partition.
 		return queryModeDialect{
-			engine:       "cassandra",
-			aliasKeyword: "",
-			terminator:   "",
-			quoteIdent:   quoteCassandraIdent,
-			placeholder:  func(int) string { return "?" },
+			engine:         "cassandra",
+			aliasKeyword:   "",
+			terminator:     "",
+			quoteQualified: cassandraIdentifierRenderer.qualified,
+			placeholder:    func(int) string { return "?" },
 			orderedReadsOn: func() bool {
 				return false
 			},
@@ -114,7 +114,6 @@ func queryModeDialectForEngine(engine string) (queryModeDialect, bool) {
 			engine:       "mongodb",
 			aliasKeyword: "",
 			terminator:   "",
-			quoteIdent:   func(s string) (string, error) { return s, nil },
 			placeholder:  func(int) string { return "?" },
 			orderedReadsOn: func() bool {
 				return false
@@ -144,7 +143,10 @@ func (d queryModeDialect) quoteCursorColumn(cursorColumn string) (string, error)
 		}
 		return queryModeAlias + "." + qc, nil
 	}
-	return d.quoteIdent(queryModeAlias + "." + leaf)
+	if d.quoteQualified == nil {
+		return "", fmt.Errorf("identifier rendering is not available for %s", d.engine)
+	}
+	return d.quoteQualified(queryModeAlias, leaf)
 }
 
 // QueryHash returns a short stable hash of the normalized query for state,

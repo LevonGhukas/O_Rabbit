@@ -28,17 +28,19 @@ func TestQuoteOracleMultipartIdent(t *testing.T) {
 	}
 }
 
-func TestQuoteOracleMultipartIdentRejectsUnsafe(t *testing.T) {
+func TestQuoteOracleMultipartIdentEscapesRawNames(t *testing.T) {
 	tests := []string{
 		`orders;drop`,
 		`hr.orders where 1=1`,
 		`"bad name"`,
-		`hr..orders`,
 	}
 	for _, tc := range tests {
-		if _, err := quoteOracleMultipartIdent(tc); err == nil {
-			t.Fatalf("quoteOracleMultipartIdent(%q) expected error", tc)
+		if _, err := quoteOracleMultipartIdent(tc); err != nil {
+			t.Fatalf("quoteOracleMultipartIdent(%q): %v", tc, err)
 		}
+	}
+	if _, err := quoteOracleMultipartIdent(`hr..orders`); err == nil {
+		t.Fatal("empty qualified identifier part must remain invalid")
 	}
 }
 
@@ -55,7 +57,7 @@ func TestBuildOracleAmbiguousNumberProbeQueries(t *testing.T) {
 	}
 }
 
-func TestBuildOracleAmbiguousNumberProbeQueriesRejectsUnsafe(t *testing.T) {
+func TestBuildOracleAmbiguousNumberProbeQueriesEscapesRawNames(t *testing.T) {
 	tests := []struct {
 		table  string
 		column string
@@ -64,8 +66,8 @@ func TestBuildOracleAmbiguousNumberProbeQueriesRejectsUnsafe(t *testing.T) {
 		{table: `orders`, column: `id;drop`},
 	}
 	for _, tc := range tests {
-		if _, _, err := buildOracleAmbiguousNumberProbeQueries(tc.table, tc.column); err == nil {
-			t.Fatalf("buildOracleAmbiguousNumberProbeQueries(%q,%q) expected error", tc.table, tc.column)
+		if _, _, err := buildOracleAmbiguousNumberProbeQueries(tc.table, tc.column); err != nil {
+			t.Fatalf("buildOracleAmbiguousNumberProbeQueries(%q,%q): %v", tc.table, tc.column, err)
 		}
 	}
 }

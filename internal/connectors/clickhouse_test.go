@@ -11,8 +11,9 @@ func TestQuoteClickHouseMultipartIdent(t *testing.T) {
 		t.Fatalf("unexpected quoted ident: %q", got)
 	}
 
-	if _, err := quoteClickHouseMultipartIdent("analytics.event-log"); err == nil {
-		t.Fatalf("expected unsafe identifier error")
+	got, err = quoteClickHouseMultipartIdent("analytics.event-log")
+	if err != nil || got != "`analytics`.`event-log`" {
+		t.Fatalf("special identifier = %q, %v", got, err)
 	}
 }
 
