@@ -55,7 +55,7 @@ type runSubmitSourceRequest struct {
 	CursorColumn string `json:"cursor_column"`
 	Incremental  bool   `json:"incremental"` 
 	WhereClause  string `json:"where_clause,omitempty"` 
-	SelectColumns []string          `json:"select_columns,omitempty"` 
+	SelectColumns []string          `json:"select_columns,omitempty"`
 	ColumnTypes   map[string]string `json:"column_types,omitempty"`
 }
 
@@ -394,6 +394,10 @@ func (s *Server) handleRunSubmit(w http.ResponseWriter, r *http.Request) {
 	var req runSubmitRequest
 	if err := readJSON(r, &req); err != nil {
 		writeInvalidInput(w, "invalid JSON body", invalidJSONDetails(err))
+		return
+	}
+	if s.k.IsZero() {
+		writeMasterKeyRequired(w, "connection secrets")
 		return
 	}
 	spec, err := validateRunSubmitRequest(req)
@@ -1080,6 +1084,9 @@ func anyStringValue(v any) string {
 }
 
 func (s *Server) upsertConnectionByName(r *http.Request, req connectionCreateRequest) (db.Connection, error) {
+	if s.k.IsZero() {
+		return db.Connection{}, db.ErrMasterKeyRequired
+	}
 	connections, err := s.st.ListConnections(r.Context())
 	if err != nil {
 		return db.Connection{}, err

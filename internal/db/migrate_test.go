@@ -91,6 +91,38 @@ func TestMigrateAddsRegistrationConfigColumnForLegacyVersion4DB(t *testing.T) {
 	}
 }
 
+func TestMigrationV5ConvergesWhenColumnExistsBeforeVersionRecorded(t *testing.T) {
+	ctx := context.Background()
+	raw := openRawTestDB(t)
+	for _, stmt := range []string{schemaV1, schemaV2, schemaV3, legacySchemaV4} {
+		if _, err := raw.ExecContext(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for version := 1; version <= 4; version++ {
+		if _, err := raw.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES (?, '2026-04-17T00:00:00Z');`, version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := raw.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN registration_config_json TEXT NOT NULL DEFAULT '';`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Migrate(ctx, raw); err != nil {
+		t.Fatalf("resume partially applied migration: %v", err)
+	}
+	if err := Migrate(ctx, raw); err != nil {
+		t.Fatalf("repeat migration: %v", err)
+	}
+	var versions int
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version=5`).Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if versions != 1 {
+		t.Fatalf("version 5 rows=%d want 1", versions)
+	}
+}
+
 func TestMigrationV7PreservesRunsAndLocksCommittingDatasets(t *testing.T) {
 	ctx := context.Background()
 	db := openRawTestDB(t)

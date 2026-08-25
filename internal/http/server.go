@@ -377,6 +377,10 @@ func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
 			writeInvalidInput(w, "missing secret", map[string]any{"field": "secret"})
 			return
 		}
+		if s.k.IsZero() {
+			writeMasterKeyRequired(w, "connection secrets")
+			return
+		}
 
 		id := newID()
 		blob, err := crypto.Encrypt(s.k, req.Secret, []byte(id))
@@ -443,6 +447,10 @@ func (s *Server) handleConnectionByID(w http.ResponseWriter, r *http.Request) {
 		var req connectionCreateRequest
 		if err := readJSON(r, &req); err != nil {
 			writeInvalidInput(w, "invalid JSON body", invalidJSONDetails(err))
+			return
+		}
+		if len(req.Secret) != 0 && s.k.IsZero() {
+			writeMasterKeyRequired(w, "connection secrets")
 			return
 		}
 

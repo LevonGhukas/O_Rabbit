@@ -17,6 +17,16 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 )
 
+func encryptionTestKey(t *testing.T) crypto.Key {
+	t.Helper()
+	t.Setenv("ORABBIT_MASTER_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	k, err := crypto.LoadMasterKeyFromEnv()
+	if err != nil {
+		t.Fatalf("load test master key: %v", err)
+	}
+	return k
+}
+
 func TestHandlerAuthMiddlewareReturnsJSONUnauthorized(t *testing.T) {
 	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{PID: 1, HTTPAddr: ":9100", GRPCAddr: ":9102", DBPath: "test.sqlite"}, "topsecret")
 	h := srv.Handler()
@@ -103,6 +113,55 @@ func TestHealthzRemainsPlainTextLiveness(t *testing.T) {
 	}
 	if body := strings.TrimSpace(rec.Body.String()); body != "ok" {
 		t.Fatalf("body=%q want=%q", body, "ok")
+	}
+}
+
+func TestConnectionSecretWritesRequireMasterKeyAndUseAESGCM(t *testing.T) {
+	st := openTestStore(t)
+	body := `{"name":"source","kind":"source","engine":"postgres","metadata":{},"secret":{"dsn":"postgres://u:p@db/app"}}`
+
+	missingKey := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	rec := httptest.NewRecorder()
+	missingKey.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/connections", strings.NewReader(body)))
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "ORABBIT_MASTER_KEY") {
+		t.Fatalf("missing-key create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	key := encryptionTestKey(t)
+	secure := NewServer(nil, st, nil, key, StatusInfo{}, "")
+	rec = httptest.NewRecorder()
+	secure.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/connections", strings.NewReader(body)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("secure create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	connections, err := st.ListConnections(context.Background())
+	if err != nil || len(connections) != 1 {
+		t.Fatalf("connections=%d err=%v", len(connections), err)
+	}
+	if len(connections[0].SecretEncBlob) == 0 || connections[0].SecretEncBlob[0] != 1 {
+		t.Fatalf("connection secret was not AES-GCM version 1: %x", connections[0].SecretEncBlob)
+	}
+	if strings.Contains(string(connections[0].SecretEncBlob), "postgres://u:p@db/app") {
+		t.Fatal("connection secret persisted plaintext")
+	}
+
+	legacyID := "legacy-connection"
+	legacy, err := crypto.Encrypt(crypto.Key{}, []byte(`{"dsn":"postgres://legacy"}`), []byte(legacyID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateConnection(context.Background(), db.Connection{ID: legacyID, Name: "legacy", Kind: "source", Engine: "postgres", MetadataJSON: []byte(`{}`), SecretEncBlob: legacy}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := crypto.Decrypt(crypto.Key{}, legacy, []byte(legacyID)); err != nil || string(got) != `{"dsn":"postgres://legacy"}` {
+		t.Fatalf("legacy plaintext compatibility got=%s err=%v", got, err)
+	}
+
+	rec = httptest.NewRecorder()
+	update := `{"name":"legacy","kind":"source","engine":"postgres","metadata":{},"secret":{"dsn":"postgres://rotated"}}`
+	missingKey.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/connections/"+legacyID, strings.NewReader(update)))
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "ORABBIT_MASTER_KEY") {
+		t.Fatalf("missing-key update status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

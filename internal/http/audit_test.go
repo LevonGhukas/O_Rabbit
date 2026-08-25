@@ -14,7 +14,7 @@ import (
 
 func TestConnectionCreateWritesAuditRecord(t *testing.T) {
 	st := openTestStore(t)
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "topsecret")
+	srv := NewServer(nil, st, nil, encryptionTestKey(t), StatusInfo{}, "topsecret")
 
 	reqBody := `{
 		"name":"source-1",
