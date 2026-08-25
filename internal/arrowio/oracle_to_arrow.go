@@ -59,7 +59,7 @@ func planOracleColumn(name, dbType string, precision, scale int64, hasDecimal bo
 		return planBinary(name)
 
 	// 5. Strings
-	case clean == "VARCHAR" || clean == "VARCHAR2" || clean == "NVARCHAR2" || clean == "CHAR" || clean == "NCHAR" || clean == "CLOB" || clean == "NCLOB" || clean == "LONG" || clean == "ROWID" || clean == "UROWID":
+	case clean == "VARCHAR" || clean == "VARCHAR2" || clean == "NVARCHAR2" || clean == "CHAR" || clean == "NCHAR" || clean == "CLOB" || clean == "NCLOB" || clean == "LONG" || clean == "ROWID" || clean == "UROWID" || clean == "XMLTYPE" || strings.Contains(clean, "INTERVAL"):
 		return planString(name)
 
 	default:
