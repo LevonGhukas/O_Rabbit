@@ -1195,7 +1195,7 @@ func inferRunIcebergSchema(ctx context.Context, req RunRequest, tableName string
 		if err != nil {
 			return nil, err
 		}
-		_, arrSchema, err = arrowio.PlansFromSQLWithOverrides(cols, colTypes, req.ColumnTypes)
+		_, arrSchema, err = arrowio.PlansFromSQLEngineWithOverrides(req.SourceEngine, cols, colTypes, req.ColumnTypes)
 		if err != nil {
 			return nil, fmt.Errorf("sql->arrow schema: %w", err)
 		}
@@ -1258,7 +1258,7 @@ func InferDurableIcebergSchema(ctx context.Context, engine, dsn, mode, table, qu
 	if len(cols) == 0 {
 		return nil, fmt.Errorf("durable source schema has no columns")
 	}
-	_, arrSchema, err := arrowio.PlansFromSQL(cols, columnTypes)
+	_, arrSchema, err := arrowio.PlansFromSQLEngine(engine, cols, columnTypes)
 	if err != nil {
 		return nil, fmt.Errorf("sql->arrow durable schema: %w", err)
 	}

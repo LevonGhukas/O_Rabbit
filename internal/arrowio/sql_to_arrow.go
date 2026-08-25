@@ -22,7 +22,6 @@ type ColumnPlan struct {
 }
 
 // schemaFromPlans handles schema from plans behavior.
-// It exists to keep this logic isolated and reusable.
 func schemaFromPlans(plans []ColumnPlan) *arrow.Schema {
 	fields := make([]arrow.Field, 0, len(plans))
 	for _, p := range plans {
@@ -31,17 +30,25 @@ func schemaFromPlans(plans []ColumnPlan) *arrow.Schema {
 	return arrow.NewSchema(fields, nil)
 }
 
-// PlansFromSQL handles plans from sql behavior.
-// It exists to keep this logic isolated and reusable.
+// PlansFromSQL converts sql column types to ColumnPlans and an Arrow Schema.
 func PlansFromSQL(cols []string, colTypes []*sql.ColumnType) ([]ColumnPlan, *arrow.Schema, error) {
-	if len(cols) != len(colTypes) {
+	return PlansFromSQLEngine("", cols, colTypes)
+}
+
+// PlansFromSQLEngine converts sql column types to ColumnPlans and an Arrow Schema using the source database engine.
+func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType) ([]ColumnPlan, *arrow.Schema, error) {
+	if colTypes == nil {
+		colTypes = make([]*sql.ColumnType, len(cols))
+	} else if len(cols) != len(colTypes) {
 		return nil, nil, fmt.Errorf("cols/colTypes length mismatch")
 	}
 
 	plans := make([]ColumnPlan, 0, len(cols))
+	fields := make([]arrow.Field, 0, len(cols))
 	for i := range cols {
 		n := cols[i]
 		dbType := ""
+		nullable := true
 		var (
 			precision  int64
 			scale      int64
@@ -54,259 +61,20 @@ func PlansFromSQL(cols []string, colTypes []*sql.ColumnType) ([]ColumnPlan, *arr
 				scale = int64(s)
 				hasDecimal = true
 			}
-		}
-
-		plans = append(plans, planForSQLColumnType(n, dbType, precision, scale, hasDecimal))
-	}
-
-	schema := schemaFromPlans(plans)
-	return plans, schema, nil
-}
-
-func planForSQLColumnType(name, dbType string, precision, scale int64, hasDecimal bool) ColumnPlan {
-	if intType := connectors.ClassifySQLIntegerType(dbType); intType.Integer {
-		switch {
-		case intType.Unsigned && intType.Bits > 64:
-			return planString(name)
-		case intType.Unsigned:
-			return planUint64(name)
-		case intType.Bits == 0 || intType.Bits <= 64:
-			return planInt64(name)
-		default:
-			return planString(name)
-		}
-	}
-
-	// Conservative mapping: use a small set of Arrow types that round-trip reliably.
-	// You can specialize further per engine later.
-	switch {
-	case dbType == "NUMBER":
-		if hasDecimal && scale == 0 && precision > 0 && precision <= 18 {
-			return planInt64(name)
-		}
-		return planString(name)
-	case dbType == "BIT" || dbType == "BOOL" || dbType == "BOOLEAN":
-		return planBool(name)
-	case dbType == "FLOAT" || dbType == "REAL" || strings.Contains(dbType, "DOUBLE"):
-		return planFloat64(name)
-	case strings.Contains(dbType, "DECIMAL") || strings.Contains(dbType, "NUMERIC") || dbType == "MONEY" || dbType == "SMALLMONEY":
-		// Keep exact decimal values without guessing scale/precision.
-		return planString(name)
-	case strings.Contains(dbType, "CHAR") || strings.Contains(dbType, "TEXT") || strings.Contains(dbType, "UUID") || dbType == "UNIQUEIDENTIFIER" || dbType == "CLOB" || dbType == "NCLOB":
-		return planString(name)
-	case strings.Contains(dbType, "BINARY") || dbType == "IMAGE" || dbType == "VARBINARY" || dbType == "RAW" || dbType == "BLOB":
-		return planBinary(name)
-	case strings.Contains(dbType, "DATE") || strings.Contains(dbType, "TIME"):
-		return planTimestampMs(name)
-	default:
-		return planString(name)
-	}
-}
-
-// planInt64 handles plan int 64 behavior.
-// It exists to keep this logic isolated and reusable.
-func planInt64(name string) ColumnPlan {
-	appendFn := func(b array.Builder, v any) error {
-		bb := b.(*array.Int64Builder)
-		if v == nil {
-			bb.AppendNull()
-			return nil
-		}
-		if i, ok := asInt64(v); ok {
-			bb.Append(i)
-			return nil
-		}
-		return fmt.Errorf("int64 append: unsupported %T", v)
-	}
-	return ColumnPlan{
-		Name:     name,
-		DataType: arrow.PrimitiveTypes.Int64,
-		Builder:  func(mem memory.Allocator) array.Builder { return array.NewInt64Builder(mem) },
-		Append:   appendFn,
-	}
-}
-
-func planUint64(name string) ColumnPlan {
-	appendFn := func(b array.Builder, v any) error {
-		bb := b.(*array.Uint64Builder)
-		if v == nil {
-			bb.AppendNull()
-			return nil
-		}
-		if i, ok := asUint64(v); ok {
-			bb.Append(i)
-			return nil
-		}
-		return fmt.Errorf("uint64 append: unsupported %T", v)
-	}
-	return ColumnPlan{
-		Name:     name,
-		DataType: arrow.PrimitiveTypes.Uint64,
-		Builder:  func(mem memory.Allocator) array.Builder { return array.NewUint64Builder(mem) },
-		Append:   appendFn,
-	}
-}
-
-// planFloat64 handles plan float 64 behavior.
-// It exists to keep this logic isolated and reusable.
-func planFloat64(name string) ColumnPlan {
-	appendFn := func(b array.Builder, v any) error {
-		bb := b.(*array.Float64Builder)
-		if v == nil {
-			bb.AppendNull()
-			return nil
-		}
-		if f, ok := asFloat64(v); ok {
-			bb.Append(f)
-			return nil
-		}
-		switch x := v.(type) {
-		case []byte:
-			f, ok := parseFloat64Text(string(x))
-			if !ok {
-				bb.AppendNull()
-				return nil
+			if isNullable, ok := colTypes[i].Nullable(); ok {
+				nullable = isNullable
 			}
-			bb.Append(f)
-		case string:
-			f, ok := parseFloat64Text(x)
-			if !ok {
-				bb.AppendNull()
-				return nil
-			}
-			bb.Append(f)
-		default:
-			return fmt.Errorf("float64 append: unsupported %T", v)
 		}
-		return nil
+
+		plan := PlanForSQLColumn(engine, n, dbType, precision, scale, hasDecimal)
+		plans = append(plans, plan)
+		fields = append(fields, arrow.Field{Name: plan.Name, Type: plan.DataType, Nullable: nullable})
 	}
-	return ColumnPlan{
-		Name:     name,
-		DataType: arrow.PrimitiveTypes.Float64,
-		Builder:  func(mem memory.Allocator) array.Builder { return array.NewFloat64Builder(mem) },
-		Append:   appendFn,
-	}
+
+	return plans, arrow.NewSchema(fields, nil), nil
 }
 
-// planBool handles plan bool behavior.
-// It exists to keep this logic isolated and reusable.
-func planBool(name string) ColumnPlan {
-	appendFn := func(b array.Builder, v any) error {
-		bb := b.(*array.BooleanBuilder)
-		if v == nil {
-			bb.AppendNull()
-			return nil
-		}
-		if parsed, ok := asBool(v); ok {
-			bb.Append(parsed)
-			return nil
-		}
-		return fmt.Errorf("bool append: unsupported %T", v)
-	}
-	return ColumnPlan{
-		Name:     name,
-		DataType: arrow.FixedWidthTypes.Boolean,
-		Builder:  func(mem memory.Allocator) array.Builder { return array.NewBooleanBuilder(mem) },
-		Append:   appendFn,
-	}
-}
 
-// planString handles plan string behavior.
-// It exists to keep this logic isolated and reusable.
-func planString(name string) ColumnPlan {
-	appendFn := func(b array.Builder, v any) error {
-		bb := b.(*array.StringBuilder)
-		if v == nil {
-			bb.AppendNull()
-			return nil
-		}
-		switch x := v.(type) {
-		case string:
-			bb.Append(x)
-		case []byte:
-			bb.Append(string(x))
-		case time.Time:
-			bb.Append(x.UTC().Format(time.RFC3339Nano))
-		default:
-			bb.Append(fmt.Sprint(v))
-		}
-		return nil
-	}
-	return ColumnPlan{
-		Name:     name,
-		DataType: arrow.BinaryTypes.String,
-		Builder:  func(mem memory.Allocator) array.Builder { return array.NewStringBuilder(mem) },
-		Append:   appendFn,
-	}
-}
-
-// planBinary handles plan binary behavior.
-// It exists to keep this logic isolated and reusable.
-func planBinary(name string) ColumnPlan {
-	appendFn := func(b array.Builder, v any) error {
-		bb := b.(*array.BinaryBuilder)
-		if v == nil {
-			bb.AppendNull()
-			return nil
-		}
-		switch x := v.(type) {
-		case []byte:
-			bb.Append(x)
-		case string:
-			bb.Append([]byte(x))
-		default:
-			return fmt.Errorf("binary append: unsupported %T", v)
-		}
-		return nil
-	}
-	return ColumnPlan{
-		Name:     name,
-		DataType: arrow.BinaryTypes.Binary,
-		Builder:  func(mem memory.Allocator) array.Builder { return array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary) },
-		Append:   appendFn,
-	}
-}
-
-// planTimestampMs handles plan timestamp ms behavior.
-// It exists to keep this logic isolated and reusable.
-func planTimestampMs(name string) ColumnPlan {
-	tsType := &arrow.TimestampType{Unit: arrow.Millisecond, TimeZone: "UTC"}
-	appendFn := func(b array.Builder, v any) error {
-		bb := b.(*array.TimestampBuilder)
-		if v == nil {
-			bb.AppendNull()
-			return nil
-		}
-		switch x := v.(type) {
-		case time.Time:
-			bb.Append(arrow.Timestamp(x.UTC().UnixMilli()))
-		case string:
-			t, ok := parseTimestampValue(x)
-			if !ok {
-				bb.AppendNull()
-				return nil
-			}
-			bb.Append(arrow.Timestamp(t.UTC().UnixMilli()))
-		case []byte:
-			t, ok := parseTimestampValue(string(x))
-			if !ok {
-				bb.AppendNull()
-				return nil
-			}
-			bb.Append(arrow.Timestamp(t.UTC().UnixMilli()))
-		default:
-			bb.AppendNull()
-			return nil
-		}
-		return nil
-	}
-	return ColumnPlan{
-		Name:     name,
-		DataType: tsType,
-		Builder:  func(mem memory.Allocator) array.Builder { return array.NewTimestampBuilder(mem, tsType) },
-		Append:   appendFn,
-	}
-}
 
 func parseTimestampValue(raw string) (time.Time, bool) {
 	raw = strings.TrimSpace(raw)
@@ -340,7 +108,7 @@ func parseFloat64Text(raw string) (float64, bool) {
 
 func parseTruthyText(raw string) bool {
 	s := strings.TrimSpace(raw)
-	return s == "1" || strings.EqualFold(s, "true")
+	return s == "1" || strings.EqualFold(s, "true") || strings.EqualFold(s, "t") || strings.EqualFold(s, "yes") || strings.EqualFold(s, "y")
 }
 
 func asFloat64(v any) (float64, bool) {
@@ -353,8 +121,26 @@ func asFloat64(v any) (float64, bool) {
 		return float64(x), true
 	case int32:
 		return float64(x), true
+	case int16:
+		return float64(x), true
+	case int8:
+		return float64(x), true
 	case int:
 		return float64(x), true
+	case uint64:
+		return float64(x), true
+	case uint32:
+		return float64(x), true
+	case uint16:
+		return float64(x), true
+	case uint8:
+		return float64(x), true
+	case uint:
+		return float64(x), true
+	case []byte:
+		return parseFloat64Text(string(x))
+	case string:
+		return parseFloat64Text(x)
 	default:
 		return 0, false
 	}
@@ -368,9 +154,26 @@ func asBool(v any) (bool, bool) {
 		return x != 0, true
 	case int32:
 		return x != 0, true
+	case int16:
+		return x != 0, true
+	case int8:
+		return x != 0, true
 	case int:
 		return x != 0, true
+	case uint64:
+		return x != 0, true
+	case uint32:
+		return x != 0, true
+	case uint16:
+		return x != 0, true
+	case uint8:
+		return x != 0, true
+	case uint:
+		return x != 0, true
 	case []byte:
+		if len(x) == 1 {
+			return x[0] != 0, true
+		}
 		return parseTruthyText(string(x)), true
 	case string:
 		return parseTruthyText(x), true
@@ -379,8 +182,6 @@ func asBool(v any) (bool, bool) {
 	}
 }
 
-// asInt64 handles as int 64 behavior.
-// It exists to keep this logic isolated and reusable.
 func asInt64(v any) (int64, bool) {
 	switch x := v.(type) {
 	case int64:
@@ -394,12 +195,17 @@ func asInt64(v any) (int64, bool) {
 	case int:
 		return int64(x), true
 	case uint64:
+		if x > 9223372036854775807 {
+			return 0, false
+		}
 		return int64(x), true
 	case uint32:
 		return int64(x), true
 	case uint16:
 		return int64(x), true
 	case uint8:
+		return int64(x), true
+	case uint:
 		return int64(x), true
 	case []byte:
 		i, err := strconv.ParseInt(strings.TrimSpace(string(x)), 10, 64)
@@ -428,6 +234,8 @@ func asUint64(v any) (uint64, bool) {
 		return uint64(x), true
 	case uint8:
 		return uint64(x), true
+	case uint:
+		return uint64(x), true
 	case int64:
 		if x < 0 {
 			return 0, false
@@ -454,6 +262,13 @@ func asUint64(v any) (uint64, bool) {
 		}
 		return uint64(x), true
 	case []byte:
+		if len(x) == 8 {
+			var u uint64
+			for _, b := range x {
+				u = (u << 8) | uint64(b)
+			}
+			return u, true
+		}
 		i, err := strconv.ParseUint(strings.TrimSpace(string(x)), 10, 64)
 		if err != nil {
 			return 0, false
@@ -471,21 +286,20 @@ func asUint64(v any) (uint64, bool) {
 }
 
 // RowsToRecordBatches consumes *sql.Rows and emits Arrow Records via onRecord.
-//
-// The caller owns the record passed to onRecord (must call rec.Retain() if it needs it
-// after onRecord returns; the iterator will Release() it).
 func RowsToRecordBatches(rows *sql.Rows, cols []string, colTypes []*sql.ColumnType, batchSize int, alloc memory.Allocator, cursorIdx int, cursorDomain connectors.CursorDomain, onRecord func(schema *arrow.Schema, rec arrow.RecordBatch) error) (int64, string, error) {
 	return RowsToRecordBatchesWithOverrides(rows, cols, colTypes, nil, batchSize, alloc, cursorIdx, cursorDomain, onRecord)
 }
 
 func RowsToRecordBatchesWithOverrides(rows *sql.Rows, cols []string, colTypes []*sql.ColumnType, targetTypes map[string]string, batchSize int, alloc memory.Allocator, cursorIdx int, cursorDomain connectors.CursorDomain, onRecord func(schema *arrow.Schema, rec arrow.RecordBatch) error) (int64, string, error) {
-	plans, schema, err := PlansFromSQLWithOverrides(cols, colTypes, targetTypes)
+	return RowsToRecordBatchesEngineWithOverrides("", rows, cols, colTypes, targetTypes, batchSize, alloc, cursorIdx, cursorDomain, onRecord)
+}
+
+func RowsToRecordBatchesEngineWithOverrides(engine string, rows *sql.Rows, cols []string, colTypes []*sql.ColumnType, targetTypes map[string]string, batchSize int, alloc memory.Allocator, cursorIdx int, cursorDomain connectors.CursorDomain, onRecord func(schema *arrow.Schema, rec arrow.RecordBatch) error) (int64, string, error) {
+	plans, schema, err := PlansFromSQLEngineWithOverrides(engine, cols, colTypes, targetTypes)
 	if err != nil {
 		return 0, "", err
 	}
-	// batchSize is treated as the *maximum* desired record-batch size. The function
-	// adapts the actual batch size by bytes to avoid OOM on wide rows while keeping
-	// large batches for throughput.
+
 	maxBatchSize := batchSize
 	if maxBatchSize <= 0 {
 		maxBatchSize = 50_000
@@ -500,7 +314,6 @@ func RowsToRecordBatchesWithOverrides(rows *sql.Rows, cols []string, colTypes []
 	)
 
 	curBatchSize := maxBatchSize
-	// Start conservatively; we can ramp up quickly after the first emitted record.
 	if curBatchSize > 10_000 {
 		curBatchSize = 10_000
 	}
@@ -550,7 +363,6 @@ func RowsToRecordBatchesWithOverrides(rows *sql.Rows, cols []string, colTypes []
 		}
 		defer rec.Release()
 
-		// Estimate record size and adapt the *next* batch size.
 		if inBatch > 0 {
 			var recBytes uint64
 			ncols := int(rec.NumCols())
@@ -575,7 +387,6 @@ func RowsToRecordBatchesWithOverrides(rows *sql.Rows, cols []string, colTypes []
 					if next > maxBatchSize {
 						next = maxBatchSize
 					}
-					// Avoid wild swings.
 					if next > curBatchSize*2 {
 						next = curBatchSize * 2
 					}
@@ -637,7 +448,12 @@ func RowsToRecordBatchesWithOverrides(rows *sql.Rows, cols []string, colTypes []
 
 // PlansFromSQLWithOverrides returns Arrow plans and schema updated with requested target types and nullability.
 func PlansFromSQLWithOverrides(cols []string, colTypes []*sql.ColumnType, targetTypes map[string]string) ([]ColumnPlan, *arrow.Schema, error) {
-	plans, schema, err := PlansFromSQL(cols, colTypes)
+	return PlansFromSQLEngineWithOverrides("", cols, colTypes, targetTypes)
+}
+
+// PlansFromSQLEngineWithOverrides returns Arrow plans and schema updated with requested target types and nullability for a given engine.
+func PlansFromSQLEngineWithOverrides(engine string, cols []string, colTypes []*sql.ColumnType, targetTypes map[string]string) ([]ColumnPlan, *arrow.Schema, error) {
+	plans, schema, err := PlansFromSQLEngine(engine, cols, colTypes)
 	if err != nil || len(targetTypes) == 0 {
 		return plans, schema, err
 	}
@@ -650,14 +466,8 @@ func PlansFromSQLWithOverrides(cols []string, colTypes []*sql.ColumnType, target
 		if targetTypeStr, ok := targetTypes[f.Name]; ok && strings.TrimSpace(targetTypeStr) != "" {
 			tStr := strings.TrimSpace(targetTypeStr)
 			nullable := strings.HasPrefix(strings.ToLower(tStr), "nullable(")
-			
-			cleanType := tStr
-			if nullable {
-				cleanType = strings.TrimSuffix(strings.TrimPrefix(tStr, "Nullable("), ")")
-				cleanType = strings.TrimSuffix(strings.TrimPrefix(cleanType, "nullable("), ")")
-			}
-			
-			newPlan := planForSQLColumnType(f.Name, strings.ToUpper(cleanType), 0, 0, false)
+
+			newPlan := PlanForTargetType(f.Name, tStr)
 			plans[i] = newPlan
 			newFields[i] = arrow.Field{Name: f.Name, Type: newPlan.DataType, Nullable: nullable}
 		}

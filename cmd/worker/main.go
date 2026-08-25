@@ -593,11 +593,7 @@ func (realLeaseClock) NewTimer(d time.Duration) leaseTimer {
 func (t realLeaseTimer) C() <-chan time.Time { return t.timer.C }
 func (t realLeaseTimer) Stop()               { t.timer.Stop() }
 
-func executeTask(ctx context.Context, log *slog.Logger, cp grpcpb.ControlPlaneClient, workerID string, t *grpcpb.TaskAssignment, clients *clientCache) error {
-	return executeTaskWithBody(ctx, cp, workerID, t, realLeaseClock{}, func(taskCtx context.Context) error {
-		return executeTaskBody(taskCtx, log, cp, workerID, t, clients)
-	})
-}
+
 
 func executeTaskManaged(ctx context.Context, log *slog.Logger, cp grpcpb.ControlPlaneClient, workerID, workerInstanceID string, t *grpcpb.TaskAssignment, clients *clientCache, manager *workerworkspace.Manager) error {
 	workspace, err := manager.Create(t.RunId, t.TaskId, t.AttemptId, t.AttemptNumber, workerID, workerInstanceID)
@@ -651,9 +647,7 @@ func executeTaskWithBody(ctx context.Context, cp grpcpb.ControlPlaneClient, work
 	}
 }
 
-func maintainTaskLease(ctx context.Context, cp grpcpb.ControlPlaneClient, workerID string, t *grpcpb.TaskAssignment, cancel context.CancelFunc, lost chan<- error) {
-	maintainTaskLeaseWithClock(ctx, cp, workerID, t, cancel, lost, realLeaseClock{})
-}
+
 
 func renewalDelay(now, deadline time.Time) time.Duration {
 	remaining := deadline.Sub(now)
@@ -1025,7 +1019,7 @@ func executeTaskBody(ctx context.Context, log *slog.Logger, cp grpcpb.ControlPla
 	return nil
 }
 
-func buildAttemptRunPrefix(datasetPrefix, runID, taskID, attemptID string) string {
+func buildAttemptRunPrefix(datasetPrefix, runID, _, _ string) string {
 	return strings.TrimSuffix(datasetPrefix, "/") + "/_runs/run-" + runID
 }
 
@@ -1098,7 +1092,7 @@ func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 	)
 
 	convertStart := time.Now()
-	total, actualMaxCursor, err := arrowio.RowsToRecordBatchesWithOverrides(rows, cols, colTypes, ps.ColumnTypes, 50_000, alloc, cursorIdx, connectors.NormalizeCursorDomain(ps.CursorDomain), func(schema *arrow.Schema, rec arrow.RecordBatch) error {
+	total, actualMaxCursor, err := arrowio.RowsToRecordBatchesEngineWithOverrides(sourceEngine, rows, cols, colTypes, ps.ColumnTypes, 50_000, alloc, cursorIdx, connectors.NormalizeCursorDomain(ps.CursorDomain), func(schema *arrow.Schema, rec arrow.RecordBatch) error {
 		rowsRead += rec.NumRows()
 		if time.Since(lastProg) > 5*time.Second {
 			lastProg = time.Now()

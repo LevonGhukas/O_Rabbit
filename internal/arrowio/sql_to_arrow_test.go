@@ -8,59 +8,52 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 )
 
-func buildFloat64Array(t *testing.T, values ...any) (*array.Float64, []error) {
+func buildFloat64Array(t *testing.T, vals ...any) (*array.Float64, []error) {
 	t.Helper()
+	plan := planFloat64("c_float")
+	b := plan.Builder(memory.DefaultAllocator)
+	defer b.Release()
 
-	plan := planFloat64("col")
-	builder := plan.Builder(memory.NewGoAllocator())
-	t.Cleanup(builder.Release)
-
-	errs := make([]error, 0, len(values))
-	for _, v := range values {
-		errs = append(errs, plan.Append(builder, v))
+	errs := make([]error, len(vals))
+	for i, v := range vals {
+		errs[i] = plan.Append(b, v)
 	}
 
-	raw := builder.NewArray()
-	arr, ok := raw.(*array.Float64)
-	if !ok {
-		raw.Release()
-		t.Fatalf("NewArray() type = %T, want *array.Float64", raw)
-	}
-	t.Cleanup(arr.Release)
+	arr := b.NewArray().(*array.Float64)
 	return arr, errs
 }
 
-func buildBoolArray(t *testing.T, values ...any) (*array.Boolean, []error) {
+func buildBoolArray(t *testing.T, vals ...any) (*array.Boolean, []error) {
 	t.Helper()
+	plan := planBool("c_bool")
+	b := plan.Builder(memory.DefaultAllocator)
+	defer b.Release()
 
-	plan := planBool("col")
-	builder := plan.Builder(memory.NewGoAllocator())
-	t.Cleanup(builder.Release)
-
-	errs := make([]error, 0, len(values))
-	for _, v := range values {
-		errs = append(errs, plan.Append(builder, v))
+	errs := make([]error, len(vals))
+	for i, v := range vals {
+		errs[i] = plan.Append(b, v)
 	}
 
-	raw := builder.NewArray()
-	arr, ok := raw.(*array.Boolean)
-	if !ok {
-		raw.Release()
-		t.Fatalf("NewArray() type = %T, want *array.Boolean", raw)
-	}
-	t.Cleanup(arr.Release)
+	arr := b.NewArray().(*array.Boolean)
 	return arr, errs
 }
 
 func TestPlanFloat64AppendConversions(t *testing.T) {
 	arr, errs := buildFloat64Array(t,
-		float32(1.25),
-		int64(2),
-		int32(3),
-		int(4),
-		"5.5",
-		[]byte("6.75"),
-		"nope",
+		float64(1.5),
+		float32(2.5),
+		int64(3),
+		int32(4),
+		int16(5),
+		int8(6),
+		int(7),
+		uint64(8),
+		uint32(9),
+		uint16(10),
+		uint8(11),
+		uint(12),
+		[]byte("13.5"),
+		"14.5",
 	)
 
 	for i, err := range errs {
@@ -69,7 +62,7 @@ func TestPlanFloat64AppendConversions(t *testing.T) {
 		}
 	}
 
-	want := []float64{1.25, 2, 3, 4, 5.5, 6.75}
+	want := []float64{1.5, 2.5, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13.5, 14.5}
 	for i, v := range want {
 		if arr.IsNull(i) {
 			t.Fatalf("value %d unexpectedly null", i)
@@ -77,10 +70,6 @@ func TestPlanFloat64AppendConversions(t *testing.T) {
 		if got := arr.Value(i); got != v {
 			t.Fatalf("value %d = %v, want %v", i, got, v)
 		}
-	}
-
-	if !arr.IsNull(6) {
-		t.Fatalf("parse failure should append null")
 	}
 }
 
@@ -138,16 +127,16 @@ func TestPlanForSQLColumnTypeOracle(t *testing.T) {
 		wantType   arrow.DataType
 	}{
 		{name: "number_int64", dbType: "NUMBER", precision: 18, scale: 0, hasDecimal: true, wantType: arrow.PrimitiveTypes.Int64},
-		{name: "number_string", dbType: "NUMBER", precision: 20, scale: 0, hasDecimal: true, wantType: arrow.BinaryTypes.String},
+		{name: "number_decimal", dbType: "NUMBER", precision: 20, scale: 0, hasDecimal: true, wantType: &arrow.Decimal128Type{Precision: 20, Scale: 0}},
 		{name: "varchar2", dbType: "VARCHAR2", wantType: arrow.BinaryTypes.String},
 		{name: "raw", dbType: "RAW", wantType: arrow.BinaryTypes.Binary},
 		{name: "blob", dbType: "BLOB", wantType: arrow.BinaryTypes.Binary},
-		{name: "date", dbType: "DATE", wantType: &arrow.TimestampType{Unit: arrow.Millisecond, TimeZone: "UTC"}},
-		{name: "timestamp", dbType: "TIMESTAMP", wantType: &arrow.TimestampType{Unit: arrow.Millisecond, TimeZone: "UTC"}},
+		{name: "date", dbType: "DATE", wantType: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: ""}},
+		{name: "timestamp", dbType: "TIMESTAMP", wantType: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: ""}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			plan := planForSQLColumnType("col", tc.dbType, tc.precision, tc.scale, tc.hasDecimal)
+			plan := PlanForSQLColumn("oracle", "col", tc.dbType, tc.precision, tc.scale, tc.hasDecimal)
 			if !arrow.TypeEqual(plan.DataType, tc.wantType) {
 				t.Fatalf("type=%s want %s", plan.DataType, tc.wantType)
 			}
