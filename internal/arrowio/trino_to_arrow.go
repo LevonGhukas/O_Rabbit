@@ -66,7 +66,7 @@ func planTrinoColumn(name, dbType string, precision, scale int64, hasDecimal boo
 		return planBinary(name)
 
 	// 8. Strings, UUID, IP, JSON, Row, Map
-	case clean == "UUID" || clean == "VARCHAR" || clean == "CHAR" || clean == "JSON" || clean == "IPADDRESS" || clean == "ROW" || clean == "MAP":
+	case clean == "UUID" || clean == "VARCHAR" || clean == "CHAR" || clean == "JSON" || clean == "IPADDRESS" || clean == "ROW" || clean == "MAP" || strings.Contains(clean, "INTERVAL"):
 		return planString(name)
 
 	default:

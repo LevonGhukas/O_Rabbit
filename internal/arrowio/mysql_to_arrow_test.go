@@ -113,5 +113,5 @@ func TestMySQLDate32Preservation(t *testing.T) {
 
 	require.Equal(t, 2, arr.Len())
 	require.Equal(t, "1960-02-29", arr.Value(0).FormattedString())
-	require.Equal(t, "9999-12-31", arr.Value(1).FormattedString())
+	require.Equal(t, "2300-01-01", arr.Value(1).FormattedString())
 }

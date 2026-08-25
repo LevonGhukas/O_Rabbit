@@ -107,7 +107,7 @@ func planClickHouseColumn(name, dbType string, precision, scale int64, hasDecima
 		return planList(name, innerPlan)
 
 	// 8. Strings, UUID, IP, JSON, Tuples, Maps, Enums
-	case clean == "UUID" || clean == "IPV4" || clean == "IPV6" || clean == "STRING" || clean == "FIXEDSTRING" || clean == "ENUM8" || clean == "ENUM16" || clean == "JSON" || clean == "TUPLE" || clean == "MAP" || clean == "DYNAMIC" || clean == "VARIANT":
+	case clean == "UUID" || clean == "IPV4" || clean == "IPV6" || clean == "STRING" || clean == "FIXEDSTRING" || clean == "ENUM8" || clean == "ENUM16" || clean == "JSON" || clean == "TUPLE" || clean == "MAP" || clean == "DYNAMIC" || clean == "VARIANT" || clean == "INT128" || clean == "INT256" || clean == "UINT128" || clean == "UINT256" || clean == "POINT" || clean == "RING" || clean == "POLYGON" || clean == "MULTIPOLYGON" || clean == "LINESTRING" || clean == "MULTILINESTRING":
 		return planString(name)
 
 	default:

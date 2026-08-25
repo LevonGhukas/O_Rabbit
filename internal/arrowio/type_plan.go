@@ -413,6 +413,16 @@ func planBool(name string) ColumnPlan {
 	}
 }
 
+const (
+	MinClickHouseDate32 = arrow.Date32(-25567) // 1900-01-01
+	MaxClickHouseDate32 = arrow.Date32(120530) // 2299-12-31
+)
+
+var (
+	MinClickHouseTimestamp = time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)
+	MaxClickHouseTimestamp = time.Date(2299, 12, 31, 23, 59, 59, 999999000, time.UTC)
+)
+
 func planDate32(name string) ColumnPlan {
 	return ColumnPlan{
 		Name:     name,
@@ -429,6 +439,11 @@ func planDate32(name string) ColumnPlan {
 			if !ok {
 				bb.AppendNull()
 				return nil
+			}
+			if d < MinClickHouseDate32 {
+				d = MinClickHouseDate32
+			} else if d > MaxClickHouseDate32 {
+				d = MaxClickHouseDate32
 			}
 			bb.Append(d)
 			return nil
@@ -479,10 +494,14 @@ func planTimestampUs(name string, timeZone string) ColumnPlan {
 				return nil
 			}
 			if timeZone == "UTC" {
-				bb.Append(arrow.Timestamp(t.UTC().UnixMicro()))
-			} else {
-				bb.Append(arrow.Timestamp(t.UnixMicro()))
+				t = t.UTC()
 			}
+			if t.Before(MinClickHouseTimestamp) {
+				t = MinClickHouseTimestamp
+			} else if t.After(MaxClickHouseTimestamp) {
+				t = MaxClickHouseTimestamp
+			}
+			bb.Append(arrow.Timestamp(t.UnixMicro()))
 			return nil
 		},
 	}
@@ -626,6 +645,8 @@ func asSafeString(v any) string {
 		return formatCanonicalUUID(x[:])
 	case time.Time:
 		return x.UTC().Format(time.RFC3339Nano)
+	case fmt.Stringer:
+		return x.String()
 	default:
 		rv := reflect.ValueOf(v)
 		if rv.Kind() == reflect.Map || rv.Kind() == reflect.Slice || rv.Kind() == reflect.Struct {
@@ -708,11 +729,17 @@ func asDecimal128(v any, prec, scale int32) (decimal128.Num, bool) {
 func asDate32(v any) (arrow.Date32, bool) {
 	switch x := v.(type) {
 	case time.Time:
+		if x.IsZero() {
+			return 0, false
+		}
 		return arrow.Date32FromTime(x.UTC()), true
 	case arrow.Date32:
 		return x, true
 	case string:
 		raw := strings.TrimSpace(x)
+		if raw == "" || raw == "0000-00-00" || raw == "0000-00-00 00:00:00" {
+			return 0, false
+		}
 		if t, err := time.Parse("2006-01-02", raw); err == nil {
 			return arrow.Date32FromTime(t), true
 		}
@@ -782,9 +809,22 @@ func asTime64Microseconds(v any) (int64, bool) {
 func asTimestamp(v any) (time.Time, bool) {
 	switch x := v.(type) {
 	case time.Time:
+		if x.IsZero() {
+			return time.Time{}, false
+		}
 		return x, true
 	case string:
-		return parseTimestampValue(x)
+		raw := strings.TrimSpace(x)
+		if raw == "" || raw == "0000-00-00" || raw == "0000-00-00 00:00:00" {
+			return time.Time{}, false
+		}
+		if strings.EqualFold(raw, "infinity") {
+			return MaxClickHouseTimestamp, true
+		}
+		if strings.EqualFold(raw, "-infinity") {
+			return MinClickHouseTimestamp, true
+		}
+		return parseTimestampValue(raw)
 	case []byte:
 		return parseTimestampValue(string(x))
 	case int64:
@@ -835,7 +875,8 @@ func extractSliceItems(v any) ([]any, bool) {
 		n := rv.Len()
 		out := make([]any, n)
 		for i := 0; i < n; i++ {
-			out[i] = rv.Index(i).Interface()
+			elem := rv.Index(i).Interface()
+			out[i] = dereferenceValue(elem)
 		}
 		return out, true
 	}
