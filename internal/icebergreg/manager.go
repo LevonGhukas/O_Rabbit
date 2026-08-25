@@ -53,6 +53,7 @@ type RunRequest struct {
 	SourceTable  string
 	SourceQuery  string
 	ColumnTypes  map[string]string
+	RecordPath   string
 	SelectColumns []string
 	QueryHash    string
 	Incremental  bool
@@ -78,6 +79,13 @@ type RunRequest struct {
 
 type RunResult struct {
 	Objects int
+}
+
+func documentFilter(engine, recordPath string) map[string]any {
+	if connectors.NormalizeSourceEngine(engine) != "s3" || strings.TrimSpace(recordPath) == "" {
+		return nil
+	}
+	return map[string]any{"record_path": strings.TrimSpace(recordPath)}
 }
 
 type datasetState struct {
@@ -1162,7 +1170,7 @@ func inferRunIcebergSchema(ctx context.Context, req RunRequest, tableName string
 		}
 		defer db.Close()
 
-		it, err := db.StreamDocuments(ctx, req.SourceTable, nil, 1000)
+		it, err := db.StreamDocuments(ctx, req.SourceTable, documentFilter(req.SourceEngine, req.RecordPath), 1000)
 		if err != nil {
 			return nil, fmt.Errorf("stream documents for iceberg auto-create: %w", err)
 		}
@@ -1219,14 +1227,14 @@ func inferRunIcebergSchema(ctx context.Context, req RunRequest, tableName string
 // InferDurableIcebergSchema snapshots the source/query schema in Iceberg's
 // stable JSON representation before a zero-artifact run enters its durable
 // commit boundary.
-func InferDurableIcebergSchema(ctx context.Context, engine, dsn, mode, table, query string) (json.RawMessage, error) {
+func InferDurableIcebergSchema(ctx context.Context, engine, dsn, mode, table, query, recordPath string) (json.RawMessage, error) {
 	if connectors.SupportsDocumentReader(engine) {
 		reader, err := connectors.OpenDocumentReader(ctx, engine, dsn)
 		if err != nil {
 			return nil, fmt.Errorf("open document source for durable schema: %w", err)
 		}
 		defer reader.Close()
-		it, err := reader.StreamDocuments(ctx, table, nil, 1000)
+		it, err := reader.StreamDocuments(ctx, table, documentFilter(engine, recordPath), 1000)
 		if err != nil {
 			return nil, fmt.Errorf("stream documents for durable schema: %w", err)
 		}
