@@ -74,6 +74,14 @@ type ReferenceEvidence struct {
 	EvidenceDigest string            `json:"evidence_digest"`
 }
 
+const canceledObjectTimestampLayout = "2006-01-02T15:04:05.000000000Z07:00"
+
+// canceledObjectTimestamp has fixed-width fractional seconds so SQLite TEXT
+// comparisons preserve the same ordering as the represented instants.
+func canceledObjectTimestamp(t time.Time) string {
+	return t.UTC().Format(canceledObjectTimestampLayout)
+}
+
 func canceledCandidateID(attemptID, key, digest string) string {
 	sum := sha256.Sum256([]byte(attemptID + "\x00" + key + "\x00" + digest))
 	return "canceled-object-" + hex.EncodeToString(sum[:16])
@@ -88,7 +96,7 @@ func (s *Store) createCanceledObjectCandidatesTx(ctx context.Context, tx *sql.Tx
 	if err != nil {
 		discovered = time.Now().UTC()
 	}
-	quarantine := discovered.Add(retention).UTC().Format(time.RFC3339Nano)
+	quarantine := canceledObjectTimestamp(discovered.Add(retention))
 	rows, err := tx.QueryContext(ctx, `SELECT m.run_id,m.task_id,m.attempt_id,m.object_key,m.object_size,m.object_sha256,r.dataset_key FROM multipart_uploads m JOIN runs r ON r.id=m.run_id JOIN task_attempts a ON a.id=m.attempt_id WHERE m.run_id=? AND m.status='COMPLETED' AND a.status='CANCELED' AND NOT EXISTS(SELECT 1 FROM task_artifacts ar WHERE ar.object_key=m.object_key)`, runID)
 	if err != nil {
 		return err
@@ -215,7 +223,7 @@ func (s *Store) ClaimCanceledObjectCleanup(ctx context.Context, now time.Time, l
 			return err
 		}
 		defer tx.Rollback()
-		row := tx.QueryRowContext(ctx, canceledObjectSelect+` WHERE status IN ('QUARANTINED','DELETE_FAILED','DELETE_AMBIGUOUS') AND quarantine_until<=? AND current_attempt_id IS NULL ORDER BY quarantine_until,id LIMIT 1`, now.UTC().Format(time.RFC3339Nano))
+		row := tx.QueryRowContext(ctx, canceledObjectSelect+` WHERE status IN ('QUARANTINED','DELETE_FAILED','DELETE_AMBIGUOUS') AND quarantine_until<=? AND current_attempt_id IS NULL ORDER BY quarantine_until,id LIMIT 1`, canceledObjectTimestamp(now))
 		if err := scanCanceledObject(row, &c); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return tx.Commit()
@@ -320,17 +328,17 @@ func (s *Store) FinishCanceledObjectCleanup(ctx context.Context, candidateID, at
 		switch {
 		case dryRun:
 			status, attemptStatus, event, dryResult = "QUARANTINED", "SUCCEEDED", "CANCELED_OBJECT_DELETE_SCHEDULED", "WOULD_DELETE"
-			next = now.Add(retry).UTC().Format(time.RFC3339Nano)
+			next = canceledObjectTimestamp(now.Add(retry))
 		case outcome == "MISSING":
 			status = "DELETED"
 		case outcome == "AMBIGUOUS":
 			status, attemptStatus, event = "DELETE_AMBIGUOUS", "AMBIGUOUS", "CANCELED_OBJECT_DELETE_AMBIGUOUS"
-			next = now.Add(retry).UTC().Format(time.RFC3339Nano)
+			next = canceledObjectTimestamp(now.Add(retry))
 		case outcome == "CONFLICT":
 			status, attemptStatus, event, operator = "OPERATOR_REVIEW", "FAILED", "CANCELED_OBJECT_IDENTITY_CONFLICT", 1
 		case outcome != "DELETED":
 			status, attemptStatus, event = "DELETE_FAILED", "FAILED", "CANCELED_OBJECT_DELETE_FAILED"
-			next = now.Add(retry).UTC().Format(time.RFC3339Nano)
+			next = canceledObjectTimestamp(now.Add(retry))
 			if count >= max {
 				status, event, operator, next = "OPERATOR_REVIEW", "CANCELED_OBJECT_CLEANUP_EXHAUSTED", 1, nil
 			}
