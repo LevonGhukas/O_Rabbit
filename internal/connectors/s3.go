@@ -72,18 +72,7 @@ func OpenS3(ctx context.Context, dsn string) (DocumentReader, error) {
 		o.UsePathStyle = forcePathStyle
 	})
 
-	ext := strings.ToLower(filepath.Ext(key))
-	format := "csv"
-	switch ext {
-	case ".json":
-		format = "json"
-	case ".xml":
-		format = "xml"
-	case ".xlsx", ".xls":
-		format = "excel"
-	case ".parquet":
-		format = "parquet"
-	}
+	format := legacyS3FormatFromExtension(key)
 
 	return &S3Reader{
 		client: client,
@@ -108,6 +97,12 @@ func (r *S3Reader) DescribeCollection(ctx context.Context, collection string) ([
 }
 
 func (r *S3Reader) StreamDocuments(ctx context.Context, collection string, filter map[string]any, batchSize int) (DocumentIterator, error) {
+	configuredFormat, _ := filter["format"].(string)
+	format, err := resolveS3Format(configuredFormat, r.key)
+	if err != nil {
+		return nil, err
+	}
+
 	out, err := r.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(r.bucket),
 		Key:    aws.String(r.key),
@@ -117,7 +112,7 @@ func (r *S3Reader) StreamDocuments(ctx context.Context, collection string, filte
 	}
 	r.objectRes = out
 
-	switch r.format {
+	switch format {
 	case "csv":
 		csvReader := csv.NewReader(out.Body)
 		// For standard CSV uploads, fields might contain quotes or have unequal lengths.
@@ -195,7 +190,40 @@ func (r *S3Reader) StreamDocuments(ctx context.Context, collection string, filte
 			recReader: recReader,
 		}, nil
 	default:
-		return nil, fmt.Errorf("unsupported S3 file format: %s", r.format)
+		return nil, fmt.Errorf("unsupported S3 file format: %s", format)
+	}
+}
+
+// resolveS3Format gives explicit logical format configuration precedence over
+// the legacy filename-extension mapping.
+func resolveS3Format(configuredFormat, objectKey string) (string, error) {
+	if configured := strings.ToLower(strings.TrimSpace(configuredFormat)); configured != "" {
+		switch configured {
+		case "csv", "json", "xml", "excel", "parquet":
+			return configured, nil
+		case "xlsx", "xls":
+			return "excel", nil
+		default:
+			return "", fmt.Errorf("unsupported S3 file format %q", configuredFormat)
+		}
+	}
+	return legacyS3FormatFromExtension(objectKey), nil
+}
+
+// legacyS3FormatFromExtension preserves pre-format-option parser selection,
+// including the intentionally temporary unknown-extension-to-CSV fallback.
+func legacyS3FormatFromExtension(objectKey string) string {
+	switch strings.ToLower(filepath.Ext(objectKey)) {
+	case ".json":
+		return "json"
+	case ".xml":
+		return "xml"
+	case ".xlsx", ".xls":
+		return "excel"
+	case ".parquet":
+		return "parquet"
+	default:
+		return "csv"
 	}
 }
 

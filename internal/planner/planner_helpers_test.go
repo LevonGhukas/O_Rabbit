@@ -38,6 +38,15 @@ func TestPartitionSpecSingleWithRecordPath(t *testing.T) {
 	}
 }
 
+func TestPartitionSpecSingleWithFileOptions(t *testing.T) {
+	part := string(PartitionSpecSingleWithFileOptions("file.txt", "table", "", "/airports", "json"))
+	for _, expected := range []string{`"record_path":"/airports"`, `"format":"json"`} {
+		if !strings.Contains(part, expected) {
+			t.Fatalf("partition spec=%s missing %s", part, expected)
+		}
+	}
+}
+
 func TestIsLocalEndpoint(t *testing.T) {
 	tests := []struct {
 		name string
