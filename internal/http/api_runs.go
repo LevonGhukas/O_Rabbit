@@ -671,6 +671,12 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 			"supported_modes": []string{"table", "query"},
 		})
 	}
+		if err := connectors.ValidateWhereClause(req.Source.WhereClause); err != nil {
+		return validatedRunSubmitSpec{}, invalidSubmitField("source.where_clause", err.Error(), nil)
+	}
+	if err := connectors.ValidateSelectColumns(req.Source.SelectColumns); err != nil {
+		return validatedRunSubmitSpec{}, invalidSubmitField("source.select_columns", err.Error(), nil)
+	}
 	cursorColumn := strings.TrimSpace(req.Source.CursorColumn)
 	if cursorColumn == "" && req.Source.Incremental && !connectors.SupportsDocumentReader(engine) {
 		return validatedRunSubmitSpec{}, invalidSubmitField("source.cursor_column", "source.cursor_column is required for incremental runs", nil)

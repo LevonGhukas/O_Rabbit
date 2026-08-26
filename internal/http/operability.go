@@ -2,8 +2,7 @@ package httpapi
 
 import (
 	"database/sql"
-	"encoding/json"
-	"errors"
+		"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -41,8 +40,8 @@ func (s *Server) handleRunRecovery(w http.ResponseWriter, r *http.Request, runID
 		return
 	}
 	var req recoveryRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeInvalidInput(w, "invalid JSON body", invalidJSONDetails(err))
+	if err := readJSON(r, &req); err != nil {
+		handleJSONReadError(w, err)
 		return
 	}
 	req.Action = strings.ToLower(strings.TrimSpace(req.Action))

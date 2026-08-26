@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -165,18 +166,27 @@ func TestConnectionSecretWritesRequireMasterKeyAndUseAESGCM(t *testing.T) {
 	}
 }
 
-func TestReadyReturnsJSONOKWithoutAuth(t *testing.T) {
+func TestReadyRequiresAuthWhenConfigured(t *testing.T) {
 	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "topsecret")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 
 	srv.Handler().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d want=%d", rec.Code, http.StatusOK)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d want=%d", rec.Code, http.StatusUnauthorized)
+	}
+
+	authRec := httptest.NewRecorder()
+	authReq := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	authReq.Header.Set("Authorization", "Bearer topsecret")
+	srv.Handler().ServeHTTP(authRec, authReq)
+
+	if authRec.Code != http.StatusOK {
+		t.Fatalf("status=%d want=%d", authRec.Code, http.StatusOK)
 	}
 	var resp readinessResponse
-	decodeJSONBody(t, rec, &resp)
+	decodeJSONBody(t, authRec, &resp)
 	if !resp.OK {
 		t.Fatalf("ready response ok=%v want true", resp.OK)
 	}
@@ -958,5 +968,53 @@ func decodeJSONBody(t *testing.T, rec *httptest.ResponseRecorder, out any) {
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), out); err != nil {
 		t.Fatalf("decode json body: %v\nbody=%s", err, rec.Body.String())
+	}
+}
+
+func TestReadJSONRejectsPayloadTooLarge(t *testing.T) {
+	st := openTestStore(t)
+	srv := NewServer(nil, st, nil, encryptionTestKey(t), StatusInfo{}, "")
+	
+	// Create payload larger than 1MB
+	oversize := strings.Repeat("x", (1<<20) + 100)
+	body := fmt.Sprintf(`{"name":"test","kind":"source","engine":"postgres","metadata":{"junk":"%s"},"secret":{"dsn":"postgres://u:p@db/app"}}`, oversize)
+	
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/connections", strings.NewReader(body))
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize payload code=%d want 413 body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestReadJSONRejectsTrailingData(t *testing.T) {
+	st := openTestStore(t)
+	srv := NewServer(nil, st, nil, encryptionTestKey(t), StatusInfo{}, "")
+	
+	body := `{"name":"test","kind":"source","engine":"postgres","metadata":{},"secret":{"dsn":"postgres://u:p@db/app"}} extra_data`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/connections", strings.NewReader(body))
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("trailing payload code=%d want 400 body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestStatusSanitizesDBPath(t *testing.T) {
+	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{PID: 42, HTTPAddr: ":9100", DBPath: "/var/lib/private/secret/orabbit.sqlite"}, "")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code=%d want 200", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "/var/lib/private/secret") {
+		t.Fatalf("status leaked full DB path: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "orabbit.sqlite") {
+		t.Fatalf("status missing DB basename: %s", rec.Body.String())
 	}
 }

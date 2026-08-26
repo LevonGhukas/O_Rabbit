@@ -64,6 +64,7 @@ Implementation
 ### ISSUE-002 — Strong snapshot never reaches worker extraction; PostgreSQL snapshot leases leak
 
 Severity: P1  
+Status: ✅ Completed  
 Category: Functional correctness / Data integrity / Reliability  
 Location: `internal/planner/planner.go:655-671,795,823`; `cmd/worker/main.go:45-64,1036-1058`; `internal/connectors/postgres.go:59-105,208-239`
 
@@ -86,6 +87,7 @@ Integration test proves all partitions see one snapshot and `SET TRANSACTION SNA
 ### ISSUE-003 — MSSQL export and planning use `NOLOCK`
 
 Severity: P1  
+Status: ✅ Completed  
 Category: Data correctness  
 Location: `internal/connectors/mssql.go:162,251,337`
 
@@ -108,6 +110,7 @@ Connector SQL tests assert no hint by default. Integration test with concurrent 
 ### ISSUE-004 — Worker process boot identity omitted from every control-plane RPC
 
 Severity: P1  
+Status: ✅ Completed  
 Category: Reliability / Observability / Fencing  
 Location: `proto/controlplane.proto:27-190`; `cmd/worker/main.go:219,256,314,368,391,480,558,692,772,790,895,967`; `internal/db/store.go:892-1044`; `internal/db/attempts.go:91-184`
 
@@ -190,6 +193,7 @@ Implementation
 ### ISSUE-007 — HTTP JSON bodies are generally unbounded
 
 Severity: P2  
+Status: ✅ Completed  
 Category: Reliability / Security  
 Location: `internal/http/server.go:318-342`; direct decoders in `internal/http/operability.go:44`, `internal/http/api_maintenance.go:25`
 
@@ -212,6 +216,7 @@ Oversize/trailing/unknown-field API tests return 413/400 without handler allocat
 ### ISSUE-008 — Metrics, status, readiness remain public when HTTP auth enabled
 
 Severity: P2  
+Status: ✅ Completed  
 Category: Security / Observability  
 Location: `internal/http/server.go:116-143`; `internal/http/middleware.go:57-84`
 
@@ -234,6 +239,7 @@ Auth-enabled handler tests: health allowed; status/metrics/ready follow selected
 ### ISSUE-009 — Request-level SQL fragments are concatenated without a safe contract
 
 Severity: P2  
+Status: ✅ Completed  
 Category: Security / Data correctness  
 Location: `internal/http/api_runs.go:26-36`; `internal/connectors/{mssql,postgres,mysql,mariadb,clickhouse,trino}.go` `QueryCursor`; `internal/connectors/query_mode.go:421-459`
 
@@ -256,6 +262,7 @@ Cross-driver tests reject semicolons/comments/DML fragments; integration tests p
 ### ISSUE-010 — `STRONG_SNAPSHOT` validation lacks end-to-end acceptance test; several source semantics need real-engine coverage
 
 Severity: P2  
+Status: ✅ Completed  
 Category: Testing / Data engineering  
 Location: `internal/planner/planner_test.go`; `internal/connectors/*_test.go`; `cmd/worker/main_test.go`
 
@@ -278,6 +285,7 @@ CI reports integration matrix separately and exercises every P1 regression scena
 ### ISSUE-011 — Documentation links point to absent operational documents
 
 Severity: P3  
+Status: ✅ Completed  
 Category: Documentation  
 Location: `README.md:747,844`; `docs/`
 
@@ -355,24 +363,24 @@ No confirmed P0 findings.
 
 ### Phase 1 — Correctness & Data Integrity
 
-1. ISSUE-002 — Disable broken `STRONG_SNAPSHOT` or complete propagation/lifecycle. Reason: current advertised mode silently violates consistency. Dependencies: none. Risk: high; touches planner/worker/connector transaction ownership. Validation: PostgreSQL concurrent-write integration regression.
-2. ISSUE-003 — Remove default MSSQL `NOLOCK`; validate any explicit dirty-read option. Reason: prevents silent missing/duplicate/dirty data. Dependencies: source-consistency contract from ISSUE-002. Risk: medium; possible source blocking/performance change. Validation: SQL and concurrent-source tests.
-3. ISSUE-004 — Send/enforce boot ID everywhere. Reason: make instance fencing/observability real. Dependencies: protocol compatibility decision. Risk: medium; rolling worker upgrade. Validation: mixed-version and stale-instance tests.
+1. ✅ ISSUE-002 — Disable broken `STRONG_SNAPSHOT` or complete propagation/lifecycle. Reason: current advertised mode silently violates consistency. Dependencies: none. Risk: high; touches planner/worker/connector transaction ownership. Validation: PostgreSQL concurrent-write integration regression.
+2. ✅ ISSUE-003 — Remove default MSSQL `NOLOCK`; validate any explicit dirty-read option. Reason: prevents silent missing/duplicate/dirty data. Dependencies: source-consistency contract from ISSUE-002. Risk: medium; possible source blocking/performance change. Validation: SQL and concurrent-source tests.
+3. ✅ ISSUE-004 — Send/enforce boot ID everywhere. Reason: make instance fencing/observability real. Dependencies: protocol compatibility decision. Risk: medium; rolling worker upgrade. Validation: mixed-version and stale-instance tests.
 
 ### Phase 2 — Reliability
 
 1. ✅ ISSUE-006 — Transactional, restart-safe migrations. Completed. Validation: partial-version restart and repeated migration tests.
-2. ISSUE-007 — Bound/validate HTTP bodies. Reason: master availability under malformed/large requests. Dependencies: route payload limits. Risk: low. Validation: 400/413 route tests.
-3. ISSUE-008 — Harden operational endpoint auth policy. Reason: minimize public metadata. Dependencies: deployment probe requirements. Risk: medium; health monitoring configuration. Validation: auth policy integration tests.
+2. ✅ ISSUE-007 — Bound/validate HTTP bodies. Reason: master availability under malformed/large requests. Dependencies: route payload limits. Risk: low. Validation: 400/413 route tests.
+3. ✅ ISSUE-008 — Harden operational endpoint auth policy. Reason: minimize public metadata. Dependencies: deployment probe requirements. Risk: medium; health monitoring configuration. Validation: auth policy integration tests.
 
 ### Phase 3 — Architecture & Maintainability
 
-1. ISSUE-009 — Define structured filters or explicit trusted-SQL contract. Reason: safe source boundary and clear ownership. Dependencies: API compatibility decision. Risk: medium/high; client payload contract. Validation: cross-driver safety suite and docs.
-2. ISSUE-011 — Repair missing docs and protocol rollout guide. Reason: operations depend on these contracts. Dependencies: decisions from ISSUE-004/008/009. Risk: low. Validation: link checker.
+1. ✅ ISSUE-009 — Define structured filters or explicit trusted-SQL contract. Reason: safe source boundary and clear ownership. Dependencies: API compatibility decision. Risk: medium/high; client payload contract. Validation: cross-driver safety suite and docs.
+2. ✅ ISSUE-011 — Repair missing docs and protocol rollout guide. Reason: operations depend on these contracts. Dependencies: decisions from ISSUE-004/008/009. Risk: low. Validation: link checker.
 
 ### Phase 4 — Testing
 
-1. ISSUE-010 — Build tagged integration/fault suite alongside every preceding fix. Reason: distributed correctness cannot be proven by mocks alone. Dependencies: Docker CI service availability. Risk: medium, CI time. Validation: repeatable PostgreSQL/MinIO matrix; optional MSSQL lane.
+1. ✅ ISSUE-010 — Build tagged integration/fault suite alongside every preceding fix. Reason: distributed correctness cannot be proven by mocks alone. Dependencies: Docker CI service availability. Risk: medium, CI time. Validation: repeatable PostgreSQL/MinIO matrix; optional MSSQL lane.
 
 ### Phase 5 — Performance
 
@@ -384,17 +392,17 @@ No confirmed P0 findings.
 
 ## 12. Recommended Implementation Order
 
-1. ✅ ISSUE-001
-2. ✅ ISSUE-005
-3. ✅ ISSUE-006
-4. ISSUE-002
-5. ISSUE-003
-6. ISSUE-004
-7. ISSUE-007
-8. ISSUE-008
-9. ISSUE-009
-10. ISSUE-010
-11. ISSUE-011
+1. ✅ ISSUE-001 — Encrypted connection secrets (Completed)
+2. ✅ ISSUE-005 — Pinned SSH host key fingerprints (Completed)
+3. ✅ ISSUE-006 — Transactional restart-safe migrations (Completed)
+4. ✅ ISSUE-002 — Strong snapshot propagation & session lifecycle (Completed)
+5. ✅ ISSUE-003 — Safe MSSQL isolation without NOLOCK (Completed)
+6. ✅ ISSUE-004 — Boot ID identity in all control-plane RPCs (Completed)
+7. ✅ ISSUE-007 — Bounded HTTP JSON bodies & strict decoding (Completed)
+8. ✅ ISSUE-008 — Protected operational endpoints & DB path sanitization (Completed)
+9. ✅ ISSUE-009 — SQL fragment validation & injection rejection (Completed)
+10. ✅ ISSUE-010 — Boot fencing & snapshot integration testing (Completed)
+11. ✅ ISSUE-011 — Operational documentation & protocol specifications (Completed)
 
 ## 13. Things That Should NOT Be Changed
 

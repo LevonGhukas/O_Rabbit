@@ -17,6 +17,7 @@ const (
 	CodeMethodNotAllowed      Code = "method_not_allowed"
 	CodeDatasetBusy           Code = "dataset_busy"
 	CodeNotImplemented        Code = "not_implemented"
+	CodePayloadTooLarge       Code = "payload_too_large"
 )
 
 type Response struct {
@@ -65,6 +66,8 @@ func CodeForStatus(status int) Code {
 		return CodeMethodNotAllowed
 	case http.StatusConflict:
 		return CodeConflict
+	case http.StatusRequestEntityTooLarge:
+		return CodePayloadTooLarge
 	case http.StatusServiceUnavailable:
 		return CodeDependencyUnavailable
 	default:
