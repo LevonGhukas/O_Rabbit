@@ -43,7 +43,7 @@ func TestStrictIntegerBoundariesNeverNullOrWrap(t *testing.T) {
 		name  string
 		plan  ColumnPlan
 		value any
-	}{{"int64 uint max", planInt64("c"), uint64(math.MaxUint64)}, {"uint64 iceberg max", planUint64("c"), uint64(math.MaxInt64) + 1}} {
+	}{{"int64 uint max", planInt64("c"), uint64(math.MaxUint64)}} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := tc.plan.Builder(memory.DefaultAllocator)
 			defer b.Release()
@@ -53,6 +53,13 @@ func TestStrictIntegerBoundariesNeverNullOrWrap(t *testing.T) {
 			require.Equal(t, 0, a.Len())
 		})
 	}
+	uint64Plan := planUint64("c")
+	b := uint64Plan.Builder(memory.DefaultAllocator)
+	defer b.Release()
+	require.NoError(t, uint64Plan.Append(b, uint64(math.MaxUint64)))
+	a := b.NewArray().(*array.Decimal128)
+	defer a.Release()
+	require.Equal(t, "18446744073709551615", a.Value(0).ToString(0))
 }
 
 func TestStrictDecimalExactness(t *testing.T) {

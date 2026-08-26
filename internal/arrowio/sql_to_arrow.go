@@ -63,11 +63,38 @@ func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType
 			d.Capability = capability
 		}
 		plan := PlanForSQLColumn(engine, d.Name, d.SourceType, int64(d.Precision), int64(d.Scale), d.PrecisionKnown && d.ScaleKnown)
+		if d.Unsigned && d.BitWidth == 64 {
+			plan = planUint64Decimal(d.Name)
+		}
+		if d.FixedBinary {
+			if !d.LengthKnown || d.Length <= 0 || d.Length > int64(^uint(0)>>1) {
+				return nil, nil, fmt.Errorf("column %q %s: fixed binary length is required", d.Name, d.SourceType)
+			}
+			plan = planFixedBinary(d.Name, int(d.Length))
+		}
+		if d.FallbackEncoding == "json_utf8_text_v1" {
+			plan = planJSONText(d.Name)
+		}
+		if strings.HasPrefix(unwrapClickHouseType(d.SourceType), "ENUM8") || strings.HasPrefix(unwrapClickHouseType(d.SourceType), "ENUM16") {
+			return nil, nil, fmt.Errorf("column %q %s: enum labels are not available from current descriptor metadata", d.Name, d.SourceType)
+		}
+		if d.SourceType != "" && plan.DataType.ID() == arrow.STRING && d.FallbackEncoding == "" {
+			return nil, nil, fmt.Errorf("column %q %s: no explicit lossless string policy", d.Name, d.SourceType)
+		}
 		if d.TemporalSemantics != TemporalNone {
 			plan = temporalPlanForDescriptor(*d)
 		}
 		d.ArrowType = plan.DataType
-		d.LogicalFamily, d.BitWidth, d.Signed = logicalFamilyForArrow(plan.DataType)
+		family, bitWidth, signed := logicalFamilyForArrow(plan.DataType)
+		if d.LogicalFamily != LogicalUUID && !(d.Unsigned && d.BitWidth == 64) {
+			d.LogicalFamily = family
+		}
+		if d.BitWidth == 0 {
+			d.BitWidth = bitWidth
+		}
+		if d.Signed == nil {
+			d.Signed = signed
+		}
 		plan.Descriptor = *d
 		plans = append(plans, plan)
 		fields = append(fields, arrowFieldFromDescriptor(*d))

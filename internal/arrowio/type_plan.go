@@ -16,6 +16,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/google/uuid"
 )
 
 var (
@@ -325,24 +326,34 @@ func planUint32(name string) ColumnPlan {
 }
 
 func planUint64(name string) ColumnPlan {
+	return planUint64Decimal(name)
+}
+
+// planUint64Decimal preserves UInt64's full domain in Iceberg decimal(20,0).
+// Arrow Uint64 cannot map to a signed Iceberg long without changing values.
+func planUint64Decimal(name string) ColumnPlan {
+	return planDecimal128(name, 20, 0)
+}
+
+func planFixedBinary(name string, width int) ColumnPlan {
+	dt := &arrow.FixedSizeBinaryType{ByteWidth: width}
 	return ColumnPlan{
 		Name:     name,
-		DataType: arrow.PrimitiveTypes.Uint64,
-		Builder:  func(mem memory.Allocator) array.Builder { return array.NewUint64Builder(mem) },
+		DataType: dt,
+		Builder:  func(mem memory.Allocator) array.Builder { return array.NewFixedSizeBinaryBuilder(mem, dt) },
 		Append: func(b array.Builder, v any) error {
-			bb := b.(*array.Uint64Builder)
+			bb := b.(*array.FixedSizeBinaryBuilder)
 			v = dereferenceValue(v)
 			if v == nil {
 				bb.AppendNull()
 				return nil
 			}
-			// Iceberg has no uint64. Phase 1 deliberately supports only values
-			// representable by Iceberg long; full-domain Decimal(20,0) is Phase 2.
-			if u, ok := asUint64(v); ok && u <= uint64(^uint64(0)>>1) {
-				bb.Append(u)
-				return nil
+			raw, ok := v.([]byte)
+			if !ok || len(raw) != width {
+				return conversionFailure(name, dt.String(), v, "fixed binary requires []byte with declared width")
 			}
-			return conversionFailure(name, "uint64", v, "uint64 above MaxInt64 is unsupported by Iceberg")
+			bb.Append(raw)
+			return nil
 		},
 	}
 }
@@ -553,6 +564,30 @@ func planString(name string) ColumnPlan {
 	}
 }
 
+// planJSONText is an explicit UTF-8 JSON fallback. It preserves valid source
+// JSON text byte-for-byte; it never treats arbitrary text as JSON.
+func planJSONText(name string) ColumnPlan {
+	return ColumnPlan{
+		Name:     name,
+		DataType: arrow.BinaryTypes.String,
+		Builder:  func(mem memory.Allocator) array.Builder { return array.NewStringBuilder(mem) },
+		Append: func(b array.Builder, v any) error {
+			bb := b.(*array.StringBuilder)
+			v = dereferenceValue(v)
+			if v == nil {
+				bb.AppendNull()
+				return nil
+			}
+			s, ok := exactString(v)
+			if !ok || !json.Valid([]byte(s)) {
+				return conversionFailure(name, "json_utf8_text_v1", v, "JSON text must be valid UTF-8 JSON")
+			}
+			bb.Append(s)
+			return nil
+		},
+	}
+}
+
 // planUUID is an explicit source-type policy. Generic string/binary conversion
 // never guesses UUID solely from a 16-byte payload.
 func planUUID(name string) ColumnPlan {
@@ -568,16 +603,28 @@ func planUUID(name string) ColumnPlan {
 			}
 			switch x := v.(type) {
 			case string:
-				bb.Append(x)
+				u, err := uuid.Parse(x)
+				if err != nil {
+					return conversionFailure(name, "uuid", v, "UUID text is invalid")
+				}
+				bb.Append(u.String())
 				return nil
 			case []byte:
 				if len(x) != 16 {
 					return conversionFailure(name, "uuid", v, "UUID bytes must be 16 bytes")
 				}
-				bb.Append(formatCanonicalUUID(x))
+				u, err := uuid.FromBytes(x)
+				if err != nil {
+					return conversionFailure(name, "uuid", v, "UUID bytes are invalid")
+				}
+				bb.Append(u.String())
 				return nil
 			case [16]byte:
-				bb.Append(formatCanonicalUUID(x[:]))
+				u, err := uuid.FromBytes(x[:])
+				if err != nil {
+					return conversionFailure(name, "uuid", v, "UUID bytes are invalid")
+				}
+				bb.Append(u.String())
 				return nil
 			default:
 				return conversionFailure(name, "uuid", v, "UUID requires string or 16-byte representation")
@@ -932,30 +979,6 @@ func extractSliceItems(v any) ([]any, bool) {
 	switch x := v.(type) {
 	case []any:
 		return x, true
-	case string:
-		raw := strings.TrimSpace(x)
-		if strings.HasPrefix(raw, "{") && strings.HasSuffix(raw, "}") {
-			inner := raw[1 : len(raw)-1]
-			if inner == "" {
-				return []any{}, true
-			}
-			parts := splitPGArrayElements(inner)
-			out := make([]any, len(parts))
-			for i, p := range parts {
-				if strings.EqualFold(p, "NULL") {
-					out[i] = nil
-				} else {
-					out[i] = p
-				}
-			}
-			return out, true
-		}
-		if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
-			var parsed []any
-			if err := json.Unmarshal([]byte(raw), &parsed); err == nil {
-				return parsed, true
-			}
-		}
 	}
 
 	rv := reflect.ValueOf(v)
@@ -969,36 +992,4 @@ func extractSliceItems(v any) ([]any, bool) {
 		return out, true
 	}
 	return nil, false
-}
-
-func splitPGArrayElements(s string) []string {
-	var elements []string
-	var cur strings.Builder
-	inQuote := false
-	escape := false
-
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if escape {
-			cur.WriteByte(c)
-			escape = false
-			continue
-		}
-		if c == '\\' {
-			escape = true
-			continue
-		}
-		if c == '"' {
-			inQuote = !inQuote
-			continue
-		}
-		if c == ',' && !inQuote {
-			elements = append(elements, cur.String())
-			cur.Reset()
-			continue
-		}
-		cur.WriteByte(c)
-	}
-	elements = append(elements, cur.String())
-	return elements
 }

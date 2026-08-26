@@ -62,6 +62,9 @@ type SourceFieldDescriptor struct {
 	TemporalPrecision                        int
 	TemporalPrecisionKnown                   bool
 	TemporalSemantics                        TemporalSemantics
+	Unsigned                                 bool
+	FixedBinary                              bool
+	FallbackEncoding                         string
 	Capability                               TypeCapability
 	ArrowType                                arrow.DataType
 }
@@ -112,6 +115,7 @@ func descriptorsFromSQL(engine string, cols []string, colTypes []*sql.ColumnType
 			}
 		}
 		classifyTemporalDescriptor(&d)
+		classifySourceRepresentation(&d)
 		// clickhouse-go may expose only decimal scale in DecimalSize. Width is
 		// intrinsic to Decimal32/64/128/256, so recover it from native type.
 		if d.Engine == "clickhouse" {
@@ -138,9 +142,68 @@ func descriptorsFromSQL(engine string, cols []string, colTypes []*sql.ColumnType
 
 func arrowFieldFromDescriptor(d SourceFieldDescriptor) arrow.Field {
 	md := arrow.NewMetadata([]string{
-		"orabbit.source.engine", "orabbit.source.type", "orabbit.source.precision", "orabbit.source.scale", "orabbit.source.logical_family", "orabbit.source.temporal_semantics", "orabbit.source.temporal_precision", "orabbit.source.timezone",
-	}, []string{d.Engine, d.SourceType, strconv.FormatInt(int64(d.Precision), 10), strconv.FormatInt(int64(d.Scale), 10), string(d.LogicalFamily), string(d.TemporalSemantics), strconv.Itoa(d.TemporalPrecision), d.SourceTimezone})
+		"orabbit.source.engine", "orabbit.source.type", "orabbit.source.precision", "orabbit.source.scale", "orabbit.source.logical_family", "orabbit.source.temporal_semantics", "orabbit.source.temporal_precision", "orabbit.source.timezone", "orabbit.source.unsigned", "orabbit.source.fixed_binary", "orabbit.source.fallback_encoding",
+	}, []string{d.Engine, d.SourceType, strconv.FormatInt(int64(d.Precision), 10), strconv.FormatInt(int64(d.Scale), 10), string(d.LogicalFamily), string(d.TemporalSemantics), strconv.Itoa(d.TemporalPrecision), d.SourceTimezone, strconv.FormatBool(d.Unsigned), strconv.FormatBool(d.FixedBinary), d.FallbackEncoding})
 	return arrow.Field{Name: d.Name, Type: d.ArrowType, Nullable: d.Nullable || !d.NullableKnown, Metadata: md}
+}
+
+func classifySourceRepresentation(d *SourceFieldDescriptor) {
+	t := strings.ToUpper(unwrapClickHouseType(d.SourceType))
+	switch d.Engine {
+	case "clickhouse", "ch":
+		if t == "UINT64" {
+			d.Unsigned, d.BitWidth = true, 64
+			signed := false
+			d.Signed = &signed
+			d.LogicalFamily = LogicalUnsignedInt
+			d.FallbackEncoding = "unsigned_decimal20_v1"
+		}
+		if strings.HasPrefix(t, "FIXEDSTRING(") {
+			d.FixedBinary, d.Length, d.LengthKnown = true, int64(temporalPrecision(t, -1)), true
+		}
+		if t == "UUID" {
+			d.LogicalFamily, d.FallbackEncoding = LogicalUUID, "canonical_uuid_text_v1"
+		}
+		if t == "JSON" {
+			d.FallbackEncoding = "json_utf8_text_v1"
+		}
+		if t == "STRING" {
+			d.FallbackEncoding = "utf8_text_v1"
+		}
+	case "postgres", "postgresql", "pg":
+		if t == "UUID" {
+			d.LogicalFamily, d.FallbackEncoding = LogicalUUID, "canonical_uuid_text_v1"
+		}
+		if t == "JSON" || t == "JSONB" {
+			d.FallbackEncoding = "json_utf8_text_v1"
+		}
+		if t == "TEXT" || strings.HasPrefix(t, "VARCHAR") || strings.HasPrefix(t, "CHAR") || t == "BPCHAR" || t == "NAME" || t == "CITEXT" {
+			d.FallbackEncoding = "utf8_text_v1"
+		}
+	case "mssql", "sqlserver", "ms-sql", "ms_sql":
+		if t == "UNIQUEIDENTIFIER" {
+			d.LogicalFamily, d.FallbackEncoding = LogicalUUID, "canonical_uuid_text_v1"
+		}
+		if strings.HasPrefix(t, "BINARY(") {
+			d.FixedBinary, d.Length, d.LengthKnown = true, int64(temporalPrecision(t, -1)), true
+		}
+		if strings.HasPrefix(t, "VARCHAR") || strings.HasPrefix(t, "NVARCHAR") || t == "TEXT" || t == "NTEXT" || t == "CHAR" || t == "NCHAR" {
+			d.FallbackEncoding = "utf8_text_v1"
+		}
+	case "oracle", "ora":
+		if strings.HasPrefix(t, "RAW(") {
+			d.FixedBinary, d.Length, d.LengthKnown = true, int64(temporalPrecision(t, -1)), true
+		}
+		if strings.Contains(t, "XML") {
+			d.FallbackEncoding = "xml_utf8_text_v1"
+		}
+		if t == "ROWID" || t == "UROWID" {
+			d.FallbackEncoding = "oracle_rowid_text_v1"
+		}
+		if strings.HasPrefix(t, "VARCHAR") || strings.HasPrefix(t, "NVARCHAR") || t == "CHAR" || t == "NCHAR" || t == "CLOB" || t == "NCLOB" || t == "LONG" {
+			d.FallbackEncoding = "utf8_text_v1"
+		}
+	}
 }
 
 func classifyTemporalDescriptor(d *SourceFieldDescriptor) {

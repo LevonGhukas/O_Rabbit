@@ -17,7 +17,7 @@ func TestClickHouseTypeMapping(t *testing.T) {
 		hasDecimal bool
 		wantType   arrow.DataType
 	}{
-		{"UInt64", 0, 0, false, arrow.PrimitiveTypes.Uint64},
+		{"UInt64", 0, 0, false, &arrow.Decimal128Type{Precision: 20, Scale: 0}},
 		{"UInt32", 0, 0, false, arrow.PrimitiveTypes.Uint32},
 		{"UInt16", 0, 0, false, arrow.PrimitiveTypes.Uint16},
 		{"UInt8", 0, 0, false, arrow.PrimitiveTypes.Uint8},
@@ -37,7 +37,7 @@ func TestClickHouseTypeMapping(t *testing.T) {
 		{"DateTime64(6)", 0, 0, false, &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: ""}},
 		{"DateTime64(6, 'UTC')", 0, 0, false, &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}},
 		{"UUID", 0, 0, false, arrow.BinaryTypes.String},
-		{"Nullable(UInt64)", 0, 0, false, arrow.PrimitiveTypes.Uint64},
+		{"Nullable(UInt64)", 0, 0, false, &arrow.Decimal128Type{Precision: 20, Scale: 0}},
 		{"LowCardinality(String)", 0, 0, false, arrow.BinaryTypes.String},
 		{"Array(Int32)", 0, 0, false, arrow.ListOf(arrow.PrimitiveTypes.Int32)},
 	}

@@ -12,8 +12,8 @@ func TestPlanForTargetType(t *testing.T) {
 		target   string
 		wantType arrow.DataType
 	}{
-		{"UInt64", arrow.PrimitiveTypes.Uint64},
-		{"Nullable(UInt64)", arrow.PrimitiveTypes.Uint64},
+		{"UInt64", &arrow.Decimal128Type{Precision: 20, Scale: 0}},
+		{"Nullable(UInt64)", &arrow.Decimal128Type{Precision: 20, Scale: 0}},
 		{"LowCardinality(String)", arrow.BinaryTypes.String},
 		{"Decimal(38, 10)", &arrow.Decimal128Type{Precision: 38, Scale: 10}},
 		{"Decimal(10, 2)", &arrow.Decimal128Type{Precision: 10, Scale: 2}},
@@ -47,7 +47,7 @@ func TestPlansFromSQLEngineWithOverrides(t *testing.T) {
 	plans, schema, err := PlansFromSQLEngineWithOverrides("mssql", cols, nil, targetTypes)
 	require.NoError(t, err)
 	require.Equal(t, 4, len(plans))
-	require.Equal(t, arrow.PrimitiveTypes.Uint64, schema.Field(0).Type)
+	require.Equal(t, &arrow.Decimal128Type{Precision: 20, Scale: 0}, schema.Field(0).Type)
 	require.True(t, schema.Field(0).Nullable)
 	require.Equal(t, &arrow.Decimal128Type{Precision: 18, Scale: 4}, schema.Field(1).Type)
 	require.True(t, schema.Field(1).Nullable)

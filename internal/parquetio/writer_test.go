@@ -7,6 +7,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
@@ -63,6 +64,47 @@ func TestParquetTemporalAnnotationsRoundTrip(t *testing.T) {
 				t.Fatalf("timestamp annotation=%s, want %s", got, tc.typ)
 			}
 		})
+	}
+}
+
+func TestParquetDecimal20AndFixedBinaryLogicalSchema(t *testing.T) {
+	decimal := &arrow.Decimal128Type{Precision: 20, Scale: 0}
+	fixed := &arrow.FixedSizeBinaryType{ByteWidth: 4}
+	schema := arrow.NewSchema([]arrow.Field{{Name: "uint64_value", Type: decimal, Nullable: false}, {Name: "payload", Type: fixed, Nullable: false}}, nil)
+	w, path, err := NewTempFileWriter(schema, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+	db := array.NewDecimal128Builder(memory.DefaultAllocator, decimal)
+	db.Append(decimal128.FromU64(18446744073709551615))
+	da := db.NewArray()
+	db.Release()
+	defer da.Release()
+	fb := array.NewFixedSizeBinaryBuilder(memory.DefaultAllocator, fixed)
+	fb.Append([]byte{0x61, 0x00, 0x00, 0xff})
+	fa := fb.NewArray()
+	fb.Release()
+	defer fa.Release()
+	rec := array.NewRecordBatch(schema, []arrow.Array{da, fa}, 1)
+	defer rec.Release()
+	if err := w.Write(rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	pr, err := file.OpenParquetFile(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pr.Close()
+	got, err := pqarrow.FromParquet(pr.MetaData().Schema, &pqarrow.ArrowReadProperties{}, pr.MetaData().KeyValueMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !arrow.TypeEqual(decimal, got.Field(0).Type) || !arrow.TypeEqual(fixed, got.Field(1).Type) {
+		t.Fatalf("Parquet schema=%s, want %s", got, schema)
 	}
 }
 

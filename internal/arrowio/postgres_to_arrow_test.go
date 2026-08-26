@@ -57,14 +57,14 @@ func TestPostgresTypeMapping(t *testing.T) {
 	}
 }
 
-func TestPostgresArrayParsing(t *testing.T) {
+func TestPostgresArrayRequiresNativeDriverValues(t *testing.T) {
 	plan := PlanForSQLColumn("postgres", "col", "INTEGER[]", 0, 0, false)
 	builder := plan.Builder(memory.DefaultAllocator)
 	defer builder.Release()
 
-	// PostgreSQL array string format: {-2147483648,NULL,0,2147483647}
-	err := plan.Append(builder, "{-2147483648,NULL,0,2147483647}")
+	err := plan.Append(builder, []any{int64(-2147483648), nil, int64(0), int64(2147483647)})
 	require.NoError(t, err)
+	require.Error(t, plan.Append(builder, "{-2147483648,NULL,0,2147483647}"))
 
 	arr := builder.NewArray().(*array.List)
 	defer arr.Release()

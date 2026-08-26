@@ -18,7 +18,7 @@ func TestMySQLTypeMapping(t *testing.T) {
 		hasDecimal bool
 		wantType   arrow.DataType
 	}{
-		{"BIGINT UNSIGNED", 0, 0, false, arrow.PrimitiveTypes.Uint64},
+		{"BIGINT UNSIGNED", 0, 0, false, &arrow.Decimal128Type{Precision: 20, Scale: 0}},
 		{"BIGINT", 0, 0, false, arrow.PrimitiveTypes.Int64},
 		{"INT UNSIGNED", 0, 0, false, arrow.PrimitiveTypes.Uint32},
 		{"INT", 0, 0, false, arrow.PrimitiveTypes.Int32},
@@ -30,7 +30,7 @@ func TestMySQLTypeMapping(t *testing.T) {
 		{"TINYINT", 0, 0, false, arrow.PrimitiveTypes.Int8},
 		{"TINYINT(1)", 0, 0, false, arrow.FixedWidthTypes.Boolean},
 		{"BIT(1)", 0, 0, false, arrow.FixedWidthTypes.Boolean},
-		{"BIT(64)", 0, 0, false, arrow.PrimitiveTypes.Uint64},
+		{"BIT(64)", 0, 0, false, &arrow.Decimal128Type{Precision: 20, Scale: 0}},
 		{"FLOAT", 0, 0, false, arrow.PrimitiveTypes.Float32},
 		{"DOUBLE", 0, 0, false, arrow.PrimitiveTypes.Float64},
 		{"DECIMAL(38,10)", 38, 10, true, &arrow.Decimal128Type{Precision: 38, Scale: 10}},
@@ -55,22 +55,23 @@ func TestMySQLTypeMapping(t *testing.T) {
 	}
 }
 
-func TestMySQLUint64AboveIcebergLongIsRejected(t *testing.T) {
+func TestMySQLUint64UsesExactDecimal20(t *testing.T) {
 	plan := PlanForSQLColumn("mysql", "col", "BIGINT UNSIGNED", 0, 0, false)
 	builder := plan.Builder(memory.DefaultAllocator)
 	defer builder.Release()
 
-	// Iceberg has no UInt64 type; Phase 1 rejects values beyond long.
 	err := plan.Append(builder, uint64(18446744073709551615))
-	require.Error(t, err)
+	require.NoError(t, err)
 
 	err = plan.Append(builder, "18446744073709551615")
-	require.Error(t, err)
+	require.NoError(t, err)
 
-	arr := builder.NewArray().(*array.Uint64)
+	arr := builder.NewArray().(*array.Decimal128)
 	defer arr.Release()
 
-	require.Equal(t, 0, arr.Len())
+	require.Equal(t, 2, arr.Len())
+	require.Equal(t, "18446744073709551615", arr.Value(0).ToString(0))
+	require.Equal(t, "18446744073709551615", arr.Value(1).ToString(0))
 }
 
 func TestMySQLTime64Durations(t *testing.T) {
