@@ -80,7 +80,9 @@ func planPostgresColumn(name, dbType string, precision, scale int64, hasDecimal 
 	// 7. Binary & Strings
 	case "BYTEA":
 		return planBinary(name)
-	case "UUID", "JSON", "JSONB", "XML", "TEXT", "VARCHAR", "CHAR", "BPCHAR", "NAME", "CITEXT", "INET", "CIDR", "MACADDR", "MACADDR8":
+	case "UUID":
+		return planUUID(name)
+	case "JSON", "JSONB", "XML", "TEXT", "VARCHAR", "CHAR", "BPCHAR", "NAME", "CITEXT", "INET", "CIDR", "MACADDR", "MACADDR8":
 		return planString(name)
 
 	default:

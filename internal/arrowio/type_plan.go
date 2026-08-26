@@ -4,11 +4,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -187,12 +189,11 @@ func planInt8(name string) ColumnPlan {
 				bb.AppendNull()
 				return nil
 			}
-			if i, ok := asInt64(v); ok {
+			if i, ok := asInt64(v); ok && i >= -128 && i <= 127 {
 				bb.Append(int8(i))
 				return nil
 			}
-			bb.AppendNull()
-			return nil
+			return conversionFailure(name, "int8", v, "integer out of range or invalid")
 		},
 	}
 }
@@ -209,12 +210,11 @@ func planInt16(name string) ColumnPlan {
 				bb.AppendNull()
 				return nil
 			}
-			if i, ok := asInt64(v); ok {
+			if i, ok := asInt64(v); ok && i >= -32768 && i <= 32767 {
 				bb.Append(int16(i))
 				return nil
 			}
-			bb.AppendNull()
-			return nil
+			return conversionFailure(name, "int16", v, "integer out of range or invalid")
 		},
 	}
 }
@@ -231,12 +231,11 @@ func planInt32(name string) ColumnPlan {
 				bb.AppendNull()
 				return nil
 			}
-			if i, ok := asInt64(v); ok {
+			if i, ok := asInt64(v); ok && i >= -2147483648 && i <= 2147483647 {
 				bb.Append(int32(i))
 				return nil
 			}
-			bb.AppendNull()
-			return nil
+			return conversionFailure(name, "int32", v, "integer out of range or invalid")
 		},
 	}
 }
@@ -257,7 +256,7 @@ func planInt64(name string) ColumnPlan {
 				bb.Append(i)
 				return nil
 			}
-			return fmt.Errorf("int64 append: unsupported %T (%v)", v, v)
+			return conversionFailure(name, "int64", v, "integer out of range or invalid")
 		},
 	}
 }
@@ -274,12 +273,11 @@ func planUint8(name string) ColumnPlan {
 				bb.AppendNull()
 				return nil
 			}
-			if u, ok := asUint64(v); ok {
+			if u, ok := asUint64(v); ok && u <= 255 {
 				bb.Append(uint8(u))
 				return nil
 			}
-			bb.AppendNull()
-			return nil
+			return conversionFailure(name, "uint8", v, "integer out of range or invalid")
 		},
 	}
 }
@@ -296,12 +294,11 @@ func planUint16(name string) ColumnPlan {
 				bb.AppendNull()
 				return nil
 			}
-			if u, ok := asUint64(v); ok {
+			if u, ok := asUint64(v); ok && u <= 65535 {
 				bb.Append(uint16(u))
 				return nil
 			}
-			bb.AppendNull()
-			return nil
+			return conversionFailure(name, "uint16", v, "integer out of range or invalid")
 		},
 	}
 }
@@ -318,12 +315,11 @@ func planUint32(name string) ColumnPlan {
 				bb.AppendNull()
 				return nil
 			}
-			if u, ok := asUint64(v); ok {
+			if u, ok := asUint64(v); ok && u <= 4294967295 {
 				bb.Append(uint32(u))
 				return nil
 			}
-			bb.AppendNull()
-			return nil
+			return conversionFailure(name, "uint32", v, "integer out of range or invalid")
 		},
 	}
 }
@@ -340,11 +336,13 @@ func planUint64(name string) ColumnPlan {
 				bb.AppendNull()
 				return nil
 			}
-			if u, ok := asUint64(v); ok {
+			// Iceberg has no uint64. Phase 1 deliberately supports only values
+			// representable by Iceberg long; full-domain Decimal(20,0) is Phase 2.
+			if u, ok := asUint64(v); ok && u <= uint64(^uint64(0)>>1) {
 				bb.Append(u)
 				return nil
 			}
-			return fmt.Errorf("uint64 append: unsupported %T (%v)", v, v)
+			return conversionFailure(name, "uint64", v, "uint64 above MaxInt64 is unsupported by Iceberg")
 		},
 	}
 }
@@ -365,8 +363,7 @@ func planFloat32(name string) ColumnPlan {
 				bb.Append(float32(f))
 				return nil
 			}
-			bb.AppendNull()
-			return nil
+			return conversionFailure(name, "float32", v, "invalid floating-point representation")
 		},
 	}
 }
@@ -387,7 +384,7 @@ func planFloat64(name string) ColumnPlan {
 				bb.Append(f)
 				return nil
 			}
-			return fmt.Errorf("float64 append: unsupported %T (%v)", v, v)
+			return conversionFailure(name, "float64", v, "invalid floating-point representation")
 		},
 	}
 }
@@ -408,7 +405,7 @@ func planBool(name string) ColumnPlan {
 				bb.Append(parsed)
 				return nil
 			}
-			return fmt.Errorf("bool append: unsupported %T (%v)", v, v)
+			return conversionFailure(name, "bool", v, "invalid boolean representation")
 		},
 	}
 }
@@ -437,13 +434,7 @@ func planDate32(name string) ColumnPlan {
 			}
 			d, ok := asDate32(v)
 			if !ok {
-				bb.AppendNull()
-				return nil
-			}
-			if d < MinClickHouseDate32 {
-				d = MinClickHouseDate32
-			} else if d > MaxClickHouseDate32 {
-				d = MaxClickHouseDate32
+				return conversionFailure(name, "date32", v, "invalid date representation")
 			}
 			bb.Append(d)
 			return nil
@@ -466,8 +457,7 @@ func planTime64(name string) ColumnPlan {
 			}
 			tMicros, ok := asTime64Microseconds(v)
 			if !ok {
-				bb.AppendNull()
-				return nil
+				return conversionFailure(name, "time64[us]", v, "invalid time representation or unsupported precision")
 			}
 			bb.Append(arrow.Time64(tMicros))
 			return nil
@@ -490,16 +480,13 @@ func planTimestampUs(name string, timeZone string) ColumnPlan {
 			}
 			t, ok := asTimestamp(v)
 			if !ok {
-				bb.AppendNull()
-				return nil
+				return conversionFailure(name, tsType.String(), v, "invalid timestamp representation")
 			}
 			if timeZone == "UTC" {
 				t = t.UTC()
 			}
-			if t.Before(MinClickHouseTimestamp) {
-				t = MinClickHouseTimestamp
-			} else if t.After(MaxClickHouseTimestamp) {
-				t = MaxClickHouseTimestamp
+			if t.Nanosecond()%1000 != 0 {
+				return conversionFailure(name, tsType.String(), v, "nanosecond precision cannot be represented by timestamp[us]")
 			}
 			bb.Append(arrow.Timestamp(t.UnixMicro()))
 			return nil
@@ -508,15 +495,6 @@ func planTimestampUs(name string, timeZone string) ColumnPlan {
 }
 
 func planDecimal128(name string, precision, scale int32) ColumnPlan {
-	if precision <= 0 || precision > 38 {
-		precision = 38
-	}
-	if scale < 0 {
-		scale = 0
-	}
-	if scale > precision {
-		scale = precision
-	}
 	decType := &arrow.Decimal128Type{Precision: precision, Scale: scale}
 	return ColumnPlan{
 		Name:     name,
@@ -531,8 +509,7 @@ func planDecimal128(name string, precision, scale int32) ColumnPlan {
 			}
 			num, ok := asDecimal128(v, precision, scale)
 			if !ok {
-				bb.AppendNull()
-				return nil
+				return conversionFailure(name, decType.String(), v, "invalid decimal, precision overflow, or inexact scale conversion")
 			}
 			bb.Append(num)
 			return nil
@@ -552,9 +529,45 @@ func planString(name string) ColumnPlan {
 				bb.AppendNull()
 				return nil
 			}
-			s := asSafeString(v)
+			s, ok := exactString(v)
+			if !ok {
+				return conversionFailure(name, "string", v, "implicit stringification is not lossless")
+			}
 			bb.Append(s)
 			return nil
+		},
+	}
+}
+
+// planUUID is an explicit source-type policy. Generic string/binary conversion
+// never guesses UUID solely from a 16-byte payload.
+func planUUID(name string) ColumnPlan {
+	return ColumnPlan{
+		Name: name, DataType: arrow.BinaryTypes.String,
+		Builder: func(mem memory.Allocator) array.Builder { return array.NewStringBuilder(mem) },
+		Append: func(b array.Builder, v any) error {
+			bb := b.(*array.StringBuilder)
+			v = dereferenceValue(v)
+			if v == nil {
+				bb.AppendNull()
+				return nil
+			}
+			switch x := v.(type) {
+			case string:
+				bb.Append(x)
+				return nil
+			case []byte:
+				if len(x) != 16 {
+					return conversionFailure(name, "uuid", v, "UUID bytes must be 16 bytes")
+				}
+				bb.Append(formatCanonicalUUID(x))
+				return nil
+			case [16]byte:
+				bb.Append(formatCanonicalUUID(x[:]))
+				return nil
+			default:
+				return conversionFailure(name, "uuid", v, "UUID requires string or 16-byte representation")
+			}
 		},
 	}
 }
@@ -571,15 +584,11 @@ func planBinary(name string) ColumnPlan {
 				bb.AppendNull()
 				return nil
 			}
-			switch x := v.(type) {
-			case []byte:
+			if x, ok := v.([]byte); ok {
 				bb.Append(x)
-			case string:
-				bb.Append([]byte(x))
-			default:
-				bb.Append([]byte(fmt.Sprint(v)))
+				return nil
 			}
-			return nil
+			return conversionFailure(name, "binary", v, "binary requires []byte driver representation")
 		},
 	}
 }
@@ -602,8 +611,7 @@ func planList(name string, itemPlan ColumnPlan) ColumnPlan {
 
 			items, ok := extractSliceItems(v)
 			if !ok {
-				lb.AppendNull()
-				return nil
+				return conversionFailure(name, listType.String(), v, "invalid list representation")
 			}
 
 			lb.Append(true)
@@ -628,34 +636,19 @@ func planList(name string, itemPlan ColumnPlan) ColumnPlan {
 // Conversion Helpers
 // ---------------------------------------------------------------------------
 
-func asSafeString(v any) string {
-	if v == nil {
-		return ""
-	}
+func exactString(v any) (string, bool) {
 	switch x := v.(type) {
 	case string:
-		return x
+		return x, true
 	case []byte:
-		// Check for 16-byte UUID / GUID format
-		if len(x) == 16 {
-			return formatCanonicalUUID(x)
-		}
-		return string(x)
-	case [16]byte:
-		return formatCanonicalUUID(x[:])
-	case time.Time:
-		return x.UTC().Format(time.RFC3339Nano)
-	case fmt.Stringer:
-		return x.String()
+		return string(x), utf8.Valid(x)
 	default:
-		rv := reflect.ValueOf(v)
-		if rv.Kind() == reflect.Map || rv.Kind() == reflect.Slice || rv.Kind() == reflect.Struct {
-			if jsonBytes, err := json.Marshal(v); err == nil {
-				return string(jsonBytes)
-			}
-		}
-		return fmt.Sprint(v)
+		return "", false
 	}
+}
+
+func conversionFailure(column, target string, value any, reason string) error {
+	return &ConversionError{Column: column, TargetType: target, ValueType: fmt.Sprintf("%T", value), Reason: reason}
 }
 
 func formatCanonicalUUID(b []byte) string {
@@ -684,46 +677,102 @@ func cleanDecimalString(raw string) string {
 }
 
 func asDecimal128(v any, prec, scale int32) (decimal128.Num, bool) {
+	if prec <= 0 || prec > 38 || scale < 0 || scale > prec {
+		return decimal128.Num{}, false
+	}
 	switch x := v.(type) {
 	case decimal128.Num:
-		return x, true
+		return parseExactDecimal128(x.ToString(scale), prec, scale)
 	case string:
-		cleaned := cleanDecimalString(x)
-		if num, err := decimal128.FromString(cleaned, prec, scale); err == nil {
-			return num, true
-		}
+		return parseExactDecimal128(x, prec, scale)
 	case []byte:
-		cleaned := cleanDecimalString(string(x))
-		if num, err := decimal128.FromString(cleaned, prec, scale); err == nil {
-			return num, true
-		}
-	case float64:
-		s := strconv.FormatFloat(x, 'f', int(scale), 64)
-		if num, err := decimal128.FromString(s, prec, scale); err == nil {
-			return num, true
-		}
-	case float32:
-		s := strconv.FormatFloat(float64(x), 'f', int(scale), 32)
-		if num, err := decimal128.FromString(s, prec, scale); err == nil {
-			return num, true
-		}
+		return parseExactDecimal128(string(x), prec, scale)
 	case int64:
-		s := strconv.FormatInt(x, 10)
-		if num, err := decimal128.FromString(s, prec, scale); err == nil {
-			return num, true
-		}
+		return parseExactDecimal128(strconv.FormatInt(x, 10), prec, scale)
 	case int:
-		s := strconv.Itoa(x)
-		if num, err := decimal128.FromString(s, prec, scale); err == nil {
-			return num, true
-		}
-	default:
-		s := cleanDecimalString(fmt.Sprint(v))
-		if num, err := decimal128.FromString(s, prec, scale); err == nil {
-			return num, true
-		}
+		return parseExactDecimal128(strconv.Itoa(x), prec, scale)
+	case int8:
+		return parseExactDecimal128(strconv.FormatInt(int64(x), 10), prec, scale)
+	case int16:
+		return parseExactDecimal128(strconv.FormatInt(int64(x), 10), prec, scale)
+	case int32:
+		return parseExactDecimal128(strconv.FormatInt(int64(x), 10), prec, scale)
+	case uint:
+		return parseExactDecimal128(strconv.FormatUint(uint64(x), 10), prec, scale)
+	case uint8:
+		return parseExactDecimal128(strconv.FormatUint(uint64(x), 10), prec, scale)
+	case uint16:
+		return parseExactDecimal128(strconv.FormatUint(uint64(x), 10), prec, scale)
+	case uint32:
+		return parseExactDecimal128(strconv.FormatUint(uint64(x), 10), prec, scale)
+	case uint64:
+		return parseExactDecimal128(strconv.FormatUint(x, 10), prec, scale)
 	}
 	return decimal128.Num{}, false
+}
+
+// parseExactDecimal128 accepts only canonical plain decimal notation. It permits
+// zero-extension to target scale but never rounding or locale-specific cleanup.
+func parseExactDecimal128(raw string, precision, scale int32) (decimal128.Num, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return decimal128.Num{}, false
+	}
+	neg := false
+	if s[0] == '+' || s[0] == '-' {
+		neg = s[0] == '-'
+		s = s[1:]
+	}
+	parts := strings.Split(s, ".")
+	if len(parts) > 2 || parts[0] == "" {
+		return decimal128.Num{}, false
+	}
+	whole, frac := parts[0], ""
+	if len(parts) == 2 {
+		frac = parts[1]
+	}
+	if whole == "" {
+		whole = "0"
+	}
+	if !allASCIIDigits(whole) || (frac != "" && !allASCIIDigits(frac)) {
+		return decimal128.Num{}, false
+	}
+	if len(frac) > int(scale) {
+		if strings.Trim(frac[scale:], "0") != "" {
+			return decimal128.Num{}, false
+		}
+		frac = frac[:scale]
+	}
+	frac += strings.Repeat("0", int(scale)-len(frac))
+	unscaledText := strings.TrimLeft(whole+frac, "0")
+	if unscaledText == "" {
+		unscaledText = "0"
+	}
+	if len(unscaledText) > int(precision) {
+		return decimal128.Num{}, false
+	}
+	// big.Int validates arbitrary-width input before Arrow parses its 128-bit form.
+	if _, ok := new(big.Int).SetString(unscaledText, 10); !ok {
+		return decimal128.Num{}, false
+	}
+	canonical := whole
+	if scale > 0 {
+		canonical += "." + frac
+	}
+	if neg && unscaledText != "0" {
+		canonical = "-" + canonical
+	}
+	n, err := decimal128.FromString(canonical, precision, scale)
+	return n, err == nil
+}
+
+func allASCIIDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func asDate32(v any) (arrow.Date32, bool) {
@@ -789,6 +838,9 @@ func asTime64Microseconds(v any) (int64, bool) {
 						fracStr += "0"
 					}
 					if len(fracStr) > 6 {
+						if strings.Trim(fracStr[6:], "0") != "" {
+							return 0, false
+						}
 						fracStr = fracStr[:6]
 					}
 					usec, _ = strconv.ParseInt(fracStr, 10, 64)
@@ -818,11 +870,8 @@ func asTimestamp(v any) (time.Time, bool) {
 		if raw == "" || raw == "0000-00-00" || raw == "0000-00-00 00:00:00" {
 			return time.Time{}, false
 		}
-		if strings.EqualFold(raw, "infinity") {
-			return MaxClickHouseTimestamp, true
-		}
-		if strings.EqualFold(raw, "-infinity") {
-			return MinClickHouseTimestamp, true
+		if strings.EqualFold(raw, "infinity") || strings.EqualFold(raw, "-infinity") {
+			return time.Time{}, false
 		}
 		return parseTimestampValue(raw)
 	case []byte:

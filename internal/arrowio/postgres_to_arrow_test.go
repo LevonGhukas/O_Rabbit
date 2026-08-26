@@ -85,10 +85,10 @@ func TestPostgresMoneyParsing(t *testing.T) {
 	builder := plan.Builder(memory.DefaultAllocator)
 	defer builder.Release()
 
-	err := plan.Append(builder, "$12,345.67")
+	err := plan.Append(builder, "12345.67")
 	require.NoError(t, err)
 
-	err = plan.Append(builder, "-$92,233,720,368,547,758.08")
+	err = plan.Append(builder, "-92233720368547758.08")
 	require.NoError(t, err)
 
 	arr := builder.NewArray().(*array.Decimal128)

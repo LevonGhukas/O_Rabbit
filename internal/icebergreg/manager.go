@@ -47,16 +47,16 @@ type RunRequest struct {
 	RunID        string
 	Registration RunConfig
 
-	SourceEngine string
-	SourceDSN    string
-	SourceMode   string
-	SourceTable  string
-	SourceQuery  string
-	ColumnTypes  map[string]string
+	SourceEngine  string
+	SourceDSN     string
+	SourceMode    string
+	SourceTable   string
+	SourceQuery   string
+	ColumnTypes   map[string]string
 	SelectColumns []string
-	QueryHash    string
-	Incremental  bool
-	WriteMode    string
+	QueryHash     string
+	Incremental   bool
+	WriteMode     string
 
 	DatasetPrefix            string
 	DatasetS3                s3io.Config
@@ -569,11 +569,9 @@ func replaceRESTGoTableWithEmpty(ctx context.Context, tbl *icetable.Table, req R
 	schemaTx := tbl.NewTransaction()
 	var sourceSchema *iceberg.Schema
 	var err error
-	if reg.SchemaEvolution == "additive" {
-		sourceSchema, err = inferRunIcebergSchema(ctx, req, table)
-		if err != nil {
-			return err
-		}
+	sourceSchema, err = inferRunIcebergSchema(ctx, req, table)
+	if err != nil {
+		return err
 	}
 	if err := applySchemaOptions(schemaTx, tbl.Schema(), sourceSchema, reg); err != nil {
 		return err
@@ -1060,11 +1058,9 @@ func loadOrCreateRESTGoTable(ctx context.Context, log *slog.Logger, cat *restcat
 			return nil, fmt.Errorf("upsert requires Iceberg format version 2 or newer")
 		}
 		var sourceSchema *iceberg.Schema
-		if reg.SchemaEvolution == "additive" {
-			sourceSchema, err = inferRunIcebergSchema(ctx, req, table)
-			if err != nil {
-				return nil, err
-			}
+		sourceSchema, err = inferRunIcebergSchema(ctx, req, table)
+		if err != nil {
+			return nil, err
 		}
 		schemaTx := tbl.NewTransaction()
 		if err := applySchemaOptions(schemaTx, tbl.Schema(), sourceSchema, reg); err != nil {

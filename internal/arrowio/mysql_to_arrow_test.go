@@ -55,24 +55,22 @@ func TestMySQLTypeMapping(t *testing.T) {
 	}
 }
 
-func TestMySQLUint64MaxRoundtrip(t *testing.T) {
+func TestMySQLUint64AboveIcebergLongIsRejected(t *testing.T) {
 	plan := PlanForSQLColumn("mysql", "col", "BIGINT UNSIGNED", 0, 0, false)
 	builder := plan.Builder(memory.DefaultAllocator)
 	defer builder.Release()
 
-	// 18446744073709551615 (MaxUint64)
+	// Iceberg has no UInt64 type; Phase 1 rejects values beyond long.
 	err := plan.Append(builder, uint64(18446744073709551615))
-	require.NoError(t, err)
+	require.Error(t, err)
 
 	err = plan.Append(builder, "18446744073709551615")
-	require.NoError(t, err)
+	require.Error(t, err)
 
 	arr := builder.NewArray().(*array.Uint64)
 	defer arr.Release()
 
-	require.Equal(t, 2, arr.Len())
-	require.Equal(t, uint64(18446744073709551615), arr.Value(0))
-	require.Equal(t, uint64(18446744073709551615), arr.Value(1))
+	require.Equal(t, 0, arr.Len())
 }
 
 func TestMySQLTime64Durations(t *testing.T) {
@@ -113,5 +111,5 @@ func TestMySQLDate32Preservation(t *testing.T) {
 
 	require.Equal(t, 2, arr.Len())
 	require.Equal(t, "1960-02-29", arr.Value(0).FormattedString())
-	require.Equal(t, "2300-01-01", arr.Value(1).FormattedString())
+	require.Equal(t, "9999-12-31", arr.Value(1).FormattedString())
 }

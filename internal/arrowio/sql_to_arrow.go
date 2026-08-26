@@ -3,6 +3,7 @@ package arrowio
 import (
 	"database/sql"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -15,10 +16,11 @@ import (
 )
 
 type ColumnPlan struct {
-	Name     string
-	DataType arrow.DataType
-	Builder  func(mem memory.Allocator) array.Builder
-	Append   func(b array.Builder, v any) error
+	Name       string
+	DataType   arrow.DataType
+	Builder    func(mem memory.Allocator) array.Builder
+	Append     func(b array.Builder, v any) error
+	Descriptor SourceFieldDescriptor
 }
 
 // schemaFromPlans handles schema from plans behavior.
@@ -37,44 +39,87 @@ func PlansFromSQL(cols []string, colTypes []*sql.ColumnType) ([]ColumnPlan, *arr
 
 // PlansFromSQLEngine converts sql column types to ColumnPlans and an Arrow Schema using the source database engine.
 func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType) ([]ColumnPlan, *arrow.Schema, error) {
-	if colTypes == nil {
-		colTypes = make([]*sql.ColumnType, len(cols))
-	} else if len(cols) != len(colTypes) {
-		return nil, nil, fmt.Errorf("cols/colTypes length mismatch")
+	descriptors, err := descriptorsFromSQL(engine, cols, colTypes)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	plans := make([]ColumnPlan, 0, len(cols))
 	fields := make([]arrow.Field, 0, len(cols))
-	for i := range cols {
-		n := cols[i]
-		dbType := ""
-		nullable := true
-		var (
-			precision  int64
-			scale      int64
-			hasDecimal bool
-		)
-		if colTypes[i] != nil {
-			dbType = strings.ToUpper(strings.TrimSpace(colTypes[i].DatabaseTypeName()))
-			if p, s, ok := colTypes[i].DecimalSize(); ok {
-				precision = int64(p)
-				scale = int64(s)
-				hasDecimal = true
-			}
-			if isNullable, ok := colTypes[i].Nullable(); ok {
-				nullable = isNullable
-			}
+	for i := range descriptors {
+		d := &descriptors[i]
+		if exactDecimalType(d.Engine, d.SourceType) && (!d.PrecisionKnown || !d.ScaleKnown) {
+			return nil, nil, fmt.Errorf("column %q %s: exact decimal precision and scale metadata are required", d.Name, d.SourceType)
 		}
-
-		plan := PlanForSQLColumn(engine, n, dbType, precision, scale, hasDecimal)
+		if exactDecimalType(d.Engine, d.SourceType) && (d.Precision <= 0 || d.Precision > 38 || d.Scale < 0 || d.Scale > d.Precision) {
+			return nil, nil, fmt.Errorf("column %q %s: cannot represent decimal(%d,%d) exactly in Iceberg Decimal128", d.Name, d.SourceType, d.Precision, d.Scale)
+		}
+		if d.TemporalPrecisionKnown && d.TemporalPrecision > 6 {
+			return nil, nil, fmt.Errorf("column %q %s: temporal precision %d cannot be represented exactly by Iceberg v2 timestamp[us]", d.Name, d.SourceType, d.TemporalPrecision)
+		}
+		plan := PlanForSQLColumn(engine, d.Name, d.SourceType, int64(d.Precision), int64(d.Scale), d.PrecisionKnown && d.ScaleKnown)
+		d.ArrowType = plan.DataType
+		d.LogicalFamily, d.BitWidth, d.Signed = logicalFamilyForArrow(plan.DataType)
+		plan.Descriptor = *d
 		plans = append(plans, plan)
-		fields = append(fields, arrow.Field{Name: plan.Name, Type: plan.DataType, Nullable: nullable})
+		fields = append(fields, arrowFieldFromDescriptor(*d))
 	}
 
 	return plans, arrow.NewSchema(fields, nil), nil
 }
 
+func exactDecimalType(engine, typ string) bool {
+	t := strings.ToUpper(typ)
+	if strings.Contains(t, "DECIMAL") || strings.Contains(t, "NUMERIC") {
+		return true
+	}
+	if engine == "oracle" || engine == "ora" {
+		return strings.HasPrefix(t, "NUMBER")
+	}
+	return false
+}
 
+func logicalFamilyForArrow(dt arrow.DataType) (LogicalFamily, int, *bool) {
+	signed := func(v bool) *bool { return &v }
+	switch dt.ID() {
+	case arrow.INT8:
+		return LogicalSignedInt, 8, signed(true)
+	case arrow.INT16:
+		return LogicalSignedInt, 16, signed(true)
+	case arrow.INT32:
+		return LogicalSignedInt, 32, signed(true)
+	case arrow.INT64:
+		return LogicalSignedInt, 64, signed(true)
+	case arrow.UINT8:
+		return LogicalUnsignedInt, 8, signed(false)
+	case arrow.UINT16:
+		return LogicalUnsignedInt, 16, signed(false)
+	case arrow.UINT32:
+		return LogicalUnsignedInt, 32, signed(false)
+	case arrow.UINT64:
+		return LogicalUnsignedInt, 64, signed(false)
+	case arrow.DECIMAL128:
+		return LogicalDecimal, 128, nil
+	case arrow.FLOAT32, arrow.FLOAT64:
+		return LogicalFloat, 0, nil
+	case arrow.BOOL:
+		return LogicalBoolean, 0, nil
+	case arrow.STRING:
+		return LogicalString, 0, nil
+	case arrow.BINARY:
+		return LogicalBinary, 0, nil
+	case arrow.DATE32:
+		return LogicalDate, 0, nil
+	case arrow.TIME64:
+		return LogicalTime, 0, nil
+	case arrow.TIMESTAMP:
+		if dt.(*arrow.TimestampType).TimeZone == "" {
+			return LogicalTimestamp, 0, nil
+		}
+		return LogicalInstant, 0, nil
+	}
+	return LogicalUnsupported, 0, nil
+}
 
 func parseTimestampValue(raw string) (time.Time, bool) {
 	raw = strings.TrimSpace(raw)
@@ -106,9 +151,16 @@ func parseFloat64Text(raw string) (float64, bool) {
 	return f, true
 }
 
-func parseTruthyText(raw string) bool {
+func parseTruthyText(raw string) (bool, bool) {
 	s := strings.TrimSpace(raw)
-	return s == "1" || strings.EqualFold(s, "true") || strings.EqualFold(s, "t") || strings.EqualFold(s, "yes") || strings.EqualFold(s, "y")
+	switch {
+	case s == "1" || strings.EqualFold(s, "true") || strings.EqualFold(s, "t") || strings.EqualFold(s, "yes") || strings.EqualFold(s, "y"):
+		return true, true
+	case s == "0" || strings.EqualFold(s, "false") || strings.EqualFold(s, "f") || strings.EqualFold(s, "no") || strings.EqualFold(s, "n"):
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func asFloat64(v any) (float64, bool) {
@@ -174,9 +226,9 @@ func asBool(v any) (bool, bool) {
 		if len(x) == 1 {
 			return x[0] != 0, true
 		}
-		return parseTruthyText(string(x)), true
+		return parseTruthyText(string(x))
 	case string:
-		return parseTruthyText(x), true
+		return parseTruthyText(x)
 	default:
 		return false, false
 	}
@@ -206,6 +258,9 @@ func asInt64(v any) (int64, bool) {
 	case uint8:
 		return int64(x), true
 	case uint:
+		if uint64(x) > math.MaxInt64 {
+			return 0, false
+		}
 		return int64(x), true
 	case []byte:
 		i, err := strconv.ParseInt(strings.TrimSpace(string(x)), 10, 64)
@@ -262,13 +317,6 @@ func asUint64(v any) (uint64, bool) {
 		}
 		return uint64(x), true
 	case []byte:
-		if len(x) == 8 {
-			var u uint64
-			for _, b := range x {
-				u = (u << 8) | uint64(b)
-			}
-			return u, true
-		}
 		i, err := strconv.ParseUint(strings.TrimSpace(string(x)), 10, 64)
 		if err != nil {
 			return 0, false
@@ -415,6 +463,12 @@ func RowsToRecordBatchesEngineWithOverrides(engine string, rows *sql.Rows, cols 
 		}
 		for i, p := range plans {
 			if err := p.Append(builders[i], vals[i]); err != nil {
+				if conversion, ok := err.(*ConversionError); ok {
+					conversion.SourceType = p.Descriptor.SourceType
+					if conversion.TargetType == "" && p.DataType != nil {
+						conversion.TargetType = p.DataType.String()
+					}
+				}
 				return rowsTotal, maxCursor, err
 			}
 		}
@@ -465,11 +519,11 @@ func PlansFromSQLEngineWithOverrides(engine string, cols []string, colTypes []*s
 	for i, f := range fields {
 		if targetTypeStr, ok := targetTypes[f.Name]; ok && strings.TrimSpace(targetTypeStr) != "" {
 			tStr := strings.TrimSpace(targetTypeStr)
-			nullable := strings.HasPrefix(strings.ToLower(tStr), "nullable(")
+			nullable := f.Nullable
 
 			newPlan := PlanForTargetType(f.Name, tStr)
 			plans[i] = newPlan
-			newFields[i] = arrow.Field{Name: f.Name, Type: newPlan.DataType, Nullable: nullable}
+			newFields[i] = arrow.Field{Name: f.Name, Type: newPlan.DataType, Nullable: nullable, Metadata: f.Metadata}
 		}
 	}
 

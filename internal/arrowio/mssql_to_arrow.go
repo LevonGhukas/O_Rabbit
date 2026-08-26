@@ -66,7 +66,7 @@ func planMSSQLColumn(name, dbType string, precision, scale int64, hasDecimal boo
 
 	// 7. Uniqueidentifier, Strings, UDT & Variants
 	case "UNIQUEIDENTIFIER":
-		return planString(name)
+		return planUUID(name)
 	case "CHAR", "VARCHAR", "TEXT", "NCHAR", "NVARCHAR", "NTEXT", "XML", "JSON", "SQL_VARIANT", "HIERARCHYID", "GEOMETRY", "GEOGRAPHY":
 		return planString(name)
 
