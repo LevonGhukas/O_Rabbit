@@ -190,7 +190,7 @@ func classifyFallbackRepresentation(d *SourceFieldDescriptor) {
 			d.Representation = RepresentationFallback
 		}
 	}
-	if d.PrecisionKnown && d.Precision > 38 && exactDecimalType(d.Engine, d.SourceType) {
+	if exactDecimalType(d.Engine, d.SourceType) && (!d.PrecisionKnown || !d.ScaleKnown || d.Precision > 38) {
 		d.Representation, d.FallbackEncoding = RepresentationFallback, "decimal_text_v1"
 	}
 	if d.Representation == "" {
@@ -198,10 +198,24 @@ func classifyFallbackRepresentation(d *SourceFieldDescriptor) {
 	}
 }
 
+// universalFallbackDescriptor is final planning tier. source_text_v1 accepts
+// only exact textual driver values; unknown type names are never rejected only
+// because no mapping switch mentioned them.
+func universalFallbackDescriptor(d *SourceFieldDescriptor) {
+	if d.Representation == RepresentationUnsupported || d.Representation == RepresentationFallback || d.FallbackEncoding != "" {
+		return
+	}
+	d.Representation = RepresentationFallback
+	d.FallbackEncoding = "source_text_v1"
+}
+
 func classifySourceRepresentation(d *SourceFieldDescriptor) {
 	t := strings.ToUpper(unwrapClickHouseType(d.SourceType))
 	switch d.Engine {
 	case "clickhouse", "ch":
+		if strings.HasPrefix(t, "INT128") || strings.HasPrefix(t, "INT256") || strings.HasPrefix(t, "UINT128") || strings.HasPrefix(t, "UINT256") {
+			d.FallbackEncoding = "integer_text_v1"
+		}
 		if t == "UINT64" {
 			d.Unsigned, d.BitWidth = true, 64
 			signed := false
@@ -240,6 +254,9 @@ func classifySourceRepresentation(d *SourceFieldDescriptor) {
 		}
 		if strings.HasPrefix(t, "VARCHAR") || strings.HasPrefix(t, "NVARCHAR") || t == "TEXT" || t == "NTEXT" || t == "CHAR" || t == "NCHAR" {
 			d.FallbackEncoding = "utf8_text_v1"
+		}
+		if t == "XML" {
+			d.FallbackEncoding = "xml_utf8_text_v1"
 		}
 	case "oracle", "ora":
 		if strings.HasPrefix(t, "RAW(") {

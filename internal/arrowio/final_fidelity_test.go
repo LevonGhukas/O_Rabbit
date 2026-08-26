@@ -2,6 +2,7 @@ package arrowio
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -128,4 +129,60 @@ func TestDecimalTextFallbackAndMetadata(t *testing.T) {
 	encoding, ok := field.Metadata.GetValue("orabbit.fallback.encoding")
 	require.True(t, ok)
 	require.Equal(t, "decimal_text_v1", encoding)
+}
+
+func TestUniversalSourceTextFallbackForUnmappedTypes(t *testing.T) {
+	cases := []struct{ engine, typ string }{
+		{"mssql", "HIERARCHYID"},
+		{"postgres", "MY_ENUM"},
+		{"oracle", "CUSTOM_SCALAR"},
+		{"clickhouse", "ENUM8('open'=1)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.engine+"/"+tc.typ, func(t *testing.T) {
+			d := SourceFieldDescriptor{Name: "value", Engine: tc.engine, SourceType: tc.typ, Representation: RepresentationNative}
+			universalFallbackDescriptor(&d)
+			require.Equal(t, RepresentationFallback, d.Representation)
+			require.Equal(t, "source_text_v1", d.FallbackEncoding)
+			plan, err := fallbackPlanForDescriptor(d)
+			require.NoError(t, err)
+			b := plan.Builder(memory.DefaultAllocator)
+			defer b.Release()
+			require.NoError(t, plan.Append(b, "value with Unicode 雪"))
+			require.Error(t, plan.Append(b, 17))
+		})
+	}
+}
+
+func TestMSSQLXMLFallbackKeepsLargeExactText(t *testing.T) {
+	d := SourceFieldDescriptor{Name: "xml_col", Engine: "mssql", SourceType: "XML"}
+	classifySourceRepresentation(&d)
+	classifyFallbackRepresentation(&d)
+	require.Equal(t, "xml_utf8_text_v1", d.FallbackEncoding)
+	plan, err := fallbackPlanForDescriptor(d)
+	require.NoError(t, err)
+	b := plan.Builder(memory.DefaultAllocator)
+	defer b.Release()
+	xml := `<root snow="☃">&amp;<nested>` + string(make([]byte, 9000)) + `</nested></root>`
+	xml = strings.ReplaceAll(xml, "\x00", "x")
+	require.NoError(t, plan.Append(b, xml))
+	require.NoError(t, plan.Append(b, nil))
+	a := b.NewArray().(*array.String)
+	defer a.Release()
+	require.Equal(t, xml, a.Value(0))
+	require.True(t, a.IsNull(1))
+}
+
+func TestHexFallbackIsReversible(t *testing.T) {
+	d := SourceFieldDescriptor{Name: "blob", Engine: "oracle", SourceType: "BLOB", FallbackEncoding: "hex_v1", Representation: RepresentationFallback}
+	plan, err := fallbackPlanForDescriptor(d)
+	require.NoError(t, err)
+	b := plan.Builder(memory.DefaultAllocator)
+	defer b.Release()
+	raw := []byte{0, 0xff, 0x80, 'x'}
+	require.NoError(t, plan.Append(b, raw))
+	require.Error(t, plan.Append(b, string(raw)))
+	a := b.NewArray().(*array.String)
+	defer a.Release()
+	require.Equal(t, "00ff8078", a.Value(0))
 }

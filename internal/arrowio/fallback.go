@@ -1,6 +1,7 @@
 package arrowio
 
 import (
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
@@ -68,19 +69,34 @@ func fallbackPlanForDescriptor(d SourceFieldDescriptor) (ColumnPlan, error) {
 		return planUUID(d.Name), nil
 	case "json_utf8_text_v1":
 		return planJSONText(d.Name), nil
-	case "utf8_text_v1", "xml_utf8_text_v1", "oracle_rowid_text_v1":
-		return planString(d.Name), nil
-	case "mssql_time_text_v1", "mssql_datetime2_text_v1", "mssql_datetimeoffset_text_v1", "oracle_timestamp_text_v1", "oracle_timestamptz_text_v1", "clickhouse_datetime64_text_v1", "postgres_timetz_text_v1", "decimal_text_v1":
+	case "utf8_text_v1", "xml_utf8_text_v1", "oracle_rowid_text_v1", "source_text_v1":
+		return planFallback(d.Name, textFallbackCodec{descriptor: d}), nil
+	case "hex_v1":
+		return planFallback(d.Name, hexFallbackCodec{descriptor: d}), nil
+	case "mssql_time_text_v1", "mssql_datetime2_text_v1", "mssql_datetimeoffset_text_v1", "oracle_timestamp_text_v1", "oracle_timestamptz_text_v1", "clickhouse_datetime64_text_v1", "postgres_timetz_text_v1", "decimal_text_v1", "integer_text_v1":
 		return planFallback(d.Name, textFallbackCodec{descriptor: d}), nil
 	default:
 		return ColumnPlan{}, fmt.Errorf("no fallback codec for %q", d.FallbackEncoding)
 	}
 }
 
-func validateFallbackText(d SourceFieldDescriptor, raw string) error {
-	if raw == "" {
-		return fmt.Errorf("empty fallback text")
+// hexFallbackCodec is universal binary fallback. It accepts byte containers
+// only, so arbitrary binary is never mistaken for UTF-8 source text.
+type hexFallbackCodec struct{ descriptor SourceFieldDescriptor }
+
+func (c hexFallbackCodec) Encoding() string        { return c.descriptor.FallbackEncoding }
+func (hexFallbackCodec) ArrowType() arrow.DataType { return arrow.BinaryTypes.String }
+func (hexFallbackCodec) EncodeExact(value any) (string, error) {
+	v := dereferenceValue(value)
+	b, ok := v.([]byte)
+	if !ok {
+		return "", fmt.Errorf("driver value %T is not exact binary", value)
 	}
+	return hex.EncodeToString(b), nil
+}
+
+func validateFallbackText(d SourceFieldDescriptor, raw string) error {
+	// Empty text is a valid source value. NULL is handled before codec use.
 	precision := d.TemporalPrecision
 	frac := ""
 	if precision > 0 {
@@ -98,11 +114,13 @@ func validateFallbackText(d SourceFieldDescriptor, raw string) error {
 		pattern = `^\d{2}:\d{2}:\d{2}(\.\d{1,6})?[+-]\d{2}:\d{2}$`
 	case "decimal_text_v1":
 		pattern = `^[+-]?\d+(\.\d+)?$`
+	case "integer_text_v1":
+		pattern = `^[+-]?\d+$`
 	}
 	if pattern != "" && !regexp.MustCompile(pattern).MatchString(strings.TrimSpace(raw)) {
 		return fmt.Errorf("text does not match %s exact representation", d.FallbackEncoding)
 	}
-	if d.FallbackEncoding == "decimal_text_v1" {
+	if d.FallbackEncoding == "decimal_text_v1" && d.PrecisionKnown && d.ScaleKnown {
 		if !decimalTextFitsDescriptor(raw, d) {
 			return fmt.Errorf("decimal text exceeds declared precision or scale")
 		}

@@ -2,9 +2,17 @@ package connectors
 
 import (
 	"os"
+	"strings"
 	"sync"
 	"testing"
 )
+
+func TestBuildMSSQLSelectClauseProjectsXMLAsUnboundedText(t *testing.T) {
+	got := buildMSSQLSelectClause([]string{"xml_col", "id"}, map[string]string{"xml_col": "XML", "id": "INT"})
+	if !strings.Contains(got, "CONVERT(NVARCHAR(MAX), [xml_col]) AS [xml_col]") {
+		t.Fatalf("XML projection missing or bounded: %s", got)
+	}
+}
 
 func TestSplitMSSQLTableIdent(t *testing.T) {
 	tests := []struct {

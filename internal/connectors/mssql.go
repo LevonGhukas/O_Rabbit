@@ -159,7 +159,7 @@ func (m *MSSQL) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []st
 		args = append(args, upperArg)
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM %s WITH (NOLOCK)", buildMSSQLSelectClause(q.SelectColumns), qt)
+	query := fmt.Sprintf("SELECT %s FROM %s WITH (NOLOCK)", buildMSSQLSelectClause(q.SelectColumns, q.ColumnTypes), qt)
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -443,16 +443,27 @@ func mssqlHostFromKVDSN(dsn string) (string, bool) {
 	return "", false
 }
 
-func buildMSSQLSelectClause(cols []string) string {
+// buildMSSQLSelectClause applies only projections that SQL Server guarantees
+// preserve a fallback value. XML is converted to unbounded NVARCHAR(MAX), not
+// VARCHAR(8000), then aliased back to its original column name.
+func buildMSSQLSelectClause(cols []string, typeHints ...map[string]string) string {
 	if len(cols) == 0 {
 		return "*"
 	}
 	quoted := make([]string, 0, len(cols))
+	var columnTypes map[string]string
+	if len(typeHints) > 0 {
+		columnTypes = typeHints[0]
+	}
 	for _, c := range cols {
 		c = strings.TrimSpace(c)
 		if c != "" {
 			if q, err := quoteMSSQLMultipartIdent(c); err == nil {
-				quoted = append(quoted, q)
+				if strings.EqualFold(strings.TrimSpace(columnTypes[c]), "XML") {
+					quoted = append(quoted, fmt.Sprintf("CONVERT(NVARCHAR(MAX), %s) AS %s", q, q))
+				} else {
+					quoted = append(quoted, q)
+				}
 			} else {
 				quoted = append(quoted, c)
 			}

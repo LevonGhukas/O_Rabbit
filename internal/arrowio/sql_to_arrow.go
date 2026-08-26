@@ -49,9 +49,6 @@ func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType
 	target := ConfiguredTargetCapabilities()
 	for i := range descriptors {
 		d := &descriptors[i]
-		if exactDecimalType(d.Engine, d.SourceType) && d.Representation != RepresentationFallback && (!d.PrecisionKnown || !d.ScaleKnown) {
-			return nil, nil, fmt.Errorf("column %q %s: exact decimal precision and scale metadata are required", d.Name, d.SourceType)
-		}
 		if exactDecimalType(d.Engine, d.SourceType) && d.Representation != RepresentationFallback && (d.Precision <= 0 || d.Precision > 38 || d.Scale < 0 || d.Scale > d.Precision) {
 			return nil, nil, fmt.Errorf("column %q %s: cannot represent decimal(%d,%d) exactly in Iceberg Decimal128", d.Name, d.SourceType, d.Precision, d.Scale)
 		}
@@ -66,6 +63,12 @@ func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType
 			d.Capability = capability
 		}
 		plan := PlanForSQLColumn(engine, d.Name, d.SourceType, int64(d.Precision), int64(d.Scale), d.PrecisionKnown && d.ScaleKnown)
+		// Dialect planners use Arrow string as their unknown-type sentinel. Make
+		// that sentinel first-class only through strict source_text_v1, never by
+		// calling fmt.Sprint on arbitrary driver values.
+		if d.Representation == RepresentationNative && d.FallbackEncoding == "" && plan.DataType.ID() == arrow.STRING {
+			universalFallbackDescriptor(d)
+		}
 		if d.Representation == RepresentationFallback {
 			plan, err = fallbackPlanForDescriptor(*d)
 			if err != nil {
@@ -83,12 +86,6 @@ func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType
 		}
 		if d.Representation != RepresentationFallback && d.FallbackEncoding == "json_utf8_text_v1" {
 			plan = planJSONText(d.Name)
-		}
-		if strings.HasPrefix(unwrapClickHouseType(d.SourceType), "ENUM8") || strings.HasPrefix(unwrapClickHouseType(d.SourceType), "ENUM16") {
-			return nil, nil, fmt.Errorf("column %q %s: enum labels are not available from current descriptor metadata", d.Name, d.SourceType)
-		}
-		if d.SourceType != "" && plan.DataType.ID() == arrow.STRING && d.FallbackEncoding == "" {
-			return nil, nil, fmt.Errorf("column %q %s: no explicit lossless string policy", d.Name, d.SourceType)
 		}
 		if d.TemporalSemantics != TemporalNone && d.Representation != RepresentationFallback {
 			plan = temporalPlanForDescriptor(*d)
