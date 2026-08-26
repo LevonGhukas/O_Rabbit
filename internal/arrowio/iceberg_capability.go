@@ -15,14 +15,14 @@ type TargetCapabilities struct {
 	Reason               string
 }
 
-// ConfiguredTargetCapabilities is intentionally v2. The pinned iceberg-go
-// Arrow adapter rejects ns timestamps (or downcasts them), and the configured
-// Altinity Ice/ClickHouse path has no verified v3 timestamp_ns round trip.
+// ConfiguredTargetCapabilities is intentionally v2. The configured ClickHouse
+// images are 25.8.9 and 25.3.8; Iceberg v3 nanosecond timestamp reading first
+// appears in ClickHouse 26.4. No compatible live catalog/read-back test exists.
 func ConfiguredTargetCapabilities() TargetCapabilities {
 	return TargetCapabilities{
 		IcebergFormatVersion: 2,
 		MaxTemporalPrecision: 6,
-		Reason:               "configured Iceberg v2 path supports temporal values through microseconds only",
+		Reason:               "configured ClickHouse 25.8.9/25.3.8 path lacks proven Iceberg v3 nanosecond timestamp read support; exact export supports temporal values through microseconds only",
 	}
 }
 
