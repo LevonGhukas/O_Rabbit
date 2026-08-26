@@ -1199,6 +1199,9 @@ func inferRunIcebergSchema(ctx context.Context, req RunRequest, tableName string
 
 	if iceSchema == nil {
 		var err error
+		if err = arrowio.ValidateArrowSchemaForConfiguredTarget(arrSchema); err != nil {
+			return nil, fmt.Errorf("validate Arrow schema for configured Iceberg target: %w", err)
+		}
 		iceSchema, err = icetable.ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
 		if err != nil {
 			return nil, fmt.Errorf("arrow->iceberg schema: %w", err)
@@ -1235,6 +1238,9 @@ func InferDurableIcebergSchema(ctx context.Context, engine, dsn, mode, table, qu
 		if err != nil {
 			return nil, fmt.Errorf("infer document durable schema: %w", err)
 		}
+		if err := arrowio.ValidateArrowSchemaForConfiguredTarget(arrSchema); err != nil {
+			return nil, fmt.Errorf("validate Arrow schema for configured Iceberg target: %w", err)
+		}
 		iceSchema, err := icetable.ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
 		if err != nil {
 			return nil, fmt.Errorf("arrow->iceberg durable schema: %w", err)
@@ -1257,6 +1263,9 @@ func InferDurableIcebergSchema(ctx context.Context, engine, dsn, mode, table, qu
 	_, arrSchema, err := arrowio.PlansFromSQLEngine(engine, cols, columnTypes)
 	if err != nil {
 		return nil, fmt.Errorf("sql->arrow durable schema: %w", err)
+	}
+	if err := arrowio.ValidateArrowSchemaForConfiguredTarget(arrSchema); err != nil {
+		return nil, fmt.Errorf("validate Arrow schema for configured Iceberg target: %w", err)
 	}
 	iceSchema, err := icetable.ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
 	if err != nil {

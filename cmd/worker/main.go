@@ -1152,7 +1152,7 @@ func extractFlightSQLTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 
 	convertStart := time.Now()
 	total, err := src.StreamQuery(qctx, t.SourceSql, func(schema *arrow.Schema, rec arrow.RecordBatch) error {
-		if err := arrowio.ValidateArrowSchemaForIcebergV2(schema); err != nil {
+		if err := arrowio.ValidateArrowSchemaForConfiguredTarget(schema); err != nil {
 			return err
 		}
 		rowsRead += rec.NumRows()

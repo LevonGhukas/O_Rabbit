@@ -88,3 +88,21 @@ func TestFlightSQLTemporalSchemaCapability(t *testing.T) {
 	require.Error(t, ValidateArrowSchemaForIcebergV2(arrow.NewSchema([]arrow.Field{{Name: "ns", Type: &arrow.TimestampType{Unit: arrow.Nanosecond}}}, nil)))
 	require.Error(t, ValidateArrowSchemaForIcebergV2(arrow.NewSchema([]arrow.Field{{Name: "zone", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "Europe/Yerevan"}}}, nil)))
 }
+
+func TestConfiguredTargetCapabilityIsSingleTemporalDecisionPoint(t *testing.T) {
+	target := ConfiguredTargetCapabilities()
+	require.Equal(t, 2, target.IcebergFormatVersion)
+	require.Equal(t, 6, target.MaxTemporalPrecision)
+
+	capability, err := target.ValidateTemporalDescriptor(SourceFieldDescriptor{Name: "us", SourceType: "TIMESTAMP(6)", TemporalSemantics: TemporalLocalTimestamp, TemporalPrecision: 6, TemporalPrecisionKnown: true})
+	require.NoError(t, err)
+	require.True(t, capability.ArrowExact)
+	require.True(t, capability.ParquetExact)
+	require.True(t, capability.IcebergExact)
+	require.True(t, capability.ClickHouseExact)
+
+	_, err = target.ValidateTemporalDescriptor(SourceFieldDescriptor{Name: "ns", SourceType: "TIMESTAMP(9)", TemporalSemantics: TemporalLocalTimestamp, TemporalPrecision: 9, TemporalPrecisionKnown: true})
+	require.ErrorContains(t, err, "maximum microseconds")
+	_, err = target.ValidateTemporalDescriptor(SourceFieldDescriptor{Name: "timetz", SourceType: "TIMETZ", TemporalSemantics: TemporalZonedTime, TemporalPrecision: 6, TemporalPrecisionKnown: true})
+	require.ErrorContains(t, err, "no lossless")
+}
