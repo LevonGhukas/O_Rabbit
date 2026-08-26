@@ -8,6 +8,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/file"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 )
 
 func testSchema() *arrow.Schema {
@@ -17,6 +19,51 @@ func testSchema() *arrow.Schema {
 			Type: arrow.PrimitiveTypes.Int64,
 		},
 	}, nil)
+}
+
+func TestParquetTemporalAnnotationsRoundTrip(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		typ  *arrow.TimestampType
+	}{
+		{"local", &arrow.TimestampType{Unit: arrow.Microsecond}},
+		{"instant", &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := arrow.NewSchema([]arrow.Field{{Name: "created_at", Type: tc.typ, Nullable: false}}, nil)
+			w, path, err := NewTempFileWriter(schema, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.Remove(path)
+			b := array.NewTimestampBuilder(memory.DefaultAllocator, tc.typ)
+			b.Append(1)
+			a := b.NewArray()
+			b.Release()
+			defer a.Release()
+			rec := array.NewRecordBatch(schema, []arrow.Array{a}, 1)
+			defer rec.Release()
+			if err := w.Write(rec); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Close(); err != nil {
+				t.Fatal(err)
+			}
+			pr, err := file.OpenParquetFile(path, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pr.Close()
+			actual, err := pqarrow.FromParquet(pr.MetaData().Schema, &pqarrow.ArrowReadProperties{}, pr.MetaData().KeyValueMetadata())
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := actual.Field(0).Type.(*arrow.TimestampType)
+			if got.Unit != arrow.Microsecond || got.TimeZone != tc.typ.TimeZone {
+				t.Fatalf("timestamp annotation=%s, want %s", got, tc.typ)
+			}
+		})
+	}
 }
 
 func TestNewTempFileWriter(t *testing.T) {

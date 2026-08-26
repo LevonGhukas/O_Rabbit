@@ -478,17 +478,31 @@ func planTimestampUs(name string, timeZone string) ColumnPlan {
 				bb.AppendNull()
 				return nil
 			}
-			t, ok := asTimestamp(v)
+			var (
+				t  time.Time
+				ok bool
+			)
+			if timeZone == "UTC" {
+				t, ok = asInstantTimestamp(v)
+			} else {
+				t, ok = asLocalTimestamp(v)
+			}
 			if !ok {
 				return conversionFailure(name, tsType.String(), v, "invalid timestamp representation")
-			}
-			if timeZone == "UTC" {
-				t = t.UTC()
 			}
 			if t.Nanosecond()%1000 != 0 {
 				return conversionFailure(name, tsType.String(), v, "nanosecond precision cannot be represented by timestamp[us]")
 			}
-			bb.Append(arrow.Timestamp(t.UnixMicro()))
+			if timeZone == "UTC" {
+				t = t.UTC()
+				bb.Append(arrow.Timestamp(t.UnixMicro()))
+				return nil
+			}
+			// A local timestamp is civil fields, not an instant. Encode its wall
+			// clock components against UTC solely as a stable epoch arithmetic base.
+			// Never call t.UTC(): that would shift a non-UTC wall clock.
+			civil := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC)
+			bb.Append(arrow.Timestamp(civil.UnixMicro()))
 			return nil
 		},
 	}
@@ -781,7 +795,7 @@ func asDate32(v any) (arrow.Date32, bool) {
 		if x.IsZero() {
 			return 0, false
 		}
-		return arrow.Date32FromTime(x.UTC()), true
+		return arrow.Date32FromTime(time.Date(x.Year(), x.Month(), x.Day(), 0, 0, 0, 0, time.UTC)), true
 	case arrow.Date32:
 		return x, true
 	case string:
@@ -790,9 +804,6 @@ func asDate32(v any) (arrow.Date32, bool) {
 			return 0, false
 		}
 		if t, err := time.Parse("2006-01-02", raw); err == nil {
-			return arrow.Date32FromTime(t), true
-		}
-		if t, ok := parseTimestampValue(raw); ok {
 			return arrow.Date32FromTime(t), true
 		}
 	case []byte:
@@ -858,7 +869,7 @@ func asTime64Microseconds(v any) (int64, bool) {
 	return 0, false
 }
 
-func asTimestamp(v any) (time.Time, bool) {
+func asLocalTimestamp(v any) (time.Time, bool) {
 	switch x := v.(type) {
 	case time.Time:
 		if x.IsZero() {
@@ -873,18 +884,46 @@ func asTimestamp(v any) (time.Time, bool) {
 		if strings.EqualFold(raw, "infinity") || strings.EqualFold(raw, "-infinity") {
 			return time.Time{}, false
 		}
-		return parseTimestampValue(raw)
-	case []byte:
-		return parseTimestampValue(string(x))
-	case int64:
-		if x > 1e14 {
-			return time.UnixMicro(x).UTC(), true
+		layouts := []string{"2006-01-02 15:04:05.999999999", "2006-01-02 15:04:05", "2006-01-02"}
+		for _, layout := range layouts {
+			if t, err := time.Parse(layout, raw); err == nil {
+				return t, true
+			}
 		}
-		return time.UnixMilli(x).UTC(), true
+		return time.Time{}, false
+	case []byte:
+		return asLocalTimestamp(string(x))
 	default:
 		return time.Time{}, false
 	}
 }
+
+// asInstantTimestamp accepts native time.Time values under the connector's
+// verified driver contract, or textual values carrying an explicit offset.
+func asInstantTimestamp(v any) (time.Time, bool) {
+	switch x := v.(type) {
+	case time.Time:
+		if x.IsZero() {
+			return time.Time{}, false
+		}
+		return x, true
+	case string:
+		raw := strings.TrimSpace(x)
+		if raw == "" || strings.EqualFold(raw, "infinity") || strings.EqualFold(raw, "-infinity") {
+			return time.Time{}, false
+		}
+		t, err := time.Parse(time.RFC3339Nano, raw)
+		return t, err == nil
+	case []byte:
+		return asInstantTimestamp(string(x))
+	default:
+		return time.Time{}, false
+	}
+}
+
+// asTimestamp is retained for non-SQL callers. SQL planning selects an
+// explicit local or instant codec above.
+func asTimestamp(v any) (time.Time, bool) { return asLocalTimestamp(v) }
 
 func extractSliceItems(v any) ([]any, bool) {
 	if v == nil {

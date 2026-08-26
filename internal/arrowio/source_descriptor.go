@@ -19,7 +19,16 @@ const (
 	TemporalTime           TemporalSemantics = "time"
 	TemporalLocalTimestamp TemporalSemantics = "local_timestamp"
 	TemporalInstant        TemporalSemantics = "instant"
+	TemporalZonedTime      TemporalSemantics = "unsupported_zoned_time"
 )
+
+// TypeCapability records whether the configured Arrow/Parquet/Iceberg v2 path
+// can preserve a field exactly. A false value is a planning error, never a
+// request to coerce a source value.
+type TypeCapability struct {
+	ArrowExact, ParquetExact, IcebergExact, ClickHouseExact bool
+	Reason                                                  string
+}
 
 const (
 	LogicalUnsupported LogicalFamily = "unsupported"
@@ -53,6 +62,7 @@ type SourceFieldDescriptor struct {
 	TemporalPrecision                        int
 	TemporalPrecisionKnown                   bool
 	TemporalSemantics                        TemporalSemantics
+	Capability                               TypeCapability
 	ArrowType                                arrow.DataType
 }
 
@@ -74,7 +84,11 @@ func descriptorsFromSQL(engine string, cols []string, colTypes []*sql.ColumnType
 		d := SourceFieldDescriptor{Name: name, Ordinal: i, Engine: strings.ToLower(strings.TrimSpace(engine)), LogicalFamily: LogicalUnsupported}
 		if colTypes != nil && colTypes[i] != nil {
 			ct := colTypes[i]
-			d.SourceType = strings.ToUpper(strings.TrimSpace(ct.DatabaseTypeName()))
+			rawType := strings.TrimSpace(ct.DatabaseTypeName())
+			d.SourceType = strings.ToUpper(rawType)
+			if d.Engine == "clickhouse" || d.Engine == "ch" {
+				d.SourceTimezone = clickHouseTimezone(rawType)
+			}
 			if p, s, ok := ct.DecimalSize(); ok {
 				d.Precision, d.Scale, d.PrecisionKnown, d.ScaleKnown = int32(p), int32(s), true, true
 			}
@@ -97,24 +111,7 @@ func descriptorsFromSQL(engine string, cols []string, colTypes []*sql.ColumnType
 				}
 			}
 		}
-		upperType := strings.ToUpper(d.SourceType)
-		if strings.Contains(upperType, "TIME") || strings.Contains(upperType, "DATE") {
-			switch {
-			case strings.Contains(upperType, "TIME") && (strings.Contains(upperType, "ZONE") || strings.Contains(upperType, "OFFSET")):
-				d.TemporalSemantics = TemporalInstant
-			case strings.Contains(upperType, "TIMESTAMP") || strings.Contains(upperType, "DATETIME"):
-				d.TemporalSemantics = TemporalLocalTimestamp
-			case strings.HasPrefix(upperType, "TIME"):
-				d.TemporalSemantics = TemporalTime
-			case strings.HasPrefix(upperType, "DATE"):
-				d.TemporalSemantics = TemporalDate
-			}
-			if m := precScaleRe.FindStringSubmatch(upperType); m != nil && m[1] != "" {
-				if p, err := strconv.Atoi(m[1]); err == nil {
-					d.TemporalPrecision, d.TemporalPrecisionKnown = p, true
-				}
-			}
-		}
+		classifyTemporalDescriptor(&d)
 		// clickhouse-go may expose only decimal scale in DecimalSize. Width is
 		// intrinsic to Decimal32/64/128/256, so recover it from native type.
 		if d.Engine == "clickhouse" {
@@ -141,7 +138,109 @@ func descriptorsFromSQL(engine string, cols []string, colTypes []*sql.ColumnType
 
 func arrowFieldFromDescriptor(d SourceFieldDescriptor) arrow.Field {
 	md := arrow.NewMetadata([]string{
-		"orabbit.source.engine", "orabbit.source.type", "orabbit.source.precision", "orabbit.source.scale", "orabbit.source.logical_family", "orabbit.source.temporal_semantics",
-	}, []string{d.Engine, d.SourceType, strconv.FormatInt(int64(d.Precision), 10), strconv.FormatInt(int64(d.Scale), 10), string(d.LogicalFamily), string(d.TemporalSemantics)})
+		"orabbit.source.engine", "orabbit.source.type", "orabbit.source.precision", "orabbit.source.scale", "orabbit.source.logical_family", "orabbit.source.temporal_semantics", "orabbit.source.temporal_precision", "orabbit.source.timezone",
+	}, []string{d.Engine, d.SourceType, strconv.FormatInt(int64(d.Precision), 10), strconv.FormatInt(int64(d.Scale), 10), string(d.LogicalFamily), string(d.TemporalSemantics), strconv.Itoa(d.TemporalPrecision), d.SourceTimezone})
 	return arrow.Field{Name: d.Name, Type: d.ArrowType, Nullable: d.Nullable || !d.NullableKnown, Metadata: md}
+}
+
+func classifyTemporalDescriptor(d *SourceFieldDescriptor) {
+	t := strings.ToUpper(d.SourceType)
+	if t == "" {
+		return
+	}
+	set := func(s TemporalSemantics, precision int, known bool) {
+		d.TemporalSemantics, d.TemporalPrecision, d.TemporalPrecisionKnown = s, precision, known
+	}
+	switch d.Engine {
+	case "postgres", "postgresql", "pg":
+		switch {
+		case strings.HasPrefix(t, "TIMETZ") || strings.Contains(t, "TIME WITH TIME ZONE"):
+			set(TemporalZonedTime, 6, true)
+		case strings.HasPrefix(t, "TIMESTAMPTZ") || strings.Contains(t, "TIMESTAMP WITH TIME ZONE"):
+			set(TemporalInstant, temporalPrecision(t, 6), true)
+		case strings.HasPrefix(t, "TIMESTAMP"):
+			set(TemporalLocalTimestamp, temporalPrecision(t, 6), true)
+		case strings.HasPrefix(t, "TIME"):
+			set(TemporalTime, temporalPrecision(t, 6), true)
+		case strings.HasPrefix(t, "DATE"):
+			set(TemporalDate, 0, true)
+		}
+	case "mssql", "sqlserver", "ms-sql", "ms_sql":
+		switch {
+		case strings.HasPrefix(t, "DATETIMEOFFSET"):
+			set(TemporalInstant, temporalPrecision(t, 7), true)
+		case strings.HasPrefix(t, "DATETIME2"):
+			set(TemporalLocalTimestamp, temporalPrecision(t, 7), true)
+		case strings.HasPrefix(t, "DATETIME"):
+			set(TemporalLocalTimestamp, 3, true)
+		case strings.HasPrefix(t, "SMALLDATETIME"):
+			set(TemporalLocalTimestamp, 0, true)
+		case strings.HasPrefix(t, "TIME"):
+			set(TemporalTime, temporalPrecision(t, 7), true)
+		case strings.HasPrefix(t, "DATE"):
+			set(TemporalDate, 0, true)
+		}
+	case "oracle", "ora":
+		switch {
+		case strings.Contains(t, "WITH LOCAL TIME ZONE"):
+			// Result depends on Oracle session time zone. Do not guess its meaning.
+			set(TemporalZonedTime, temporalPrecision(t, 6), true)
+		case strings.Contains(t, "WITH TIME ZONE"):
+			set(TemporalInstant, temporalPrecision(t, 6), true)
+		case strings.HasPrefix(t, "TIMESTAMP"):
+			set(TemporalLocalTimestamp, temporalPrecision(t, 6), true)
+		case t == "DATE":
+			set(TemporalLocalTimestamp, 0, true)
+		}
+	case "clickhouse", "ch":
+		base := unwrapClickHouseType(t)
+		switch {
+		case strings.HasPrefix(base, "DATETIME64"):
+			set(TemporalInstant, temporalPrecision(base, -1), true)
+			if d.SourceTimezone == "" {
+				d.SourceTimezone = clickHouseTimezone(d.SourceType)
+			}
+		case strings.HasPrefix(base, "DATETIME"):
+			set(TemporalInstant, 0, true)
+			if d.SourceTimezone == "" {
+				d.SourceTimezone = clickHouseTimezone(d.SourceType)
+			}
+		case strings.HasPrefix(base, "DATE32") || base == "DATE":
+			set(TemporalDate, 0, true)
+		}
+	}
+}
+
+func temporalPrecision(t string, fallback int) int {
+	if i := strings.IndexByte(t, '('); i >= 0 {
+		rest := strings.TrimLeft(t[i+1:], " ")
+		end := 0
+		for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+			end++
+		}
+		if end > 0 {
+			if p, err := strconv.Atoi(rest[:end]); err == nil {
+				return p
+			}
+		}
+	}
+	return fallback
+}
+
+func unwrapClickHouseType(t string) string {
+	for (strings.HasPrefix(t, "NULLABLE(") || strings.HasPrefix(t, "LOWCARDINALITY(")) && strings.HasSuffix(t, ")") {
+		if i := strings.IndexByte(t, '('); i >= 0 {
+			t = strings.TrimSpace(t[i+1 : len(t)-1])
+		}
+	}
+	return t
+}
+
+func clickHouseTimezone(t string) string {
+	if i := strings.Index(t, "'"); i >= 0 {
+		if j := strings.Index(t[i+1:], "'"); j >= 0 {
+			return t[i+1 : i+1+j]
+		}
+	}
+	return ""
 }

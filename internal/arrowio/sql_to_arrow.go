@@ -54,10 +54,19 @@ func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType
 		if exactDecimalType(d.Engine, d.SourceType) && (d.Precision <= 0 || d.Precision > 38 || d.Scale < 0 || d.Scale > d.Precision) {
 			return nil, nil, fmt.Errorf("column %q %s: cannot represent decimal(%d,%d) exactly in Iceberg Decimal128", d.Name, d.SourceType, d.Precision, d.Scale)
 		}
-		if d.TemporalPrecisionKnown && d.TemporalPrecision > 6 {
-			return nil, nil, fmt.Errorf("column %q %s: temporal precision %d cannot be represented exactly by Iceberg v2 timestamp[us]", d.Name, d.SourceType, d.TemporalPrecision)
+		if d.TemporalSemantics == TemporalZonedTime {
+			return nil, nil, fmt.Errorf("column %q %s: %s has no lossless Iceberg v2 representation", d.Name, d.SourceType, d.TemporalSemantics)
+		}
+		if d.TemporalSemantics != TemporalNone {
+			if !d.TemporalPrecisionKnown || d.TemporalPrecision < 0 || d.TemporalPrecision > 6 {
+				return nil, nil, fmt.Errorf("column %q %s: source precision %d cannot be represented exactly by Iceberg v2 temporal types (maximum microseconds)", d.Name, d.SourceType, d.TemporalPrecision)
+			}
+			d.Capability = TypeCapability{ArrowExact: true, ParquetExact: true, IcebergExact: true, ClickHouseExact: true}
 		}
 		plan := PlanForSQLColumn(engine, d.Name, d.SourceType, int64(d.Precision), int64(d.Scale), d.PrecisionKnown && d.ScaleKnown)
+		if d.TemporalSemantics != TemporalNone {
+			plan = temporalPlanForDescriptor(*d)
+		}
 		d.ArrowType = plan.DataType
 		d.LogicalFamily, d.BitWidth, d.Signed = logicalFamilyForArrow(plan.DataType)
 		plan.Descriptor = *d
@@ -66,6 +75,21 @@ func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType
 	}
 
 	return plans, arrow.NewSchema(fields, nil), nil
+}
+
+func temporalPlanForDescriptor(d SourceFieldDescriptor) ColumnPlan {
+	switch d.TemporalSemantics {
+	case TemporalDate:
+		return planDate32(d.Name)
+	case TemporalTime:
+		return planTime64(d.Name)
+	case TemporalLocalTimestamp:
+		return planTimestampUs(d.Name, "")
+	case TemporalInstant:
+		return planTimestampUs(d.Name, "UTC")
+	default:
+		return PlanForSQLColumn(d.Engine, d.Name, d.SourceType, int64(d.Precision), int64(d.Scale), d.PrecisionKnown && d.ScaleKnown)
+	}
 }
 
 func exactDecimalType(engine, typ string) bool {

@@ -39,23 +39,23 @@ import (
 )
 
 type partitionSpec struct {
-	Type           string `json:"type"`
-	SourceMode     string `json:"source_mode"`
-	QueryHash      string `json:"query_hash"`
-	Table          string `json:"table"`
-	CursorColumn   string `json:"cursor_column"`
-	CursorDomain   string `json:"cursor_domain"`
-	Lower          string `json:"lower"`
-	Upper          string `json:"upper"`
-	LowerExclusive bool   `json:"lower_exclusive"`
-	UpperInclusive bool   `json:"upper_inclusive"`
-	OutputPart     int64  `json:"output_part"` 
-	WhereClause    string `json:"where_clause,omitempty"` 
-	SelectColumns []string          `json:"select_columns,omitempty"` 
-	ColumnTypes   map[string]string `json:"column_types,omitempty"`
-	IDColumn       string `json:"id_column"` // legacy alias
-	From           int64  `json:"from"`      // legacy alias
-	To             int64  `json:"to"`        // legacy alias
+	Type           string            `json:"type"`
+	SourceMode     string            `json:"source_mode"`
+	QueryHash      string            `json:"query_hash"`
+	Table          string            `json:"table"`
+	CursorColumn   string            `json:"cursor_column"`
+	CursorDomain   string            `json:"cursor_domain"`
+	Lower          string            `json:"lower"`
+	Upper          string            `json:"upper"`
+	LowerExclusive bool              `json:"lower_exclusive"`
+	UpperInclusive bool              `json:"upper_inclusive"`
+	OutputPart     int64             `json:"output_part"`
+	WhereClause    string            `json:"where_clause,omitempty"`
+	SelectColumns  []string          `json:"select_columns,omitempty"`
+	ColumnTypes    map[string]string `json:"column_types,omitempty"`
+	IDColumn       string            `json:"id_column"` // legacy alias
+	From           int64             `json:"from"`      // legacy alias
+	To             int64             `json:"to"`        // legacy alias
 }
 
 type sourceExtract struct {
@@ -593,8 +593,6 @@ func (realLeaseClock) NewTimer(d time.Duration) leaseTimer {
 func (t realLeaseTimer) C() <-chan time.Time { return t.timer.C }
 func (t realLeaseTimer) Stop()               { t.timer.Stop() }
 
-
-
 func executeTaskManaged(ctx context.Context, log *slog.Logger, cp grpcpb.ControlPlaneClient, workerID, workerInstanceID string, t *grpcpb.TaskAssignment, clients *clientCache, manager *workerworkspace.Manager) error {
 	workspace, err := manager.Create(t.RunId, t.TaskId, t.AttemptId, t.AttemptNumber, workerID, workerInstanceID)
 	if err != nil {
@@ -646,8 +644,6 @@ func executeTaskWithBody(ctx context.Context, cp grpcpb.ControlPlaneClient, work
 		return err
 	}
 }
-
-
 
 func renewalDelay(now, deadline time.Time) time.Duration {
 	remaining := deadline.Sub(now)
@@ -1156,6 +1152,9 @@ func extractFlightSQLTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 
 	convertStart := time.Now()
 	total, err := src.StreamQuery(qctx, t.SourceSql, func(schema *arrow.Schema, rec arrow.RecordBatch) error {
+		if err := arrowio.ValidateArrowSchemaForIcebergV2(schema); err != nil {
+			return err
+		}
 		rowsRead += rec.NumRows()
 		if time.Since(lastProg) > 5*time.Second {
 			lastProg = time.Now()
