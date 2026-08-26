@@ -49,13 +49,16 @@ func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType
 	target := ConfiguredTargetCapabilities()
 	for i := range descriptors {
 		d := &descriptors[i]
-		if exactDecimalType(d.Engine, d.SourceType) && (!d.PrecisionKnown || !d.ScaleKnown) {
+		if exactDecimalType(d.Engine, d.SourceType) && d.Representation != RepresentationFallback && (!d.PrecisionKnown || !d.ScaleKnown) {
 			return nil, nil, fmt.Errorf("column %q %s: exact decimal precision and scale metadata are required", d.Name, d.SourceType)
 		}
-		if exactDecimalType(d.Engine, d.SourceType) && (d.Precision <= 0 || d.Precision > 38 || d.Scale < 0 || d.Scale > d.Precision) {
+		if exactDecimalType(d.Engine, d.SourceType) && d.Representation != RepresentationFallback && (d.Precision <= 0 || d.Precision > 38 || d.Scale < 0 || d.Scale > d.Precision) {
 			return nil, nil, fmt.Errorf("column %q %s: cannot represent decimal(%d,%d) exactly in Iceberg Decimal128", d.Name, d.SourceType, d.Precision, d.Scale)
 		}
-		if d.TemporalSemantics != TemporalNone {
+		if d.Representation == RepresentationUnsupported {
+			return nil, nil, fmt.Errorf("column %q %s: no lossless native or fallback representation", d.Name, d.SourceType)
+		}
+		if d.TemporalSemantics != TemporalNone && d.Representation != RepresentationFallback {
 			capability, err := target.ValidateTemporalDescriptor(*d)
 			if err != nil {
 				return nil, nil, err
@@ -63,6 +66,12 @@ func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType
 			d.Capability = capability
 		}
 		plan := PlanForSQLColumn(engine, d.Name, d.SourceType, int64(d.Precision), int64(d.Scale), d.PrecisionKnown && d.ScaleKnown)
+		if d.Representation == RepresentationFallback {
+			plan, err = fallbackPlanForDescriptor(*d)
+			if err != nil {
+				return nil, nil, fmt.Errorf("column %q %s: %w", d.Name, d.SourceType, err)
+			}
+		}
 		if d.Unsigned && d.BitWidth == 64 {
 			plan = planUint64Decimal(d.Name)
 		}
@@ -72,7 +81,7 @@ func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType
 			}
 			plan = planFixedBinary(d.Name, int(d.Length))
 		}
-		if d.FallbackEncoding == "json_utf8_text_v1" {
+		if d.Representation != RepresentationFallback && d.FallbackEncoding == "json_utf8_text_v1" {
 			plan = planJSONText(d.Name)
 		}
 		if strings.HasPrefix(unwrapClickHouseType(d.SourceType), "ENUM8") || strings.HasPrefix(unwrapClickHouseType(d.SourceType), "ENUM16") {
@@ -81,7 +90,7 @@ func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType
 		if d.SourceType != "" && plan.DataType.ID() == arrow.STRING && d.FallbackEncoding == "" {
 			return nil, nil, fmt.Errorf("column %q %s: no explicit lossless string policy", d.Name, d.SourceType)
 		}
-		if d.TemporalSemantics != TemporalNone {
+		if d.TemporalSemantics != TemporalNone && d.Representation != RepresentationFallback {
 			plan = temporalPlanForDescriptor(*d)
 		}
 		d.ArrowType = plan.DataType

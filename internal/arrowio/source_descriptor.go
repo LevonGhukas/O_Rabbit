@@ -12,8 +12,13 @@ import (
 // LogicalFamily is source meaning, independent of cursor classification.
 type LogicalFamily string
 type TemporalSemantics string
+type RepresentationMode string
 
 const (
+	RepresentationNative      RepresentationMode = "native"
+	RepresentationFallback    RepresentationMode = "fallback"
+	RepresentationUnsupported RepresentationMode = "unsupported"
+
 	TemporalNone           TemporalSemantics = ""
 	TemporalDate           TemporalSemantics = "date"
 	TemporalTime           TemporalSemantics = "time"
@@ -65,6 +70,7 @@ type SourceFieldDescriptor struct {
 	Unsigned                                 bool
 	FixedBinary                              bool
 	FallbackEncoding                         string
+	Representation                           RepresentationMode
 	Capability                               TypeCapability
 	ArrowType                                arrow.DataType
 }
@@ -135,6 +141,7 @@ func descriptorsFromSQL(engine string, cols []string, colTypes []*sql.ColumnType
 				}
 			}
 		}
+		classifyFallbackRepresentation(&d)
 		out[i] = d
 	}
 	return out, nil
@@ -142,9 +149,53 @@ func descriptorsFromSQL(engine string, cols []string, colTypes []*sql.ColumnType
 
 func arrowFieldFromDescriptor(d SourceFieldDescriptor) arrow.Field {
 	md := arrow.NewMetadata([]string{
-		"orabbit.source.engine", "orabbit.source.type", "orabbit.source.precision", "orabbit.source.scale", "orabbit.source.logical_family", "orabbit.source.temporal_semantics", "orabbit.source.temporal_precision", "orabbit.source.timezone", "orabbit.source.unsigned", "orabbit.source.fixed_binary", "orabbit.source.fallback_encoding",
-	}, []string{d.Engine, d.SourceType, strconv.FormatInt(int64(d.Precision), 10), strconv.FormatInt(int64(d.Scale), 10), string(d.LogicalFamily), string(d.TemporalSemantics), strconv.Itoa(d.TemporalPrecision), d.SourceTimezone, strconv.FormatBool(d.Unsigned), strconv.FormatBool(d.FixedBinary), d.FallbackEncoding})
+		"orabbit.source.engine", "orabbit.source.type", "orabbit.source.precision", "orabbit.source.scale", "orabbit.source.logical_family", "orabbit.source.temporal_semantics", "orabbit.source.temporal_precision", "orabbit.source.timezone", "orabbit.source.unsigned", "orabbit.source.fixed_binary", "orabbit.representation", "orabbit.fallback.encoding",
+	}, []string{d.Engine, d.SourceType, strconv.FormatInt(int64(d.Precision), 10), strconv.FormatInt(int64(d.Scale), 10), string(d.LogicalFamily), string(d.TemporalSemantics), strconv.Itoa(d.TemporalPrecision), d.SourceTimezone, strconv.FormatBool(d.Unsigned), strconv.FormatBool(d.FixedBinary), string(d.Representation), d.FallbackEncoding})
 	return arrow.Field{Name: d.Name, Type: d.ArrowType, Nullable: d.Nullable || !d.NullableKnown, Metadata: md}
+}
+
+func classifyFallbackRepresentation(d *SourceFieldDescriptor) {
+	if d.FallbackEncoding != "" {
+		d.Representation = RepresentationFallback
+	}
+	if d.TemporalSemantics == TemporalZonedTime {
+		if d.Engine == "postgres" || d.Engine == "postgresql" || d.Engine == "pg" {
+			d.Representation, d.FallbackEncoding = RepresentationFallback, "postgres_timetz_text_v1"
+			return
+		}
+		d.Representation = RepresentationUnsupported
+		return
+	}
+	if d.TemporalPrecisionKnown && d.TemporalPrecision > 6 {
+		switch d.Engine {
+		case "mssql", "sqlserver", "ms-sql", "ms_sql":
+			switch d.TemporalSemantics {
+			case TemporalTime:
+				d.FallbackEncoding = "mssql_time_text_v1"
+			case TemporalLocalTimestamp:
+				d.FallbackEncoding = "mssql_datetime2_text_v1"
+			case TemporalInstant:
+				d.FallbackEncoding = "mssql_datetimeoffset_text_v1"
+			}
+		case "oracle", "ora":
+			if d.TemporalSemantics == TemporalInstant {
+				d.FallbackEncoding = "oracle_timestamptz_text_v1"
+			} else {
+				d.FallbackEncoding = "oracle_timestamp_text_v1"
+			}
+		case "clickhouse", "ch":
+			d.FallbackEncoding = "clickhouse_datetime64_text_v1"
+		}
+		if d.FallbackEncoding != "" {
+			d.Representation = RepresentationFallback
+		}
+	}
+	if d.PrecisionKnown && d.Precision > 38 && exactDecimalType(d.Engine, d.SourceType) {
+		d.Representation, d.FallbackEncoding = RepresentationFallback, "decimal_text_v1"
+	}
+	if d.Representation == "" {
+		d.Representation = RepresentationNative
+	}
 }
 
 func classifySourceRepresentation(d *SourceFieldDescriptor) {

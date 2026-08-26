@@ -3,6 +3,7 @@ package arrowio
 import (
 	"math"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -75,4 +76,56 @@ func TestJSONTextFallbackPreservesValidSourceText(t *testing.T) {
 	a := b.NewArray().(*array.String)
 	defer a.Release()
 	require.Equal(t, raw, a.Value(0))
+}
+
+func TestHighPrecisionTemporalFallbacksRequireOriginalText(t *testing.T) {
+	cases := []struct {
+		name, typ, value, encoding string
+	}{
+		{"datetime2", "DATETIME2(7)", "2026-08-26 11:23:54.1234567", "mssql_datetime2_text_v1"},
+		{"time", "TIME(7)", "11:23:54.1234567", "mssql_time_text_v1"},
+		{"offset", "DATETIMEOFFSET(7)", "2026-08-26T15:23:54.1234567+04:00", "mssql_datetimeoffset_text_v1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := SourceFieldDescriptor{Name: tc.name, Engine: "mssql", SourceType: tc.typ}
+			classifyTemporalDescriptor(&d)
+			classifyFallbackRepresentation(&d)
+			require.Equal(t, RepresentationFallback, d.Representation)
+			require.Equal(t, tc.encoding, d.FallbackEncoding)
+			plan, err := fallbackPlanForDescriptor(d)
+			require.NoError(t, err)
+			b := plan.Builder(memory.DefaultAllocator)
+			defer b.Release()
+			require.NoError(t, plan.Append(b, tc.value))
+			require.Error(t, plan.Append(b, time.Date(2026, 8, 26, 11, 23, 54, 123456000, time.UTC)))
+			require.NoError(t, plan.Append(b, nil))
+			a := b.NewArray().(*array.String)
+			defer a.Release()
+			require.Equal(t, tc.value, a.Value(0))
+			require.True(t, a.IsNull(1))
+		})
+	}
+}
+
+func TestDecimalTextFallbackAndMetadata(t *testing.T) {
+	d := SourceFieldDescriptor{Name: "amount", Engine: "clickhouse", SourceType: "DECIMAL256(5)", Precision: 76, Scale: 5, PrecisionKnown: true, ScaleKnown: true}
+	classifyFallbackRepresentation(&d)
+	require.Equal(t, RepresentationFallback, d.Representation)
+	require.Equal(t, "decimal_text_v1", d.FallbackEncoding)
+	plan, err := fallbackPlanForDescriptor(d)
+	require.NoError(t, err)
+	b := plan.Builder(memory.DefaultAllocator)
+	defer b.Release()
+	value := "123456789012345678901234567890123456789.12345"
+	require.NoError(t, plan.Append(b, value))
+	require.Error(t, plan.Append(b, "123456789012345678901234567890123456789.123456"))
+	d.ArrowType = plan.DataType
+	field := arrowFieldFromDescriptor(d)
+	representation, ok := field.Metadata.GetValue("orabbit.representation")
+	require.True(t, ok)
+	require.Equal(t, "fallback", representation)
+	encoding, ok := field.Metadata.GetValue("orabbit.fallback.encoding")
+	require.True(t, ok)
+	require.Equal(t, "decimal_text_v1", encoding)
 }
