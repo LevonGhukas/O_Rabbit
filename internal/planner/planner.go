@@ -817,6 +817,12 @@ func partitionSpecSQLCursorSingle(table, sourceMode, queryHash, whereClause stri
 	if strings.TrimSpace(whereClause) != "" {
 		part["where_clause"] = strings.TrimSpace(whereClause)
 	}
+	if len(selectColumns) > 0 {
+		part["select_columns"] = selectColumns
+	}
+	if len(columnTypes) > 0 {
+		part["column_types"] = columnTypes
+	}
 	if strings.TrimSpace(queryHash) != "" {
 		part["query_hash"] = strings.TrimSpace(queryHash)
 	}
