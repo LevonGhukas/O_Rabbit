@@ -99,14 +99,64 @@ func TestHighPrecisionTemporalFallbacksRequireOriginalText(t *testing.T) {
 			b := plan.Builder(memory.DefaultAllocator)
 			defer b.Release()
 			require.NoError(t, plan.Append(b, tc.value))
-			require.Error(t, plan.Append(b, time.Date(2026, 8, 26, 11, 23, 54, 123456000, time.UTC)))
+			require.NoError(t, plan.Append(b, time.Date(2026, 8, 26, 11, 23, 54, 123456000, time.UTC)))
 			require.NoError(t, plan.Append(b, nil))
 			a := b.NewArray().(*array.String)
 			defer a.Release()
 			require.Equal(t, tc.value, a.Value(0))
-			require.True(t, a.IsNull(1))
+			require.False(t, a.IsNull(1))
+			require.True(t, a.IsNull(2))
 		})
 	}
+}
+
+func TestMSSQLDatetime2FallbackFormatsExactDriverNanoseconds(t *testing.T) {
+	d := SourceFieldDescriptor{Name: "value", Engine: "mssql", SourceType: "DATETIME2(7)", TemporalPrecision: 7, TemporalPrecisionKnown: true, FallbackEncoding: "mssql_datetime2_text_v1"}
+	plan, err := fallbackPlanForDescriptor(d)
+	require.NoError(t, err)
+	b := plan.Builder(memory.DefaultAllocator)
+	defer b.Release()
+	require.NoError(t, plan.Append(b, time.Date(2026, 8, 26, 13, 7, 28, 123456700, time.UTC)))
+	a := b.NewArray().(*array.String)
+	defer a.Release()
+	require.Equal(t, "2026-08-26 13:07:28.1234567", a.Value(0))
+}
+
+func TestTemporalNativeCapabilitySelectsFallbackBeforeConversion(t *testing.T) {
+	target := ConfiguredTargetCapabilities()
+	cases := []struct {
+		typ, encoding string
+		wantNative    bool
+	}{
+		{"DATETIME2(6)", "", true},
+		{"DATETIME2(7)", "mssql_datetime2_text_v1", false},
+		{"TIME(7)", "mssql_time_text_v1", false},
+		{"DATETIMEOFFSET(7)", "mssql_datetimeoffset_text_v1", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.typ, func(t *testing.T) {
+			d := SourceFieldDescriptor{Name: "value", Engine: "mssql", SourceType: tc.typ}
+			classifyTemporalDescriptor(&d)
+			classifyFallbackRepresentation(&d)
+			fallbackForNativeIncompatibility(&d, target)
+			if tc.wantNative {
+				require.Equal(t, RepresentationNative, d.Representation)
+				return
+			}
+			require.Equal(t, RepresentationFallback, d.Representation)
+			require.Equal(t, tc.encoding, d.FallbackEncoding)
+			plan, err := fallbackPlanForDescriptor(d)
+			require.NoError(t, err)
+			require.Equal(t, arrow.BinaryTypes.String, plan.DataType)
+		})
+	}
+}
+
+func TestUnknownTemporalPrecisionPlansSourceText(t *testing.T) {
+	d := SourceFieldDescriptor{Name: "value", Engine: "mssql", SourceType: "DATETIME2", TemporalSemantics: TemporalLocalTimestamp, TemporalPrecision: -1, TemporalPrecisionKnown: false, Representation: RepresentationNative}
+	fallbackForNativeIncompatibility(&d, ConfiguredTargetCapabilities())
+	require.Equal(t, RepresentationFallback, d.Representation)
+	require.Equal(t, "source_text_v1", d.FallbackEncoding)
 }
 
 func TestDecimalTextFallbackAndMetadata(t *testing.T) {

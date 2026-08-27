@@ -49,6 +49,7 @@ func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType
 	target := ConfiguredTargetCapabilities()
 	for i := range descriptors {
 		d := &descriptors[i]
+		fallbackForNativeIncompatibility(d, target)
 		if exactDecimalType(d.Engine, d.SourceType) && d.Representation != RepresentationFallback && (d.Precision <= 0 || d.Precision > 38 || d.Scale < 0 || d.Scale > d.Precision) {
 			return nil, nil, fmt.Errorf("column %q %s: cannot represent decimal(%d,%d) exactly in Iceberg Decimal128", d.Name, d.SourceType, d.Precision, d.Scale)
 		}
@@ -574,6 +575,12 @@ func PlansFromSQLEngineWithOverrides(engine string, cols []string, colTypes []*s
 
 	for i, f := range fields {
 		if targetTypeStr, ok := targetTypes[f.Name]; ok && strings.TrimSpace(targetTypeStr) != "" {
+			// A user target hint must not revive a native representation which
+			// source metadata has already proved lossy. Preserve fallback schema;
+			// source type wins over prettier requested target type.
+			if plans[i].Descriptor.SourceType != "" && plans[i].Descriptor.Representation == RepresentationFallback {
+				continue
+			}
 			tStr := strings.TrimSpace(targetTypeStr)
 			nullable := f.Nullable
 

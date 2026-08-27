@@ -42,6 +42,20 @@ func dereferenceValue(v any) any {
 func PlanForSQLColumn(engine, name, dbType string, precision, scale int64, hasDecimal bool) ColumnPlan {
 	normEngine := strings.ToLower(strings.TrimSpace(engine))
 	upperType := strings.ToUpper(strings.TrimSpace(dbType))
+	// Keep direct dialect planning consistent with descriptor-based schema
+	// planning. Callers must never receive timestamp[us] for a DATETIME2(7)
+	// merely because they did not enter through PlansFromSQLEngine.
+	d := SourceFieldDescriptor{Name: name, Engine: normEngine, SourceType: upperType, Representation: RepresentationNative}
+	if hasDecimal {
+		d.Precision, d.Scale, d.PrecisionKnown, d.ScaleKnown = int32(precision), int32(scale), true, true
+	}
+	classifyTemporalDescriptor(&d)
+	fallbackForNativeIncompatibility(&d, ConfiguredTargetCapabilities())
+	if d.TemporalSemantics != TemporalNone && d.Representation == RepresentationFallback {
+		if plan, err := fallbackPlanForDescriptor(d); err == nil {
+			return plan
+		}
+	}
 
 	// Extract precision/scale if present in dbType (e.g. DECIMAL(18, 4) or NUMERIC(10, 2))
 	if m := precScaleRe.FindStringSubmatch(upperType); m != nil {

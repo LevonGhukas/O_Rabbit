@@ -163,7 +163,10 @@ func classifyFallbackRepresentation(d *SourceFieldDescriptor) {
 			d.Representation, d.FallbackEncoding = RepresentationFallback, "postgres_timetz_text_v1"
 			return
 		}
-		d.Representation = RepresentationUnsupported
+		// Native Iceberg has no zoned-time type. Keep strict source text as the
+		// only possible exact representation instead of rejecting at planning
+		// solely because native mapping is unavailable.
+		d.Representation, d.FallbackEncoding = RepresentationFallback, "source_text_v1"
 		return
 	}
 	if d.TemporalPrecisionKnown && d.TemporalPrecision > 6 {
@@ -195,6 +198,47 @@ func classifyFallbackRepresentation(d *SourceFieldDescriptor) {
 	}
 	if d.Representation == "" {
 		d.Representation = RepresentationNative
+	}
+}
+
+// fallbackForNativeIncompatibility makes target capability a schema-planning
+// decision. Conversion remains strict, but cannot discover a predictable
+// native precision mismatch after record batches have started.
+func fallbackForNativeIncompatibility(d *SourceFieldDescriptor, target TargetCapabilities) {
+	if d.Representation != RepresentationNative || d.TemporalSemantics == TemporalNone {
+		return
+	}
+	if _, err := target.ValidateTemporalDescriptor(*d); err == nil {
+		return
+	}
+	d.Representation = RepresentationFallback
+	if !d.TemporalPrecisionKnown || d.TemporalPrecision < 0 {
+		d.FallbackEncoding = "source_text_v1"
+		return
+	}
+	switch d.Engine {
+	case "mssql", "sqlserver", "ms-sql", "ms_sql":
+		switch d.TemporalSemantics {
+		case TemporalTime:
+			d.FallbackEncoding = "mssql_time_text_v1"
+		case TemporalLocalTimestamp:
+			d.FallbackEncoding = "mssql_datetime2_text_v1"
+		case TemporalInstant:
+			d.FallbackEncoding = "mssql_datetimeoffset_text_v1"
+		}
+	case "oracle", "ora":
+		if d.TemporalSemantics == TemporalInstant {
+			d.FallbackEncoding = "oracle_timestamptz_text_v1"
+		} else {
+			d.FallbackEncoding = "oracle_timestamp_text_v1"
+		}
+	case "clickhouse", "ch":
+		d.FallbackEncoding = "clickhouse_datetime64_text_v1"
+	case "postgres", "postgresql", "pg":
+		d.FallbackEncoding = "source_text_v1"
+	}
+	if d.FallbackEncoding == "" {
+		d.FallbackEncoding = "source_text_v1"
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -36,6 +37,12 @@ func (c textFallbackCodec) EncodeExact(value any) (string, error) {
 			return "", fmt.Errorf("fallback text is not UTF-8")
 		}
 		s = string(x)
+	case time.Time:
+		var ok bool
+		s, ok = exactMSSQLTemporalText(c.descriptor, x)
+		if !ok {
+			return "", fmt.Errorf("driver value %T lacks original textual precision", value)
+		}
 	default:
 		return "", fmt.Errorf("driver value %T lacks original textual precision", value)
 	}
@@ -43,6 +50,35 @@ func (c textFallbackCodec) EncodeExact(value any) (string, error) {
 		return "", err
 	}
 	return s, nil
+}
+
+// exactMSSQLTemporalText accepts time.Time only when its nanoseconds carry all
+// digits declared by MSSQL. Otherwise connector projection must supply text.
+func exactMSSQLTemporalText(d SourceFieldDescriptor, value time.Time) (string, bool) {
+	if d.TemporalPrecision < 0 || d.TemporalPrecision > 9 {
+		return "", false
+	}
+	unit := 1
+	for i := d.TemporalPrecision; i < 9; i++ {
+		unit *= 10
+	}
+	if value.Nanosecond()%unit != 0 {
+		return "", false
+	}
+	fraction := ""
+	if d.TemporalPrecision > 0 {
+		fraction = "." + strings.Repeat("0", d.TemporalPrecision)
+	}
+	switch d.FallbackEncoding {
+	case "mssql_time_text_v1":
+		return value.Format("15:04:05" + fraction), true
+	case "mssql_datetime2_text_v1":
+		return value.Format("2006-01-02 15:04:05" + fraction), true
+	case "mssql_datetimeoffset_text_v1":
+		return value.Format("2006-01-02T15:04:05" + fraction + "Z07:00"), true
+	default:
+		return "", false
+	}
 }
 
 func planFallback(name string, codec FallbackCodec) ColumnPlan {
