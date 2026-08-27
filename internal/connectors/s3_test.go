@@ -3,6 +3,8 @@ package connectors
 import (
 	"bytes"
 	"context"
+	"encoding/csv"
+	"encoding/json"
 	"encoding/xml"
 	"os"
 	"strings"
@@ -13,7 +15,149 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/xuri/excelize/v2"
 )
+
+func TestS3CSVIteratorFieldOrder(t *testing.T) {
+	format, err := resolveS3Format("csv", "events.log")
+	if err != nil || format != "csv" {
+		t.Fatalf("format=%q err=%v", format, err)
+	}
+	reader := csv.NewReader(strings.NewReader("id,date,age\n1,2026-01-01,30\n"))
+	headers, err := reader.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	it := &s3CSVIterator{reader: reader, headers: headers}
+	if got := it.FieldOrder(); !equalStrings(got, []string{"id", "date", "age"}) {
+		t.Fatalf("field order=%v", got)
+	}
+}
+
+func TestS3JSONFormatWithRecordPath(t *testing.T) {
+	format, err := resolveS3Format("json", "data.txt")
+	if err != nil || format != "json" {
+		t.Fatalf("format=%q err=%v", format, err)
+	}
+	it := &s3JSONIterator{
+		decoder:    json.NewDecoder(strings.NewReader(`{"airports":[{"id":1}]}`)),
+		recordPath: "/airports",
+	}
+	if !it.Next(context.Background()) {
+		t.Fatalf("next=false err=%v", it.Err())
+	}
+	doc, err := it.Decode()
+	if err != nil || doc["id"] != float64(1) {
+		t.Fatalf("doc=%v err=%v", doc, err)
+	}
+}
+
+func TestS3ExcelIteratorFieldOrder(t *testing.T) {
+	f := excelize.NewFile()
+	defer func() { _ = f.Close() }()
+	if err := f.SetSheetRow("Sheet1", "A1", &[]any{"id", "date", "age"}); err != nil {
+		t.Fatal(err)
+	}
+	var data bytes.Buffer
+	if err := f.Write(&data); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := excelize.OpenReader(bytes.NewReader(data.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = parsed.Close() }()
+	rows, err := parsed.Rows("Sheet1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		t.Fatal("missing header row")
+	}
+	headers, err := rows.Columns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	it := &s3ExcelIterator{rows: rows, headers: headers}
+	if got := it.FieldOrder(); !equalStrings(got, []string{"id", "date", "age"}) {
+		t.Fatalf("field order=%v", got)
+	}
+}
+
+func TestS3JSONIteratorRecordPath(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		recordPath string
+		wantIDs    []float64
+		wantErr    string
+	}{
+		{"root array remains compatible", `[{"id":1},{"id":2}]`, "", []float64{1, 2}, ""},
+		{"object wrapped array", `{"airports":[{"id":1},{"id":2}]}`, "/airports", []float64{1, 2}, ""},
+		{"nested object path", `{"data":{"items":[{"id":1}]}}`, "/data/items", []float64{1}, ""},
+		{"escaped tilde pointer key", `{"a~b":[{"id":1}]}`, "/a~0b", []float64{1}, ""},
+		{"escaped pointer key", `{"a/b":[{"id":1}]}`, "/a~1b", []float64{1}, ""},
+		{"object root requires path", `{"airports":[{"id":1}],"countries":[{"id":2}]}`, "", nil, "record_path is required"},
+		{"malformed path", `{"airports":[{"id":1}]}`, "airports", nil, "must start with /"},
+		{"missing path", `{"airports":[{"id":1}]}`, "/missing", nil, `record_path "/missing" was not found`},
+		{"scalar path", `{"airports":42}`, "/airports", nil, "must resolve to an array"},
+		{"object path", `{"airports":{"id":1}}`, "/airports", nil, "must resolve to an array"},
+		{"array of scalars", `{"airports":[1,2]}`, "/airports", nil, "elements must be objects"},
+		{"empty selected array", `{"airports":[]}`, "/airports", []float64{}, ""},
+		{"malformed JSON", `{"airports":[`, "/airports", nil, "EOF"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			it := &s3JSONIterator{decoder: json.NewDecoder(strings.NewReader(tc.input)), recordPath: tc.recordPath}
+			var gotIDs []float64
+			for it.Next(context.Background()) {
+				doc, err := it.Decode()
+				if err != nil {
+					t.Fatal(err)
+				}
+				gotIDs = append(gotIDs, doc["id"].(float64))
+			}
+			if tc.wantErr != "" {
+				if it.Err() == nil || !strings.Contains(it.Err().Error(), tc.wantErr) {
+					t.Fatalf("error=%v, want %q", it.Err(), tc.wantErr)
+				}
+				return
+			}
+			if it.Err() != nil {
+				t.Fatal(it.Err())
+			}
+			if !equalFloat64s(gotIDs, tc.wantIDs) {
+				t.Fatalf("ids=%v want %v", gotIDs, tc.wantIDs)
+			}
+		})
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalFloat64s(got, want []float64) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
 
 func TestOpenS3_InvalidDSN(t *testing.T) {
 	ctx := context.Background()
@@ -91,6 +235,43 @@ func TestOpenS3_Formats(t *testing.T) {
 		if s3Reader.format != tc.format {
 			t.Errorf("expected format %q, got %q for %s", tc.format, s3Reader.format, tc.dsn)
 		}
+	}
+}
+
+func TestResolveS3Format(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured string
+		key        string
+		want       string
+		wantErr    string
+	}{
+		{"explicit json overrides txt", "json", "data.txt", "json", ""},
+		{"explicit csv supports log", "csv", "events.log", "csv", ""},
+		{"explicit csv overrides json", "csv", "data.json", "csv", ""},
+		{"xlsx alias", "xlsx", "data.txt", "excel", ""},
+		{"invalid explicit format", "banana", "data.csv", "", `unsupported S3 file format "banana"`},
+		{"legacy csv", "", "data.csv", "csv", ""},
+		{"legacy json", "", "data.json", "json", ""},
+		{"legacy xml", "", "data.xml", "xml", ""},
+		{"legacy xlsx", "", "data.xlsx", "excel", ""},
+		{"legacy xls", "", "data.xls", "excel", ""},
+		{"legacy parquet", "", "data.parquet", "parquet", ""},
+		{"legacy unknown extension fallback", "", "data.foo", "csv", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveS3Format(tc.configured, tc.key)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error=%v want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("format=%q err=%v want %q", got, err, tc.want)
+			}
+		})
 	}
 }
 

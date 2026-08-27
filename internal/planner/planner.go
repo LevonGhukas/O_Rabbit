@@ -330,7 +330,7 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 		if connectors.SupportsOrderedCursor(srcEngine) {
 			part = partitionSpecSQLCursorSingle(o.Table, o.NormalizedSourceMode(), o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, o.EffectiveCursorColumn(), connectors.CursorDomainUnknown, "", false, "")
 		} else {
-			part = PartitionSpecSingle(o.Table, o.NormalizedSourceMode(), o.QueryHash)
+			part = PartitionSpecSingleWithFileOptions(o.Table, o.NormalizedSourceMode(), o.QueryHash, o.RecordPath, o.FileFormat)
 		}
 		tasks := []db.TaskInsert{{
 			ID:            newID(),
@@ -738,6 +738,18 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 // PartitionSpecSingle constructs a partition specification payload.
 // It exists to keep worker partition contracts explicit and stable.
 func PartitionSpecSingle(table, sourceMode, queryHash string) json.RawMessage {
+	return PartitionSpecSingleWithRecordPath(table, sourceMode, queryHash, "")
+}
+
+// PartitionSpecSingleWithRecordPath constructs a single-task partition
+// specification with optional JSON record selection metadata.
+func PartitionSpecSingleWithRecordPath(table, sourceMode, queryHash, recordPath string) json.RawMessage {
+	return PartitionSpecSingleWithFileOptions(table, sourceMode, queryHash, recordPath, "")
+}
+
+// PartitionSpecSingleWithFileOptions constructs a single-task partition
+// specification with optional file-source metadata.
+func PartitionSpecSingleWithFileOptions(table, sourceMode, queryHash, recordPath, fileFormat string) json.RawMessage {
 	part := map[string]any{
 		"type":        "single",
 		"source_mode": sourceMode,
@@ -745,6 +757,12 @@ func PartitionSpecSingle(table, sourceMode, queryHash string) json.RawMessage {
 	}
 	if strings.TrimSpace(queryHash) != "" {
 		part["query_hash"] = strings.TrimSpace(queryHash)
+	}
+	if strings.TrimSpace(recordPath) != "" {
+		part["record_path"] = strings.TrimSpace(recordPath)
+	}
+	if strings.TrimSpace(fileFormat) != "" {
+		part["format"] = strings.TrimSpace(fileFormat)
 	}
 	b, _ := json.Marshal(part)
 	return json.RawMessage(b)
@@ -823,6 +841,12 @@ func partitionSpecSQLCursorSingle(table, sourceMode, queryHash, whereClause stri
 	}
 	if strings.TrimSpace(whereClause) != "" {
 		part["where_clause"] = strings.TrimSpace(whereClause)
+	}
+	if len(selectColumns) > 0 {
+		part["select_columns"] = selectColumns
+	}
+	if len(columnTypes) > 0 {
+		part["column_types"] = columnTypes
 	}
 	if strings.TrimSpace(queryHash) != "" {
 		part["query_hash"] = strings.TrimSpace(queryHash)
