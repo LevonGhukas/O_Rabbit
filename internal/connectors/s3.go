@@ -72,18 +72,7 @@ func OpenS3(ctx context.Context, dsn string) (DocumentReader, error) {
 		o.UsePathStyle = forcePathStyle
 	})
 
-	ext := strings.ToLower(filepath.Ext(key))
-	format := "csv"
-	switch ext {
-	case ".json":
-		format = "json"
-	case ".xml":
-		format = "xml"
-	case ".xlsx", ".xls":
-		format = "excel"
-	case ".parquet":
-		format = "parquet"
-	}
+	format := legacyS3FormatFromExtension(key)
 
 	return &S3Reader{
 		client: client,
@@ -108,6 +97,12 @@ func (r *S3Reader) DescribeCollection(ctx context.Context, collection string) ([
 }
 
 func (r *S3Reader) StreamDocuments(ctx context.Context, collection string, filter map[string]any, batchSize int) (DocumentIterator, error) {
+	configuredFormat, _ := filter["format"].(string)
+	format, err := resolveS3Format(configuredFormat, r.key)
+	if err != nil {
+		return nil, err
+	}
+
 	out, err := r.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(r.bucket),
 		Key:    aws.String(r.key),
@@ -117,7 +112,7 @@ func (r *S3Reader) StreamDocuments(ctx context.Context, collection string, filte
 	}
 	r.objectRes = out
 
-	switch r.format {
+	switch format {
 	case "csv":
 		csvReader := csv.NewReader(out.Body)
 		// For standard CSV uploads, fields might contain quotes or have unequal lengths.
@@ -135,8 +130,10 @@ func (r *S3Reader) StreamDocuments(ctx context.Context, collection string, filte
 		}, nil
 	case "json":
 		decoder := json.NewDecoder(out.Body)
+		recordPath, _ := filter["record_path"].(string)
 		return &s3JSONIterator{
-			decoder: decoder,
+			decoder:    decoder,
+			recordPath: recordPath,
 		}, nil
 	case "xml":
 		decoder := xml.NewDecoder(out.Body)
@@ -193,7 +190,40 @@ func (r *S3Reader) StreamDocuments(ctx context.Context, collection string, filte
 			recReader: recReader,
 		}, nil
 	default:
-		return nil, fmt.Errorf("unsupported S3 file format: %s", r.format)
+		return nil, fmt.Errorf("unsupported S3 file format: %s", format)
+	}
+}
+
+// resolveS3Format gives explicit logical format configuration precedence over
+// the legacy filename-extension mapping.
+func resolveS3Format(configuredFormat, objectKey string) (string, error) {
+	if configured := strings.ToLower(strings.TrimSpace(configuredFormat)); configured != "" {
+		switch configured {
+		case "csv", "json", "xml", "excel", "parquet":
+			return configured, nil
+		case "xlsx", "xls":
+			return "excel", nil
+		default:
+			return "", fmt.Errorf("unsupported S3 file format %q", configuredFormat)
+		}
+	}
+	return legacyS3FormatFromExtension(objectKey), nil
+}
+
+// legacyS3FormatFromExtension preserves pre-format-option parser selection,
+// including the intentionally temporary unknown-extension-to-CSV fallback.
+func legacyS3FormatFromExtension(objectKey string) string {
+	switch strings.ToLower(filepath.Ext(objectKey)) {
+	case ".json":
+		return "json"
+	case ".xml":
+		return "xml"
+	case ".xlsx", ".xls":
+		return "excel"
+	case ".parquet":
+		return "parquet"
+	default:
+		return "csv"
 	}
 }
 
@@ -276,44 +306,170 @@ func (it *s3CSVIterator) Close() error {
 	return nil
 }
 
+func (it *s3CSVIterator) FieldOrder() []string {
+	return append([]string(nil), it.headers...)
+}
+
 type s3JSONIterator struct {
-	decoder *json.Decoder
-	inArray bool
-	nextDoc map[string]any
-	err     error
+	decoder     *json.Decoder
+	recordPath  string
+	initialized bool
+	inArray     bool
+	nextDoc     map[string]any
+	err         error
 }
 
 func (it *s3JSONIterator) Next(ctx context.Context) bool {
-	if !it.inArray {
-		// Expect '[' token for top-level array
-		t, err := it.decoder.Token()
-		if err != nil {
-			if err != io.EOF {
-				it.err = err
-			}
-			return false
-		}
-		if delim, ok := t.(json.Delim); ok && delim == '[' {
-			it.inArray = true
-		} else {
-			it.err = errors.New("expected top level JSON array")
+	if !it.initialized {
+		it.initialized = true
+		if err := it.initialize(); err != nil {
+			it.err = err
 			return false
 		}
 	}
 
 	if !it.decoder.More() {
 		// End of array
-		it.decoder.Token() // consume ']'
+		if _, err := it.decoder.Token(); err != nil { // consume ']'
+			it.err = err
+		}
 		return false
 	}
 
 	var doc map[string]any
 	if err := it.decoder.Decode(&doc); err != nil {
-		it.err = err
+		it.err = fmt.Errorf("JSON record array elements must be objects: %w", err)
 		return false
 	}
 	it.nextDoc = doc
 	return true
+}
+
+func (it *s3JSONIterator) initialize() error {
+	path, err := parseJSONRecordPath(it.recordPath)
+	if err != nil {
+		return err
+	}
+	t, err := it.decoder.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := t.(json.Delim)
+	if !ok {
+		return errors.New("expected top level JSON array")
+	}
+	switch delim {
+	case '[':
+		if len(path) != 0 {
+			return errors.New("JSON root is an array; record_path must be empty")
+		}
+		it.inArray = true
+		return nil
+	case '{':
+		if len(path) == 0 {
+			return errors.New("JSON root is an object; record_path is required to select the record array")
+		}
+		return seekJSONRecordArray(it.decoder, path, it.recordPath)
+	default:
+		return errors.New("expected top level JSON array")
+	}
+}
+
+func parseJSONRecordPath(raw string) ([]string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	if !strings.HasPrefix(raw, "/") {
+		return nil, fmt.Errorf("JSON record_path %q must start with /", raw)
+	}
+	parts := strings.Split(raw[1:], "/")
+	for i, part := range parts {
+		var b strings.Builder
+		for j := 0; j < len(part); j++ {
+			if part[j] != '~' {
+				b.WriteByte(part[j])
+				continue
+			}
+			if j+1 >= len(part) || (part[j+1] != '0' && part[j+1] != '1') {
+				return nil, fmt.Errorf("JSON record_path %q contains an invalid escape", raw)
+			}
+			if part[j+1] == '0' {
+				b.WriteByte('~')
+			} else {
+				b.WriteByte('/')
+			}
+			j++
+		}
+		parts[i] = b.String()
+	}
+	return parts, nil
+}
+
+// seekJSONRecordArray starts after an object's opening delimiter and leaves
+// the decoder positioned inside the selected record array.
+func seekJSONRecordArray(decoder *json.Decoder, path []string, rawPath string) error {
+	for index, key := range path {
+		found := false
+		for decoder.More() {
+			token, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			objectKey, ok := token.(string)
+			if !ok {
+				return fmt.Errorf("JSON record_path %q encountered an invalid object key", rawPath)
+			}
+			if objectKey != key {
+				if err := skipJSONValue(decoder); err != nil {
+					return err
+				}
+				continue
+			}
+			found = true
+			value, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			delim, ok := value.(json.Delim)
+			if index == len(path)-1 {
+				if !ok || delim != '[' {
+					return fmt.Errorf("JSON record_path %q must resolve to an array", rawPath)
+				}
+				return nil
+			}
+			if !ok || delim != '{' {
+				return fmt.Errorf("JSON record_path %q was not found", rawPath)
+			}
+			break
+		}
+		if !found {
+			return fmt.Errorf("JSON record_path %q was not found", rawPath)
+		}
+	}
+	return fmt.Errorf("JSON record_path %q was not found", rawPath)
+}
+
+func skipJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok || (delim != '{' && delim != '[') {
+		return nil
+	}
+	for decoder.More() {
+		if delim == '{' {
+			if _, err := decoder.Token(); err != nil {
+				return err
+			}
+		}
+		if err := skipJSONValue(decoder); err != nil {
+			return err
+		}
+	}
+	_, err = decoder.Token()
+	return err
 }
 
 func (it *s3JSONIterator) Decode() (map[string]any, error) {
@@ -477,6 +633,10 @@ func (it *s3ExcelIterator) Err() error {
 
 func (it *s3ExcelIterator) Close() error {
 	return nil
+}
+
+func (it *s3ExcelIterator) FieldOrder() []string {
+	return append([]string(nil), it.headers...)
 }
 
 func arrowValueToAny(col arrow.Array, row int) any {

@@ -1,11 +1,15 @@
 package arrowio
 
 import (
+	"bytes"
+	"context"
 	"testing"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/file"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
@@ -34,6 +38,52 @@ func TestInferMongoSchemaEmpty(t *testing.T) {
 	_, err := InferMongoSchema(nil)
 
 	require.Error(t, err)
+}
+
+func TestInferMongoSchemaWithFieldOrderPreservesSourceOrder(t *testing.T) {
+	docs := []map[string]any{{
+		"id":   int64(1),
+		"date": "2026-01-01",
+		"age":  int64(30),
+	}}
+
+	schema, err := InferMongoSchemaWithFieldOrder(docs, []string{"id", "date", "age"})
+	require.NoError(t, err)
+	require.Equal(t, "id", schema.Field(0).Name)
+	require.Equal(t, "date", schema.Field(1).Name)
+	require.Equal(t, "age", schema.Field(2).Name)
+}
+
+func TestInferMongoSchemaWithFieldOrderPreservesParquetOrder(t *testing.T) {
+	docs := []map[string]any{{
+		"id":   int64(1),
+		"date": "2026-01-01",
+		"age":  int64(30),
+	}}
+	schema, err := InferMongoSchemaWithFieldOrder(docs, []string{"id", "date", "age"})
+	require.NoError(t, err)
+	record, err := MongoDocsToRecord(memory.NewGoAllocator(), schema, docs)
+	require.NoError(t, err)
+	defer record.Release()
+
+	var data bytes.Buffer
+	writer, err := pqarrow.NewFileWriter(schema, &data, nil, pqarrow.NewArrowWriterProperties())
+	require.NoError(t, err)
+	require.NoError(t, writer.Write(record))
+	require.NoError(t, writer.Close())
+
+	parquetReader, err := file.NewParquetReader(bytes.NewReader(data.Bytes()))
+	require.NoError(t, err)
+	arrowReader, err := pqarrow.NewFileReader(parquetReader, pqarrow.ArrowReadProperties{}, memory.NewGoAllocator())
+	require.NoError(t, err)
+	recordReader, err := arrowReader.GetRecordReader(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer recordReader.Release()
+	require.True(t, recordReader.Next())
+	got := recordReader.Record().Schema()
+	require.Equal(t, "id", got.Field(0).Name)
+	require.Equal(t, "date", got.Field(1).Name)
+	require.Equal(t, "age", got.Field(2).Name)
 }
 
 func TestMongoDocsToRecord(t *testing.T) {

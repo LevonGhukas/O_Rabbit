@@ -53,6 +53,8 @@ type RunRequest struct {
 	SourceTable  string
 	SourceQuery  string
 	ColumnTypes  map[string]string
+	RecordPath   string
+	FileFormat   string
 	SelectColumns []string
 	QueryHash    string
 	Incremental  bool
@@ -78,6 +80,23 @@ type RunRequest struct {
 
 type RunResult struct {
 	Objects int
+}
+
+func documentFilter(engine, recordPath, fileFormat string) map[string]any {
+	if connectors.NormalizeSourceEngine(engine) != "s3" {
+		return nil
+	}
+	filter := map[string]any{}
+	if recordPath = strings.TrimSpace(recordPath); recordPath != "" {
+		filter["record_path"] = recordPath
+	}
+	if fileFormat = strings.TrimSpace(fileFormat); fileFormat != "" {
+		filter["format"] = fileFormat
+	}
+	if len(filter) == 0 {
+		return nil
+	}
+	return filter
 }
 
 type datasetState struct {
@@ -1162,11 +1181,15 @@ func inferRunIcebergSchema(ctx context.Context, req RunRequest, tableName string
 		}
 		defer db.Close()
 
-		it, err := db.StreamDocuments(ctx, req.SourceTable, nil, 1000)
+		it, err := db.StreamDocuments(ctx, req.SourceTable, documentFilter(req.SourceEngine, req.RecordPath, req.FileFormat), 1000)
 		if err != nil {
 			return nil, fmt.Errorf("stream documents for iceberg auto-create: %w", err)
 		}
 		defer it.Close()
+		var fieldOrder []string
+		if ordered, ok := it.(connectors.OrderedDocumentIterator); ok {
+			fieldOrder = ordered.FieldOrder()
+		}
 
 		var docBuf []map[string]any
 		for it.Next(ctx) {
@@ -1180,7 +1203,7 @@ func inferRunIcebergSchema(ctx context.Context, req RunRequest, tableName string
 			}
 		}
 
-		arrSchema, err = arrowio.InferMongoSchema(docBuf)
+		arrSchema, err = arrowio.InferMongoSchemaWithFieldOrder(docBuf, fieldOrder)
 		if err != nil {
 			return nil, fmt.Errorf("infer document schema for iceberg auto-create: %w", err)
 		}
@@ -1215,18 +1238,22 @@ func inferRunIcebergSchema(ctx context.Context, req RunRequest, tableName string
 // InferDurableIcebergSchema snapshots the source/query schema in Iceberg's
 // stable JSON representation before a zero-artifact run enters its durable
 // commit boundary.
-func InferDurableIcebergSchema(ctx context.Context, engine, dsn, mode, table, query string) (json.RawMessage, error) {
+func InferDurableIcebergSchema(ctx context.Context, engine, dsn, mode, table, query, recordPath, fileFormat string) (json.RawMessage, error) {
 	if connectors.SupportsDocumentReader(engine) {
 		reader, err := connectors.OpenDocumentReader(ctx, engine, dsn)
 		if err != nil {
 			return nil, fmt.Errorf("open document source for durable schema: %w", err)
 		}
 		defer reader.Close()
-		it, err := reader.StreamDocuments(ctx, table, nil, 1000)
+		it, err := reader.StreamDocuments(ctx, table, documentFilter(engine, recordPath, fileFormat), 1000)
 		if err != nil {
 			return nil, fmt.Errorf("stream documents for durable schema: %w", err)
 		}
 		defer it.Close()
+		var fieldOrder []string
+		if ordered, ok := it.(connectors.OrderedDocumentIterator); ok {
+			fieldOrder = ordered.FieldOrder()
+		}
 		var docs []map[string]any
 		for it.Next(ctx) && len(docs) < 1000 {
 			doc, decodeErr := it.Decode()
@@ -1235,7 +1262,7 @@ func InferDurableIcebergSchema(ctx context.Context, engine, dsn, mode, table, qu
 			}
 			docs = append(docs, doc)
 		}
-		arrSchema, err := arrowio.InferMongoSchema(docs)
+		arrSchema, err := arrowio.InferMongoSchemaWithFieldOrder(docs, fieldOrder)
 		if err != nil {
 			return nil, fmt.Errorf("infer document durable schema: %w", err)
 		}

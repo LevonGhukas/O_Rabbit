@@ -53,6 +53,8 @@ type partitionSpec struct {
 	WhereClause    string `json:"where_clause,omitempty"` 
 	SelectColumns []string          `json:"select_columns,omitempty"` 
 	ColumnTypes   map[string]string `json:"column_types,omitempty"`
+	RecordPath    string            `json:"record_path,omitempty"`
+	FileFormat    string            `json:"format,omitempty"`
 	IDColumn       string `json:"id_column"` // legacy alias
 	From           int64  `json:"from"`      // legacy alias
 	To             int64  `json:"to"`        // legacy alias
@@ -1247,12 +1249,30 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 		res.PartitionLower = ps.Lower
 		res.PartitionUpper = ps.Upper
 	}
+	if sourceEngine == "s3" {
+		if recordPath := strings.TrimSpace(ps.RecordPath); recordPath != "" {
+			if filter == nil {
+				filter = make(map[string]any)
+			}
+			filter["record_path"] = recordPath
+		}
+		if fileFormat := strings.TrimSpace(ps.FileFormat); fileFormat != "" {
+			if filter == nil {
+				filter = make(map[string]any)
+			}
+			filter["format"] = fileFormat
+		}
+	}
 
 	it, err := src.StreamDocuments(qctx, collection, filter, batchSize)
 	if err != nil {
 		return res, fmt.Errorf("%s stream: %w", sourceEngine, err)
 	}
 	defer it.Close()
+	var fieldOrder []string
+	if ordered, ok := it.(connectors.OrderedDocumentIterator); ok {
+		fieldOrder = ordered.FieldOrder()
+	}
 
 	var (
 		docBuf []map[string]any
@@ -1267,7 +1287,7 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 		docBuf = append(docBuf, doc)
 
 		if !schemaInferred && len(docBuf) >= batchSize {
-			schema, err = arrowio.InferMongoSchema(docBuf)
+			schema, err = arrowio.InferMongoSchemaWithFieldOrder(docBuf, fieldOrder)
 			if err != nil {
 				return res, fmt.Errorf("infer schema: %w", err)
 			}
@@ -1305,7 +1325,7 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 	// Flush remaining docs.
 	if len(docBuf) > 0 {
 		if !schemaInferred {
-			schema, err = arrowio.InferMongoSchema(docBuf)
+			schema, err = arrowio.InferMongoSchemaWithFieldOrder(docBuf, fieldOrder)
 			if err != nil {
 				return res, fmt.Errorf("infer schema: %w", err)
 			}

@@ -1353,7 +1353,7 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 				if sourceQuery == "" {
 					sourceQuery = strings.TrimSpace(job.SourceSQL)
 				}
-				intent.IcebergSchema, err = icebergreg.InferDurableIcebergSchema(ctx, srcConn.Engine, sourceDSN, opts.NormalizedSourceMode(), strings.TrimSpace(opts.Table), sourceQuery)
+				intent.IcebergSchema, err = icebergreg.InferDurableIcebergSchema(ctx, srcConn.Engine, sourceDSN, opts.NormalizedSourceMode(), strings.TrimSpace(opts.Table), sourceQuery, opts.RecordPath, opts.FileFormat)
 				if err != nil {
 					return &classifiedCommitError{class: commitFailureValidation, component: "source_schema", err: fmt.Errorf("empty dataset source schema is unavailable: %w", err)}
 				}
