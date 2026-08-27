@@ -204,7 +204,7 @@ func buildQueryModeCursorSQL(engine string, q CursorQuery) (string, []any, error
 		args = append(args, upperArg)
 	}
 
-	query := "SELECT * FROM " + d.sourceExpr(sourceQuery)
+	query := "SELECT " + d.selectClause(q) + " FROM " + d.sourceExpr(sourceQuery)
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -213,6 +213,47 @@ func buildQueryModeCursorSQL(engine string, q CursorQuery) (string, []any, error
 	}
 	query += d.terminator
 	return query, args, nil
+}
+
+func (d queryModeDialect) selectClause(q CursorQuery) string {
+	if len(q.SelectColumns) == 0 {
+		return "*"
+	}
+	parts := make([]string, 0, len(q.SelectColumns))
+	for _, column := range q.SelectColumns {
+		leaf := queryResultColumnName(column)
+		if leaf == "" {
+			continue
+		}
+		ref, err := d.quoteCursorColumn(leaf)
+		if err != nil {
+			continue
+		}
+		if p, ok := fallbackProjectionForName(q.FallbackProjections, leaf); ok {
+			if expr, exact := FallbackProjectionSQL(d.engine, ref, p); exact {
+				parts = append(parts, fmt.Sprintf("%s AS %s", expr, d.outputColumnQuote(leaf)))
+				continue
+			}
+		}
+		parts = append(parts, fmt.Sprintf("%s AS %s", ref, d.outputColumnQuote(leaf)))
+	}
+	if len(parts) == 0 {
+		return "*"
+	}
+	return strings.Join(parts, ", ")
+}
+
+func (d queryModeDialect) outputColumnQuote(name string) string {
+	switch d.engine {
+	case "mssql":
+		return "[" + strings.ReplaceAll(name, "]", "]]") + "]"
+	case "oracle":
+		return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+	case "clickhouse":
+		return "`" + strings.ReplaceAll(name, "`", "``") + "`"
+	default:
+		return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+	}
 }
 
 func buildQueryModeStatsSQL(engine, query, cursorColumn string) (string, error) {

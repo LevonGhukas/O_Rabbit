@@ -122,6 +122,40 @@ func TestMSSQLDatetime2FallbackFormatsExactDriverNanoseconds(t *testing.T) {
 	require.Equal(t, "2026-08-26 13:07:28.1234567", a.Value(0))
 }
 
+func TestOracleAndClickHouseTemporalFallbackFormatExactNanoseconds(t *testing.T) {
+	value := time.Date(2026, 8, 27, 12, 3, 4, 123456789, time.FixedZone("source", 4*3600))
+	cases := []struct {
+		name, encoding, want string
+	}{
+		{"oracle", "oracle_timestamp_text_v1", "2026-08-27 12:03:04.123456789"},
+		{"oracle_tz", "oracle_timestamptz_text_v1", "2026-08-27T12:03:04.123456789+04:00"},
+		{"clickhouse", "clickhouse_datetime64_text_v1", "2026-08-27 12:03:04.123456789"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plan, err := fallbackPlanForDescriptor(SourceFieldDescriptor{Name: "value", TemporalPrecision: 9, FallbackEncoding: tc.encoding})
+			require.NoError(t, err)
+			b := plan.Builder(memory.DefaultAllocator)
+			defer b.Release()
+			require.NoError(t, plan.Append(b, value))
+			a := b.NewArray().(*array.String)
+			defer a.Release()
+			require.Equal(t, tc.want, a.Value(0))
+		})
+	}
+}
+
+func TestSelectableFallbackEncodingsHaveCodecs(t *testing.T) {
+	encodings := []string{
+		"canonical_uuid_text_v1", "json_utf8_text_v1", "utf8_text_v1", "xml_utf8_text_v1", "oracle_rowid_text_v1", "source_text_v1", "hex_v1",
+		"mssql_time_text_v1", "mssql_datetime2_text_v1", "mssql_datetimeoffset_text_v1", "oracle_timestamp_text_v1", "oracle_timestamptz_text_v1", "clickhouse_datetime64_text_v1", "postgres_timetz_text_v1", "decimal_text_v1", "integer_text_v1",
+	}
+	for _, encoding := range encodings {
+		_, err := fallbackPlanForDescriptor(SourceFieldDescriptor{Name: "value", FallbackEncoding: encoding})
+		require.NoErrorf(t, err, "encoding %s", encoding)
+	}
+}
+
 func TestTemporalNativeCapabilitySelectsFallbackBeforeConversion(t *testing.T) {
 	target := ConfiguredTargetCapabilities()
 	cases := []struct {

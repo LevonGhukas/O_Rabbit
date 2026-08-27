@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1060,19 +1061,46 @@ func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 	qctx, cancel := context.WithTimeout(ctx, 2*time.Hour)
 	defer cancel()
 
+	// Plan fallbacks from source metadata before building the extraction query.
+	// This carries a String fallback into connector SQL projection instead of
+	// discovering a non-text driver value after Arrow builders exist.
+	var describedCols []string
+	var describedTypes []*sql.ColumnType
+	if sourceMode == "query" {
+		queryReader, ok := src.(connectors.SourceQueryReader)
+		if !ok {
+			return res, fmt.Errorf("%s query mode does not support descriptor-aware fallback projection", sourceEngine)
+		}
+		describedCols, describedTypes, err = queryReader.DescribeQuery(qctx, sourceQuery)
+	} else {
+		describedCols, describedTypes, err = src.DescribeTable(qctx, ps.Table)
+	}
+	if err != nil {
+		return res, fmt.Errorf("describe source for fallback projection: %w", err)
+	}
+	projections, err := arrowio.FallbackProjectionsFromSQL(sourceEngine, describedCols, describedTypes)
+	if err != nil {
+		return res, fmt.Errorf("plan fallback projections: %w", err)
+	}
+	selectColumns := ps.SelectColumns
+	if len(selectColumns) == 0 {
+		selectColumns = describedCols
+	}
+
 	queryStart := time.Now()
 	rows, cols, colTypes, cursorIdx, err := src.QueryCursor(qctx, connectors.CursorQuery{
-		Table:          ps.Table,
-		SourceQuery:    sourceQuery,
-		CursorColumn:   ps.CursorColumn,
-		CursorDomain:   connectors.NormalizeCursorDomain(ps.CursorDomain),
-		LowerBound:     ps.Lower,
-		UpperBound:     ps.Upper,
-		LowerExclusive: ps.LowerExclusive,
-		UpperInclusive: ps.UpperInclusive,
-		WhereClause:    ps.WhereClause,
-		SelectColumns:  ps.SelectColumns,
-		ColumnTypes:    ps.ColumnTypes,
+		Table:               ps.Table,
+		SourceQuery:         sourceQuery,
+		CursorColumn:        ps.CursorColumn,
+		CursorDomain:        connectors.NormalizeCursorDomain(ps.CursorDomain),
+		LowerBound:          ps.Lower,
+		UpperBound:          ps.Upper,
+		LowerExclusive:      ps.LowerExclusive,
+		UpperInclusive:      ps.UpperInclusive,
+		WhereClause:         ps.WhereClause,
+		SelectColumns:       selectColumns,
+		ColumnTypes:         ps.ColumnTypes,
+		FallbackProjections: projections,
 	})
 	if err != nil {
 		return res, fmt.Errorf("query cursor partition: %w", err)
@@ -1152,8 +1180,12 @@ func extractFlightSQLTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 
 	convertStart := time.Now()
 	total, err := src.StreamQuery(qctx, t.SourceSql, func(schema *arrow.Schema, rec arrow.RecordBatch) error {
-		if err := arrowio.ValidateArrowSchemaForConfiguredTarget(schema); err != nil {
+		outSchema, outRec, err := arrowio.RecordForConfiguredTarget(rec)
+		if err != nil {
 			return err
+		}
+		if outRec != rec {
+			defer outRec.Release()
 		}
 		rowsRead += rec.NumRows()
 		if time.Since(lastProg) > 5*time.Second {
@@ -1169,7 +1201,7 @@ func extractFlightSQLTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 				return err
 			}
 		}
-		return pw.Write(schema, rec)
+		return pw.Write(outSchema, outRec)
 	})
 	res.ConvertMS = time.Since(convertStart).Milliseconds()
 	res.Rows = total

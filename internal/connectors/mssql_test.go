@@ -14,6 +14,36 @@ func TestBuildMSSQLSelectClauseProjectsXMLAsUnboundedText(t *testing.T) {
 	}
 }
 
+func TestMSSQLFallbackTemporalProjections(t *testing.T) {
+	got := buildMSSQLProjectedSelectClause([]string{"dt", "tm", "dto", "xml"}, nil, []FallbackProjection{
+		{Name: "dt", Encoding: "mssql_datetime2_text_v1", TemporalPrecision: 7},
+		{Name: "tm", Encoding: "mssql_time_text_v1", TemporalPrecision: 7},
+		{Name: "dto", Encoding: "mssql_datetimeoffset_text_v1", TemporalPrecision: 7},
+		{Name: "xml", Encoding: "xml_utf8_text_v1"},
+	})
+	for _, want := range []string{"CONVERT(NVARCHAR(34), [dt], 126)", "CONVERT(NVARCHAR(32), [tm])", "CONVERT(NVARCHAR(40), [dto], 127)", "CONVERT(NVARCHAR(MAX), [xml])"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("projection %q missing from %s", want, got)
+		}
+	}
+}
+
+func TestMSSQLQueryModeProjectsFallbackBeforeScan(t *testing.T) {
+	query, _, err := buildQueryModeCursorSQL("mssql", CursorQuery{
+		SourceQuery:         "SELECT dt, id FROM source_table",
+		CursorColumn:        "id",
+		CursorDomain:        CursorDomainInt64,
+		SelectColumns:       []string{"dt", "id"},
+		FallbackProjections: []FallbackProjection{{Name: "dt", Encoding: "mssql_datetime2_text_v1", TemporalPrecision: 7}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(query, "CONVERT(NVARCHAR(34), [orabbit_query].[dt], 126) AS [dt]") {
+		t.Fatalf("query fallback projection missing: %s", query)
+	}
+}
+
 func TestSplitMSSQLTableIdent(t *testing.T) {
 	tests := []struct {
 		in         string

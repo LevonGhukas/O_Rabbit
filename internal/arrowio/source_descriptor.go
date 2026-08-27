@@ -6,8 +6,31 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/connectors"
 	"github.com/apache/arrow-go/v18/arrow"
 )
+
+// FallbackProjectionsFromSQL exposes schema-time fallback decisions to source
+// connectors. Connectors use these facts to project exact text before Scan.
+func FallbackProjectionsFromSQL(engine string, cols []string, colTypes []*sql.ColumnType) ([]connectors.FallbackProjection, error) {
+	descriptors, err := descriptorsFromSQL(engine, cols, colTypes)
+	if err != nil {
+		return nil, err
+	}
+	target := ConfiguredTargetCapabilities()
+	out := make([]connectors.FallbackProjection, 0, len(descriptors))
+	for i := range descriptors {
+		d := &descriptors[i]
+		fallbackForNativeIncompatibility(d, target)
+		if d.Unsigned && d.BitWidth == 64 {
+			continue
+		}
+		if d.Representation == RepresentationFallback {
+			out = append(out, connectors.FallbackProjection{Name: d.Name, SourceType: d.SourceType, Encoding: d.FallbackEncoding, Timezone: d.SourceTimezone, TemporalPrecision: d.TemporalPrecision})
+		}
+	}
+	return out, nil
+}
 
 // LogicalFamily is source meaning, independent of cursor classification.
 type LogicalFamily string
@@ -107,6 +130,11 @@ func descriptorsFromSQL(engine string, cols []string, colTypes []*sql.ColumnType
 			if n, ok := ct.Length(); ok {
 				d.Length, d.LengthKnown = n, true
 			}
+		}
+		// Compatibility callers without an engine still need the unambiguous
+		// SQL Server temporal names to use the canonical descriptor planner.
+		if d.Engine == "" && (strings.HasPrefix(d.SourceType, "DATETIME2") || strings.HasPrefix(d.SourceType, "DATETIMEOFFSET")) {
+			d.Engine = "mssql"
 		}
 		if exactDecimalType(d.Engine, d.SourceType) && (!d.PrecisionKnown || !d.ScaleKnown) {
 			if m := precScaleRe.FindStringSubmatch(d.SourceType); m != nil && m[1] != "" {
@@ -265,7 +293,6 @@ func classifySourceRepresentation(d *SourceFieldDescriptor) {
 			signed := false
 			d.Signed = &signed
 			d.LogicalFamily = LogicalUnsignedInt
-			d.FallbackEncoding = "unsigned_decimal20_v1"
 		}
 		if strings.HasPrefix(t, "FIXEDSTRING(") {
 			d.FixedBinary, d.Length, d.LengthKnown = true, int64(temporalPrecision(t, -1)), true

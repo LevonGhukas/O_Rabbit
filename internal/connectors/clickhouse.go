@@ -163,7 +163,7 @@ func (c *ClickHouse) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows,
 		args = append(args, upperArg)
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM %s", buildClickHouseSelectClause(q.SelectColumns), qt)
+	query := fmt.Sprintf("SELECT %s FROM %s", buildClickHouseProjectedSelectClause(q.SelectColumns, q.FallbackProjections), qt)
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -574,6 +574,10 @@ func clickhouseHostIsLocal(host string) bool {
 }
 
 func buildClickHouseSelectClause(cols []string) string {
+	return buildClickHouseProjectedSelectClause(cols, nil)
+}
+
+func buildClickHouseProjectedSelectClause(cols []string, projections []FallbackProjection) string {
 	if len(cols) == 0 {
 		return "*"
 	}
@@ -582,6 +586,12 @@ func buildClickHouseSelectClause(cols []string) string {
 		c = strings.TrimSpace(c)
 		if c != "" {
 			if q, err := quoteClickHouseMultipartIdent(c); err == nil {
+				if p, ok := fallbackProjectionForName(projections, c); ok {
+					if expr, exact := FallbackProjectionSQL("clickhouse", q, p); exact {
+						quoted = append(quoted, fmt.Sprintf("%s AS %s", expr, q))
+						continue
+					}
+				}
 				quoted = append(quoted, q)
 			} else {
 				quoted = append(quoted, c)

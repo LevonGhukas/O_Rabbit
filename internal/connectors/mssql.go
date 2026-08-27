@@ -159,7 +159,7 @@ func (m *MSSQL) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []st
 		args = append(args, upperArg)
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM %s WITH (NOLOCK)", buildMSSQLSelectClause(q.SelectColumns, q.ColumnTypes), qt)
+	query := fmt.Sprintf("SELECT %s FROM %s WITH (NOLOCK)", buildMSSQLProjectedSelectClause(q.SelectColumns, q.ColumnTypes, q.FallbackProjections), qt)
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -447,18 +447,28 @@ func mssqlHostFromKVDSN(dsn string) (string, bool) {
 // preserve a fallback value. XML is converted to unbounded NVARCHAR(MAX), not
 // VARCHAR(8000), then aliased back to its original column name.
 func buildMSSQLSelectClause(cols []string, typeHints ...map[string]string) string {
+	var hints map[string]string
+	if len(typeHints) > 0 {
+		hints = typeHints[0]
+	}
+	return buildMSSQLProjectedSelectClause(cols, hints, nil)
+}
+
+func buildMSSQLProjectedSelectClause(cols []string, columnTypes map[string]string, projections []FallbackProjection) string {
 	if len(cols) == 0 {
 		return "*"
 	}
 	quoted := make([]string, 0, len(cols))
-	var columnTypes map[string]string
-	if len(typeHints) > 0 {
-		columnTypes = typeHints[0]
-	}
 	for _, c := range cols {
 		c = strings.TrimSpace(c)
 		if c != "" {
 			if q, err := quoteMSSQLMultipartIdent(c); err == nil {
+				if p, ok := fallbackProjectionForName(projections, c); ok {
+					if expr, exact := FallbackProjectionSQL("mssql", q, p); exact {
+						quoted = append(quoted, fmt.Sprintf("%s AS %s", expr, q))
+						continue
+					}
+				}
 				if strings.EqualFold(strings.TrimSpace(columnTypes[c]), "XML") {
 					quoted = append(quoted, fmt.Sprintf("CONVERT(NVARCHAR(MAX), %s) AS %s", q, q))
 				} else {

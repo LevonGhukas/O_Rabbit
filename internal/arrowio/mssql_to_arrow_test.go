@@ -108,3 +108,18 @@ func TestMSSQLPre1970Dates(t *testing.T) {
 	defer arr2.Release()
 	require.Equal(t, "0001-01-01", arr2.Value(0).FormattedString())
 }
+
+func TestMSSQLDate32AcceptsDriverZeroTimeAndNull(t *testing.T) {
+	plan := PlanForSQLColumn("mssql", "date_col", "DATE", 0, 0, false)
+	b := plan.Builder(memory.DefaultAllocator)
+	defer b.Release()
+	for _, value := range []any{time.Time{}, time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC), nil} {
+		require.NoError(t, plan.Append(b, value))
+	}
+	a := b.NewArray().(*array.Date32)
+	defer a.Release()
+	require.Equal(t, "0001-01-01", a.Value(0).FormattedString())
+	require.Equal(t, "1970-01-01", a.Value(1).FormattedString())
+	require.Equal(t, "9999-12-31", a.Value(2).FormattedString())
+	require.True(t, a.IsNull(3))
+}

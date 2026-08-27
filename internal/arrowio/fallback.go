@@ -39,7 +39,7 @@ func (c textFallbackCodec) EncodeExact(value any) (string, error) {
 		s = string(x)
 	case time.Time:
 		var ok bool
-		s, ok = exactMSSQLTemporalText(c.descriptor, x)
+		s, ok = exactTemporalText(c.descriptor, x)
 		if !ok {
 			return "", fmt.Errorf("driver value %T lacks original textual precision", value)
 		}
@@ -54,7 +54,7 @@ func (c textFallbackCodec) EncodeExact(value any) (string, error) {
 
 // exactMSSQLTemporalText accepts time.Time only when its nanoseconds carry all
 // digits declared by MSSQL. Otherwise connector projection must supply text.
-func exactMSSQLTemporalText(d SourceFieldDescriptor, value time.Time) (string, bool) {
+func exactTemporalText(d SourceFieldDescriptor, value time.Time) (string, bool) {
 	if d.TemporalPrecision < 0 || d.TemporalPrecision > 9 {
 		return "", false
 	}
@@ -76,6 +76,12 @@ func exactMSSQLTemporalText(d SourceFieldDescriptor, value time.Time) (string, b
 		return value.Format("2006-01-02 15:04:05" + fraction), true
 	case "mssql_datetimeoffset_text_v1":
 		return value.Format("2006-01-02T15:04:05" + fraction + "Z07:00"), true
+	case "oracle_timestamp_text_v1", "clickhouse_datetime64_text_v1":
+		return value.Format("2006-01-02 15:04:05" + fraction), true
+	case "oracle_timestamptz_text_v1":
+		return value.Format("2006-01-02T15:04:05" + fraction + "Z07:00"), true
+	case "postgres_timetz_text_v1":
+		return value.Format("15:04:05" + fraction + "-07:00"), true
 	default:
 		return "", false
 	}

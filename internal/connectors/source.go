@@ -27,18 +27,27 @@ const (
 )
 
 type CursorQuery struct {
-	Table           string
-	SourceQuery     string
-	CursorColumn    string
-	CursorDomain    CursorDomain
-	LowerBound      string
-	UpperBound      string
-	LowerExclusive  bool
-	UpperInclusive  bool
-	SnapshotContext string
-	WhereClause     string
-	SelectColumns   []string
-	ColumnTypes     map[string]string
+	Table               string
+	SourceQuery         string
+	CursorColumn        string
+	CursorDomain        CursorDomain
+	LowerBound          string
+	UpperBound          string
+	LowerExclusive      bool
+	UpperInclusive      bool
+	SnapshotContext     string
+	WhereClause         string
+	SelectColumns       []string
+	ColumnTypes         map[string]string
+	FallbackProjections []FallbackProjection
+}
+
+// FallbackProjection asks a connector to return an exact textual source value
+// before database/sql scans it. It is produced during schema planning and does
+// not alter the Arrow schema after row processing begins.
+type FallbackProjection struct {
+	Name, SourceType, Encoding, Timezone string
+	TemporalPrecision                    int
 }
 
 // SnapshotExporter allows exporting a consistent read snapshot (e.g. PG snapshot ID, Oracle SCN).

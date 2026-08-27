@@ -853,9 +853,6 @@ func allASCIIDigits(s string) bool {
 func asDate32(v any) (arrow.Date32, bool) {
 	switch x := v.(type) {
 	case time.Time:
-		if x.IsZero() {
-			return 0, false
-		}
 		return arrow.Date32FromTime(time.Date(x.Year(), x.Month(), x.Day(), 0, 0, 0, 0, time.UTC)), true
 	case arrow.Date32:
 		return x, true

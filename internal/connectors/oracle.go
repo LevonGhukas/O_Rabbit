@@ -374,7 +374,7 @@ func buildOracleCursorQuery(q CursorQuery) (string, []any, error) {
 		args = append(args, upperArg)
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM %s", buildOracleSelectClause(q.SelectColumns), qt)
+	query := fmt.Sprintf("SELECT %s FROM %s", buildOracleProjectedSelectClause(q.SelectColumns, q.FallbackProjections), qt)
 	if scn := strings.TrimSpace(q.SnapshotContext); scn != "" {
 		// Optional: Oracle requires AS OF SCN directly after the table identifier.
 		query += fmt.Sprintf(" AS OF SCN %s", scn)
@@ -760,6 +760,10 @@ func oracleDSNIsLocal(dsn string) bool {
 }
 
 func buildOracleSelectClause(cols []string) string {
+	return buildOracleProjectedSelectClause(cols, nil)
+}
+
+func buildOracleProjectedSelectClause(cols []string, projections []FallbackProjection) string {
 	if len(cols) == 0 {
 		return "*"
 	}
@@ -768,6 +772,12 @@ func buildOracleSelectClause(cols []string) string {
 		c = strings.TrimSpace(c)
 		if c != "" {
 			if q, err := quoteOracleMultipartIdent(c); err == nil {
+				if p, ok := fallbackProjectionForName(projections, c); ok {
+					if expr, exact := FallbackProjectionSQL("oracle", q, p); exact {
+						quoted = append(quoted, fmt.Sprintf("%s AS %s", expr, q))
+						continue
+					}
+				}
 				quoted = append(quoted, q)
 			} else {
 				quoted = append(quoted, c)
