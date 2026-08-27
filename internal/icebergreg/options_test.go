@@ -14,6 +14,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 	"github.com/LevonGhukas/O_Rabbit/internal/parquetio"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
 )
@@ -463,6 +464,15 @@ func TestApplyStrictSchemaEvolutionRejectsNewColumn(t *testing.T) {
 	tx := newOptionTestTable(t, current).NewTransaction()
 	err := applySchemaOptions(tx, current, source, RunConfig{SchemaEvolution: "strict"})
 	if err == nil || !strings.Contains(err.Error(), "rejects new column") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestApplySchemaOptionsRejectsOptionalSourceForRequiredTableBeforeCommit(t *testing.T) {
+	current := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "created_at", Type: iceberg.PrimitiveTypes.String, Required: true})
+	source := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "created_at", Type: iceberg.PrimitiveTypes.String})
+	err := applySchemaOptions(newOptionTestTable(t, current).NewTransaction(), current, source, RunConfig{SchemaEvolution: "additive"})
+	if err == nil || !failure.IsFailure(err, failure.FailureSchemaIncompatible) {
 		t.Fatalf("error=%v", err)
 	}
 }

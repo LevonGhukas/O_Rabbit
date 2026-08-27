@@ -76,6 +76,29 @@ type sourceExtract struct {
 	OutputPart     int64
 }
 
+// sourceTypesForReturnedColumns keeps schema facts from the source describe
+// step. Fallback SQL projections may report their CAST expression as nullable
+// even when original column is NOT NULL; those projected ColumnTypes are for
+// Scan only, never schema inference.
+func sourceTypesForReturnedColumns(describedCols []string, describedTypes []*sql.ColumnType, returnedCols []string, fallback []*sql.ColumnType) []*sql.ColumnType {
+	if len(describedCols) != len(describedTypes) || len(returnedCols) == 0 {
+		return fallback
+	}
+	byName := make(map[string]*sql.ColumnType, len(describedCols))
+	for i, name := range describedCols {
+		byName[strings.ToLower(strings.TrimSpace(name))] = describedTypes[i]
+	}
+	out := make([]*sql.ColumnType, len(returnedCols))
+	for i, name := range returnedCols {
+		ct, ok := byName[strings.ToLower(strings.TrimSpace(name))]
+		if !ok || ct == nil {
+			return fallback
+		}
+		out[i] = ct
+	}
+	return out
+}
+
 type taskCanceledError struct {
 	reason string
 }
@@ -217,7 +240,7 @@ func main() {
 	}
 	initialCapJSON, _ := json.Marshal(cap)
 
-	reg, err := registerWithRetry(ctx, log, cp, &grpcpb.RegisterWorkerRequest{WorkerId: cfg.WorkerID, Addr: cfg.WorkerAddr, CapabilitiesJson: string(initialCapJSON)})
+	reg, err := registerWithRetry(ctx, log, cp, &grpcpb.RegisterWorkerRequest{WorkerId: cfg.WorkerID, Addr: cfg.WorkerAddr, CapabilitiesJson: string(initialCapJSON), BootId: workerInstanceID, Pid: int32(os.Getpid())})
 	if err != nil {
 		if ctx.Err() != nil {
 			// Shutdown requested.
@@ -254,7 +277,7 @@ func main() {
 			return
 		case <-hb.C:
 			hctx, cancel := context.WithTimeout(ctx, 1*time.Second)
-			_, _ = cp.Heartbeat(hctx, &grpcpb.HeartbeatRequest{WorkerId: cfg.WorkerID, NowUnixMs: time.Now().UnixMilli()})
+			_, _ = cp.Heartbeat(hctx, &grpcpb.HeartbeatRequest{WorkerId: cfg.WorkerID, NowUnixMs: time.Now().UnixMilli(), BootId: workerInstanceID})
 			cancel()
 		default:
 		}
@@ -1107,6 +1130,7 @@ func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 	}
 	defer rows.Close()
 	res.QueryMS = time.Since(queryStart).Milliseconds()
+	schemaColumnTypes := sourceTypesForReturnedColumns(describedCols, describedTypes, cols, colTypes)
 
 	alloc := memory.NewGoAllocator()
 	var (
@@ -1116,7 +1140,7 @@ func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 	)
 
 	convertStart := time.Now()
-	total, actualMaxCursor, err := arrowio.RowsToRecordBatchesEngineWithOverrides(sourceEngine, rows, cols, colTypes, ps.ColumnTypes, 50_000, alloc, cursorIdx, connectors.NormalizeCursorDomain(ps.CursorDomain), func(schema *arrow.Schema, rec arrow.RecordBatch) error {
+	total, actualMaxCursor, err := arrowio.RowsToRecordBatchesEngineWithOverrides(sourceEngine, rows, cols, schemaColumnTypes, ps.ColumnTypes, 50_000, alloc, cursorIdx, connectors.NormalizeCursorDomain(ps.CursorDomain), func(schema *arrow.Schema, rec arrow.RecordBatch) error {
 		rowsRead += rec.NumRows()
 		if time.Since(lastProg) > 5*time.Second {
 			lastProg = time.Now()

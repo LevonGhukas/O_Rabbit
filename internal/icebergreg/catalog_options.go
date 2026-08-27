@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 	iceberg "github.com/apache/iceberg-go"
 	restcatalog "github.com/apache/iceberg-go/catalog/rest"
 	icetable "github.com/apache/iceberg-go/table"
@@ -141,6 +142,9 @@ func applySchemaOptions(tx *icetable.Transaction, current, source *iceberg.Schem
 				update.AddColumn([]string{sourceField.Name}, sourceField.Type, sourceField.Doc, false, nil)
 				changed = true
 				continue
+			}
+			if currentField.Required && !sourceField.Required {
+				return failure.NewFailure(failure.FailureSchemaIncompatible, false, true, fmt.Errorf("schema nullability incompatible for %q: table field is required %s, source field is optional %s; migrate the Iceberg table after confirming source nullability", sourceField.Name, currentField.Type, sourceField.Type))
 			}
 			if currentField.Type.Equals(sourceField.Type) {
 				continue

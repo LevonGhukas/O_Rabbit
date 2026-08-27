@@ -279,11 +279,6 @@ func (m *Manager) RegisterRun(ctx context.Context, req RunRequest) (RunResult, e
 	if !req.CatalogAlreadyCommitted && req.BeforeExternalCommit == nil && strings.TrimSpace(req.CommitID) != "" {
 		return RunResult{}, fmt.Errorf("durable external-commit boundary is required")
 	}
-	if !req.CatalogAlreadyCommitted && req.BeforeExternalCommit != nil {
-		if err := req.BeforeExternalCommit(); err != nil {
-			return RunResult{}, err
-		}
-	}
 	if !req.CatalogAlreadyCommitted {
 		if err := m.executeRegistrationEngine(ctx, req, reg, table, regS3, basePrefix, objs); err != nil {
 			return RunResult{}, err
@@ -623,6 +618,11 @@ func (m *Manager) executeRegistrationEngine(ctx context.Context, req RunRequest,
 		if got := strings.TrimSuffix(strings.TrimSpace(tbl.Location()), "/"); got != "" && got != expectedLocation {
 			return fmt.Errorf("iceberg table %s location %q does not match dataset location %q; ice insert requires parquet files under the table location", table, got, expectedLocation)
 		}
+		if !req.CatalogAlreadyCommitted {
+			if err := req.BeforeExternalCommit(); err != nil {
+				return err
+			}
+		}
 
 		if isFullRefresh && tbl.CurrentSnapshot() != nil {
 			// Full Refresh: drop and recreate the table so that the subsequent
@@ -937,6 +937,17 @@ func runRESTGoRegister(ctx context.Context, log *slog.Logger, req RunRequest, re
 	tbl, err := prepareRESTGoTable(ctx, log, req, reg, table, regS3, basePrefix)
 	if err != nil {
 		return err
+	}
+	// Loading and validating schema must happen before durable external-commit
+	// state changes. A deterministic incompatibility must never enter catalog
+	// reconciliation.
+	if !req.CatalogAlreadyCommitted {
+		if req.BeforeExternalCommit == nil {
+			return failure.NewFailure(failure.FailureConfigurationUnavailable, false, true, fmt.Errorf("durable external-commit boundary is required"))
+		}
+		if err := req.BeforeExternalCommit(); err != nil {
+			return err
+		}
 	}
 
 	newFiles := make([]string, 0, len(objs))

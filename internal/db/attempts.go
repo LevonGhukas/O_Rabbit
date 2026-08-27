@@ -234,7 +234,9 @@ func (s *Store) ExpireTaskAttempts(ctx context.Context, now time.Time, policy Le
 		}
 		rows.Close()
 		for _, x := range items {
-			res, err := tx.ExecContext(ctx, `UPDATE task_attempts SET status='EXPIRED',finished_at=?,failure_class='LEASE_EXPIRED',failure_message='lease expired',updated_at=? WHERE id=? AND status='ACTIVE'`, nowS, nowS, x.id)
+			// Candidate scan is a snapshot. Recheck deadline while updating: a
+			// current worker may have renewed after selection but before cleanup.
+			res, err := tx.ExecContext(ctx, `UPDATE task_attempts SET status='EXPIRED',finished_at=?,failure_class='LEASE_EXPIRED',failure_message='lease expired',updated_at=? WHERE id=? AND status='ACTIVE' AND julianday(lease_deadline)<=julianday(?)`, nowS, nowS, x.id, nowS)
 			if err != nil {
 				return err
 			}

@@ -223,6 +223,27 @@ func TestRenewalExpirationRaceHasOneWinner(t *testing.T) {
 	}
 }
 
+func TestExpiryDoesNotRevokeRenewedCurrentAttempt(t *testing.T) {
+	st := openTestStore(t)
+	createLeaseTestTask(t, st, "renewed-not-expired")
+	ctx := context.Background()
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	p := LeasePolicy{Duration: 10 * time.Second, MaxAttempts: 2, BackoffBase: time.Second, BackoffMax: time.Second}
+	a, ok, err := st.AssignNextPendingTaskWithLease(ctx, "boot", "worker", t0, p, fixedGenerator("attempt"), fixedGenerator("token"))
+	if err != nil || !ok {
+		t.Fatalf("assign ok=%v err=%v", ok, err)
+	}
+	if _, err := st.RenewTaskLease(ctx, "boot", a.ID, a.AttemptID, a.FencingToken, "worker", t0.Add(9*time.Second), p.Duration); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := st.ExpireTaskAttempts(ctx, t0.Add(10*time.Second), p); err != nil || n != 0 {
+		t.Fatalf("expiry revoked renewed attempt n=%d err=%v", n, err)
+	}
+	if err := st.UpdateTaskProgressFencedAt(ctx, "boot", a.ID, a.AttemptID, a.FencingToken, "worker", 1, 1, 1, t0.Add(10*time.Second)); err != nil {
+		t.Fatalf("current renewed attempt lost ownership: %v", err)
+	}
+}
+
 func TestRestartPreservesValidLeaseThenRequeuesExpiredAttempt(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "restart.sqlite")
 	ctx := context.Background()
