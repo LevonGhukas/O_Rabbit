@@ -425,6 +425,13 @@ func (w *errorWrappedDocumentIterator) Err() error {
 func (w *errorWrappedDocumentIterator) Close() error {
 	return ClassifyConnectorError(w.inner.Close())
 }
+
+func (w *errorWrappedDocumentIterator) FieldOrder() []string {
+	if it, ok := w.inner.(OrderedDocumentIterator); ok {
+		return it.FieldOrder()
+	}
+	return nil
+}
 func OpenIntRangeReader(ctx context.Context, engine, dsn string) (TableReader, error) {
 	return OpenCursorReader(ctx, engine, dsn)
 }

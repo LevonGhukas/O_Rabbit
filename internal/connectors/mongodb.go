@@ -31,6 +31,15 @@ type DocumentIterator interface {
 	Err() error
 }
 
+// OrderedDocumentIterator optionally exposes an authoritative field order from
+// a tabular document source, such as a CSV header row or Excel worksheet.
+// Document values remain maps; consumers use this only when constructing a
+// schema so map iteration cannot affect column order.
+type OrderedDocumentIterator interface {
+	DocumentIterator
+	FieldOrder() []string
+}
+
 type DocumentReader interface {
 	Close() error
 	DescribeCollection(ctx context.Context, collection string) ([]DocumentField, error)
