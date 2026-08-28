@@ -164,7 +164,9 @@ func PlanForTargetType(name, targetType string) ColumnPlan {
 		inner := strings.TrimSuffix(strings.TrimPrefix(upper, "ARRAY("), ")")
 		innerPlan := PlanForTargetType("item", inner)
 		return planList(name, innerPlan)
-	case upper == "BINARY" || upper == "BYTEA" || upper == "BLOB":
+	case upper == "STRING" || upper == "TEXT" || upper == "VARCHAR" || upper == "NVARCHAR" || upper == "CHAR" || upper == "NCHAR" || upper == "UUID" || upper == "UNIQUEIDENTIFIER" || upper == "XML" || upper == "JSON":
+		return planString(name)
+	case upper == "BINARY" || upper == "BYTEA" || upper == "BLOB" || upper == "VARBINARY" || upper == "IMAGE" || upper == "ROWVERSION":
 		return planBinary(name)
 	default:
 		return planGenericSQLColumn(name, upper, p, s, hasDec)
