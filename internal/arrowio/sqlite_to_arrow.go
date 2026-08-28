@@ -47,9 +47,9 @@ func planGenericSQLColumn(name, dbType string, precision, scale int64, hasDecima
 	case clean == "BIT" || clean == "BOOL" || clean == "BOOLEAN":
 		return planBool(name)
 
-	case clean == "FLOAT" || clean == "REAL":
+	case clean == "REAL" || clean == "FLOAT4" || clean == "FLOAT24" || (clean == "FLOAT" && hasDecimal && precision > 0 && precision <= 24):
 		return planFloat32(name)
-	case strings.Contains(clean, "DOUBLE") || clean == "FLOAT8":
+	case clean == "FLOAT" || clean == "FLOAT53" || clean == "FLOAT8" || strings.Contains(clean, "DOUBLE"):
 		return planFloat64(name)
 
 	case clean == "NUMBER" || clean == "NUMERIC" || strings.Contains(clean, "DECIMAL") || clean == "MONEY" || clean == "SMALLMONEY":
