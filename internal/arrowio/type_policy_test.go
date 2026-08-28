@@ -80,3 +80,25 @@ func TestSQLPlansAttachTypePolicyWithoutChangingArrowType(t *testing.T) {
 		})
 	}
 }
+
+func TestMappingDiagnosticsExposePolicyWithoutRowValues(t *testing.T) {
+	plans := []ColumnPlan{
+		PlanForSQLColumn("postgres", "extension_value", "my_extension", 0, 0, false),
+		PlanForSQLColumn("mysql", "amount", "DECIMAL(39,10)", 0, 0, false),
+		PlanForSQLColumn("mysql", "description", "VARCHAR(255)", 0, 0, false),
+		PlanForSQLColumn("mariadb", "label", "VARCHAR(255)", 0, 0, false),
+	}
+
+	diagnostics := MappingDiagnostics(plans)
+	require.Len(t, diagnostics, 4)
+	require.Equal(t, "extension_value", diagnostics[0].ColumnName)
+	require.Equal(t, MappingFallback, diagnostics[0].MappingKind)
+	require.Equal(t, "postgres", diagnostics[0].SourceEngine)
+	require.Equal(t, genericTextFallbackCodec, diagnostics[0].FallbackCodecName)
+	require.Equal(t, 1, diagnostics[0].FallbackCodecVersion)
+	require.Equal(t, MappingFallback, diagnostics[1].MappingKind)
+	require.Equal(t, canonicalDecimalTextFallbackCodec, diagnostics[1].FallbackCodecName)
+	require.Equal(t, MappingNative, diagnostics[2].MappingKind)
+	require.Empty(t, diagnostics[2].FallbackCodecName)
+	require.Equal(t, "mariadb", diagnostics[3].SourceEngine)
+}

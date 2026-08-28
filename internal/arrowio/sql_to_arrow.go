@@ -113,9 +113,16 @@ func parseFloat64Text(raw string) (float64, bool) {
 	return f, true
 }
 
-func parseTruthyText(raw string) bool {
+func parseBooleanText(raw string) (bool, bool) {
 	s := strings.TrimSpace(raw)
-	return s == "1" || strings.EqualFold(s, "true") || strings.EqualFold(s, "t") || strings.EqualFold(s, "yes") || strings.EqualFold(s, "y")
+	switch {
+	case s == "1" || strings.EqualFold(s, "true") || strings.EqualFold(s, "t") || strings.EqualFold(s, "yes") || strings.EqualFold(s, "y"):
+		return true, true
+	case s == "0" || strings.EqualFold(s, "false") || strings.EqualFold(s, "f") || strings.EqualFold(s, "no") || strings.EqualFold(s, "n"):
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func asFloat64(v any) (float64, bool) {
@@ -158,35 +165,60 @@ func asBool(v any) (bool, bool) {
 	case bool:
 		return x, true
 	case int64:
-		return x != 0, true
+		return booleanFromInt64(x)
 	case int32:
-		return x != 0, true
+		return booleanFromInt64(int64(x))
 	case int16:
-		return x != 0, true
+		return booleanFromInt64(int64(x))
 	case int8:
-		return x != 0, true
+		return booleanFromInt64(int64(x))
 	case int:
-		return x != 0, true
+		return booleanFromInt64(int64(x))
 	case uint64:
-		return x != 0, true
+		return booleanFromUint64(x)
 	case uint32:
-		return x != 0, true
+		return booleanFromUint64(uint64(x))
 	case uint16:
-		return x != 0, true
+		return booleanFromUint64(uint64(x))
 	case uint8:
-		return x != 0, true
+		return booleanFromUint64(uint64(x))
 	case uint:
-		return x != 0, true
+		return booleanFromUint64(uint64(x))
 	case []byte:
 		if len(x) == 1 {
-			return x[0] != 0, true
+			if x[0] == 0 {
+				return false, true
+			}
+			if x[0] == 1 {
+				return true, true
+			}
 		}
-		return parseTruthyText(string(x)), true
+		return parseBooleanText(string(x))
 	case string:
-		return parseTruthyText(x), true
+		return parseBooleanText(x)
 	default:
 		return false, false
 	}
+}
+
+func booleanFromInt64(v int64) (bool, bool) {
+	if v == 0 {
+		return false, true
+	}
+	if v == 1 {
+		return true, true
+	}
+	return false, false
+}
+
+func booleanFromUint64(v uint64) (bool, bool) {
+	if v == 0 {
+		return false, true
+	}
+	if v == 1 {
+		return true, true
+	}
+	return false, false
 }
 
 func toInt64Checked(v any) (int64, string) {
@@ -272,13 +304,6 @@ func toUint64Checked(v any) (uint64, string) {
 		}
 		return uint64(x), ""
 	case []byte:
-		if len(x) == 8 {
-			var u uint64
-			for _, b := range x {
-				u = (u << 8) | uint64(b)
-			}
-			return u, ""
-		}
 		i, err := strconv.ParseUint(strings.TrimSpace(string(x)), 10, 64)
 		if err != nil {
 			if strings.HasPrefix(strings.TrimSpace(string(x)), "-") {
@@ -488,9 +513,15 @@ func PlansFromSQLEngineWithOverrides(engine string, cols []string, colTypes []*s
 	for i, f := range fields {
 		if targetTypeStr, ok := targetTypes[f.Name]; ok && strings.TrimSpace(targetTypeStr) != "" {
 			tStr := strings.TrimSpace(targetTypeStr)
-			nullable := strings.HasPrefix(strings.ToLower(tStr), "nullable(")
+			nullable := f.Nullable
+			if strings.HasPrefix(strings.ToLower(tStr), "nullable(") {
+				nullable = true
+			}
 
 			newPlan := PlanForTargetType(f.Name, tStr)
+			// An explicit target type changes execution representation, not the
+			// source policy or its source-nullability metadata.
+			newPlan.Policy = plans[i].Policy
 			plans[i] = newPlan
 			newFields[i] = arrow.Field{Name: f.Name, Type: newPlan.DataType, Nullable: nullable}
 		}

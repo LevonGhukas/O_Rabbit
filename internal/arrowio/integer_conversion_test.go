@@ -99,15 +99,17 @@ func TestCheckedUInt64Boundaries(t *testing.T) {
 	require.NoError(t, plan.Append(builder, ^uint64(0)))
 	require.NoError(t, plan.Append(builder, "18446744073709551615"))
 	require.NoError(t, plan.Append(builder, []byte("18446744073709551615")))
+	require.NoError(t, plan.Append(builder, []byte("12345678")))
 	requireIntegerConversionError(t, plan.Append(builder, int64(-1)), "UInt64", "negative value")
 	requireIntegerConversionError(t, plan.Append(builder, "18446744073709551616"), "UInt64", "overflow")
 
 	values := builder.NewArray().(*array.Uint64)
 	defer values.Release()
-	require.Equal(t, 4, values.Len())
+	require.Equal(t, 5, values.Len())
 	require.Equal(t, ^uint64(0), values.Value(1))
 	require.Equal(t, ^uint64(0), values.Value(2))
 	require.Equal(t, ^uint64(0), values.Value(3))
+	require.Equal(t, uint64(12345678), values.Value(4))
 }
 
 func TestSQLColumnPlanIntegerErrorPropagation(t *testing.T) {

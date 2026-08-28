@@ -6,6 +6,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/stretchr/testify/require"
 )
 
 func buildFloat64Array(t *testing.T, vals ...any) (*array.Float64, []error) {
@@ -85,7 +86,6 @@ func TestPlanBoolAppendConversions(t *testing.T) {
 		true,
 		int64(1),
 		int32(0),
-		int(5),
 		"1",
 		"true",
 		"false",
@@ -99,7 +99,7 @@ func TestPlanBoolAppendConversions(t *testing.T) {
 		}
 	}
 
-	want := []bool{true, true, false, true, true, true, false, true, false}
+	want := []bool{true, true, false, true, true, false, true, false}
 	for i, v := range want {
 		if arr.IsNull(i) {
 			t.Fatalf("value %d unexpectedly null", i)
@@ -111,9 +111,11 @@ func TestPlanBoolAppendConversions(t *testing.T) {
 }
 
 func TestPlanBoolAppendUnsupportedType(t *testing.T) {
-	_, errs := buildBoolArray(t, 1.5)
-	if errs[0] == nil {
-		t.Fatal("expected unsupported type error")
+	_, errs := buildBoolArray(t, 1.5, int(5), "not-a-bool")
+	for _, err := range errs {
+		var conversionErr *ScalarConversionError
+		require.ErrorAs(t, err, &conversionErr)
+		require.Equal(t, "Boolean", conversionErr.Target)
 	}
 }
 

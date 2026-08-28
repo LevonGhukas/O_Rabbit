@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/big"
 	"reflect"
 	"regexp"
@@ -430,11 +431,13 @@ func planFloat32(name string) ColumnPlan {
 				return nil
 			}
 			if f, ok := asFloat64(v); ok {
+				if !math.IsInf(f, 0) && (f > math.MaxFloat32 || f < -math.MaxFloat32) {
+					return &ScalarConversionError{Target: "Float32", InputType: fmt.Sprintf("%T", v), Reason: "overflow"}
+				}
 				bb.Append(float32(f))
 				return nil
 			}
-			bb.AppendNull()
-			return nil
+			return &ScalarConversionError{Target: "Float32", InputType: fmt.Sprintf("%T", v), Reason: "invalid float representation"}
 		},
 	}
 }
@@ -455,7 +458,7 @@ func planFloat64(name string) ColumnPlan {
 				bb.Append(f)
 				return nil
 			}
-			return fmt.Errorf("float64 append: unsupported %T (%v)", v, v)
+			return &ScalarConversionError{Target: "Float64", InputType: fmt.Sprintf("%T", v), Reason: "invalid float representation"}
 		},
 	}
 }
@@ -476,7 +479,7 @@ func planBool(name string) ColumnPlan {
 				bb.Append(parsed)
 				return nil
 			}
-			return fmt.Errorf("bool append: unsupported %T (%v)", v, v)
+			return &ScalarConversionError{Target: "Boolean", InputType: fmt.Sprintf("%T", v), Reason: "invalid boolean representation"}
 		},
 	}
 }
@@ -587,10 +590,9 @@ func planDecimal128(name string, precision, scale int32) ColumnPlan {
 				bb.AppendNull()
 				return nil
 			}
-			num, ok := asDecimal128(v, precision, scale)
-			if !ok {
-				bb.AppendNull()
-				return nil
+			num, reason := legacyDecimal128(v, precision, scale)
+			if reason != "" {
+				return &DecimalConversionError{Target: fmt.Sprintf("Decimal128(%d,%d)", precision, scale), InputType: fmt.Sprintf("%T", v), Reason: reason}
 			}
 			bb.Append(num)
 			return nil
@@ -677,6 +679,18 @@ type BinaryConversionError struct {
 	Reason    string
 }
 
+// ScalarConversionError reports a non-null scalar value that cannot be
+// represented by a selected shared Arrow scalar plan.
+type ScalarConversionError struct {
+	Target    string
+	InputType string
+	Reason    string
+}
+
+func (e *ScalarConversionError) Error() string {
+	return fmt.Sprintf("%s conversion from %s failed: %s", e.Target, e.InputType, e.Reason)
+}
+
 func (e *BinaryConversionError) Error() string {
 	return fmt.Sprintf("%s conversion from %s failed: %s", e.Target, e.InputType, e.Reason)
 }
@@ -701,7 +715,10 @@ func planString(name string) ColumnPlan {
 				bb.AppendNull()
 				return nil
 			}
-			s := asSafeString(v)
+			s, reason := asSafeString(v)
+			if reason != "" {
+				return &ScalarConversionError{Target: "String", InputType: fmt.Sprintf("%T", v), Reason: reason}
+			}
 			bb.Append(s)
 			return nil
 		},
@@ -748,8 +765,7 @@ func planList(name string, itemPlan ColumnPlan) ColumnPlan {
 
 			items, ok := extractSliceItems(v)
 			if !ok {
-				lb.AppendNull()
-				return nil
+				return &ScalarConversionError{Target: "List", InputType: fmt.Sprintf("%T", v), Reason: "unsupported list representation"}
 			}
 
 			lb.Append(true)
@@ -774,34 +790,53 @@ func planList(name string, itemPlan ColumnPlan) ColumnPlan {
 // Conversion Helpers
 // ---------------------------------------------------------------------------
 
-func asSafeString(v any) string {
+func asSafeString(v any) (string, string) {
 	if v == nil {
-		return ""
+		return "", ""
 	}
 	switch x := v.(type) {
 	case string:
-		return x
+		return x, ""
 	case []byte:
 		// Check for 16-byte UUID / GUID format
 		if len(x) == 16 {
-			return formatCanonicalUUID(x)
+			return formatCanonicalUUID(x), ""
 		}
-		return string(x)
+		return string(x), ""
 	case [16]byte:
-		return formatCanonicalUUID(x[:])
+		return formatCanonicalUUID(x[:]), ""
 	case time.Time:
-		return x.UTC().Format(time.RFC3339Nano)
+		return x.UTC().Format(time.RFC3339Nano), ""
 	case fmt.Stringer:
-		return x.String()
-	default:
-		rv := reflect.ValueOf(v)
-		if rv.Kind() == reflect.Map || rv.Kind() == reflect.Slice || rv.Kind() == reflect.Struct {
-			if jsonBytes, err := json.Marshal(v); err == nil {
-				return string(jsonBytes)
-			}
-		}
-		return fmt.Sprint(v)
+		return x.String(), ""
+	case bool:
+		return strconv.FormatBool(x), ""
+	case int:
+		return strconv.FormatInt(int64(x), 10), ""
+	case int8:
+		return strconv.FormatInt(int64(x), 10), ""
+	case int16:
+		return strconv.FormatInt(int64(x), 10), ""
+	case int32:
+		return strconv.FormatInt(int64(x), 10), ""
+	case int64:
+		return strconv.FormatInt(x, 10), ""
+	case uint:
+		return strconv.FormatUint(uint64(x), 10), ""
+	case uint8:
+		return strconv.FormatUint(uint64(x), 10), ""
+	case uint16:
+		return strconv.FormatUint(uint64(x), 10), ""
+	case uint32:
+		return strconv.FormatUint(uint64(x), 10), ""
+	case uint64:
+		return strconv.FormatUint(x, 10), ""
+	case float32:
+		return strconv.FormatFloat(float64(x), 'g', -1, 32), ""
+	case float64:
+		return strconv.FormatFloat(x, 'g', -1, 64), ""
 	}
+	return "", "unsupported string representation"
 }
 
 func formatCanonicalUUID(b []byte) string {
@@ -827,6 +862,19 @@ func cleanDecimalString(raw string) string {
 	s = strings.ReplaceAll(s, "¥", "")
 	s = strings.ReplaceAll(s, ",", "")
 	return strings.TrimSpace(s)
+}
+
+// legacyDecimal128 keeps pre-Phase-1B plans (for example MONEY and explicit
+// target overrides) exact without changing their selected Arrow type.
+func legacyDecimal128(v any, precision, scale int32) (decimal128.Num, string) {
+	switch x := v.(type) {
+	case string:
+		return decimal128FromExactText(cleanDecimalString(x), precision, scale)
+	case []byte:
+		return decimal128FromExactText(cleanDecimalString(string(x)), precision, scale)
+	default:
+		return exactDecimal128(v, precision, scale)
+	}
 }
 
 func asDecimal128(v any, prec, scale int32) (decimal128.Num, bool) {
