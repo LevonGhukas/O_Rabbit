@@ -339,6 +339,16 @@ func toUint64Checked(v any) (uint64, string) {
 		}
 		return uint64(x), ""
 	case []byte:
+<<<<<<< HEAD
+=======
+		if len(x) == 8 {
+			var u uint64
+			for _, b := range x {
+				u = (u << 8) | uint64(b)
+			}
+			return u, ""
+		}
+>>>>>>> f6975ab (fix(type-mapping): prevent integer overflow and wrapping)
 		i, err := strconv.ParseUint(strings.TrimSpace(string(x)), 10, 64)
 		if err != nil {
 			if strings.HasPrefix(strings.TrimSpace(string(x)), "-") {
