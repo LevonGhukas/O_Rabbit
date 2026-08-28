@@ -75,13 +75,13 @@ func TestMySQLUint64MaxRoundtrip(t *testing.T) {
 	require.Equal(t, uint64(18446744073709551615), arr.Value(1))
 }
 
-func TestMySQLTime64Durations(t *testing.T) {
+func TestMySQLTime64RejectsDurationOutsideTimeOfDay(t *testing.T) {
 	plan := PlanForSQLColumn("mysql", "col", "TIME(6)", 0, 0, false)
 	builder := plan.Builder(memory.DefaultAllocator)
 	defer builder.Release()
 
 	err := plan.Append(builder, "123:45:56.123456")
-	require.NoError(t, err)
+	requireTemporalConversionError(t, err, "Time64[us]", "outside time-of-day range")
 
 	err = plan.Append(builder, "00:00:00.000000")
 	require.NoError(t, err)
@@ -89,10 +89,8 @@ func TestMySQLTime64Durations(t *testing.T) {
 	arr := builder.NewArray().(*array.Time64)
 	defer arr.Release()
 
-	require.Equal(t, 2, arr.Len())
-	// 123h 45m 56s 123456us = 123*3600e6 + 45*60e6 + 56e6 + 123456 = 445556123456us
-	require.Equal(t, arrow.Time64(445556123456), arr.Value(0))
-	require.Equal(t, arrow.Time64(0), arr.Value(1))
+	require.Equal(t, 1, arr.Len())
+	require.Equal(t, arrow.Time64(0), arr.Value(0))
 }
 
 func TestMySQLDate32Preservation(t *testing.T) {
@@ -113,5 +111,5 @@ func TestMySQLDate32Preservation(t *testing.T) {
 
 	require.Equal(t, 2, arr.Len())
 	require.Equal(t, "1960-02-29", arr.Value(0).FormattedString())
-	require.Equal(t, "2300-01-01", arr.Value(1).FormattedString())
+	require.Equal(t, "9999-12-31", arr.Value(1).FormattedString())
 }

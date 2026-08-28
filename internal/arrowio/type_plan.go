@@ -482,13 +482,9 @@ func planBool(name string) ColumnPlan {
 }
 
 const (
-	MinClickHouseDate32 = arrow.Date32(-25567) // 1900-01-01
-	MaxClickHouseDate32 = arrow.Date32(120530) // 2299-12-31
-)
-
-var (
-	MinClickHouseTimestamp = time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)
-	MaxClickHouseTimestamp = time.Date(2299, 12, 31, 23, 59, 59, 999999000, time.UTC)
+	minArrowDate32Days = int64(-1 << 31)
+	maxArrowDate32Days = int64(1<<31 - 1)
+	dayMicroseconds    = int64(24 * 60 * 60 * 1_000_000)
 )
 
 func planDate32(name string) ColumnPlan {
@@ -503,15 +499,9 @@ func planDate32(name string) ColumnPlan {
 				bb.AppendNull()
 				return nil
 			}
-			d, ok := asDate32(v)
-			if !ok {
-				bb.AppendNull()
-				return nil
-			}
-			if d < MinClickHouseDate32 {
-				d = MinClickHouseDate32
-			} else if d > MaxClickHouseDate32 {
-				d = MaxClickHouseDate32
+			d, reason := asDate32(v)
+			if reason != "" {
+				return &TemporalConversionError{Target: "Date32", InputType: fmt.Sprintf("%T", v), Reason: reason}
 			}
 			bb.Append(d)
 			return nil
@@ -532,10 +522,12 @@ func planTime64(name string) ColumnPlan {
 				bb.AppendNull()
 				return nil
 			}
-			tMicros, ok := asTime64Microseconds(v)
-			if !ok {
-				bb.AppendNull()
-				return nil
+			tMicros, reason := asTime64Microseconds(v)
+			if reason != "" {
+				return &TemporalConversionError{Target: "Time64[us]", InputType: fmt.Sprintf("%T", v), Reason: reason}
+			}
+			if tMicros < 0 || tMicros >= dayMicroseconds {
+				return &TemporalConversionError{Target: "Time64[us]", InputType: fmt.Sprintf("%T", v), Reason: "outside time-of-day range"}
 			}
 			bb.Append(arrow.Time64(tMicros))
 			return nil
@@ -558,18 +550,16 @@ func planTimestampUs(name string, timeZone string) ColumnPlan {
 			}
 			t, ok := asTimestamp(v)
 			if !ok {
-				bb.AppendNull()
-				return nil
+				return &TemporalConversionError{Target: "Timestamp[us]", InputType: fmt.Sprintf("%T", v), Reason: "unsupported timestamp representation"}
 			}
 			if timeZone == "UTC" {
 				t = t.UTC()
 			}
-			if t.Before(MinClickHouseTimestamp) {
-				t = MinClickHouseTimestamp
-			} else if t.After(MaxClickHouseTimestamp) {
-				t = MaxClickHouseTimestamp
+			micros, reason := timestampMicroseconds(t)
+			if reason != "" {
+				return &TemporalConversionError{Target: "Timestamp[us]", InputType: fmt.Sprintf("%T", v), Reason: reason}
 			}
-			bb.Append(arrow.Timestamp(t.UnixMicro()))
+			bb.Append(arrow.Timestamp(micros))
 			return nil
 		},
 	}
@@ -669,6 +659,18 @@ type DecimalConversionError struct {
 	Target    string
 	InputType string
 	Reason    string
+}
+
+// TemporalConversionError reports a non-null temporal value that cannot be
+// represented exactly by the selected Arrow temporal type.
+type TemporalConversionError struct {
+	Target    string
+	InputType string
+	Reason    string
+}
+
+func (e *TemporalConversionError) Error() string {
+	return fmt.Sprintf("%s conversion from %s failed: %s", e.Target, e.InputType, e.Reason)
 }
 
 func (e *DecimalConversionError) Error() string {
@@ -994,47 +996,66 @@ func decimalDigits(text string) bool {
 	return true
 }
 
-func asDate32(v any) (arrow.Date32, bool) {
+func asDate32(v any) (arrow.Date32, string) {
 	switch x := v.(type) {
 	case time.Time:
 		if x.IsZero() {
-			return 0, false
+			return 0, "invalid date value"
 		}
-		return arrow.Date32FromTime(x.UTC()), true
+		return date32FromCalendarDate(x)
 	case arrow.Date32:
-		return x, true
+		return x, ""
 	case string:
 		raw := strings.TrimSpace(x)
 		if raw == "" || raw == "0000-00-00" || raw == "0000-00-00 00:00:00" {
-			return 0, false
+			return 0, "invalid date value"
 		}
 		if t, err := time.Parse("2006-01-02", raw); err == nil {
-			return arrow.Date32FromTime(t), true
+			return date32FromCalendarDate(t)
 		}
 		if t, ok := parseTimestampValue(raw); ok {
-			return arrow.Date32FromTime(t), true
+			return date32FromCalendarDate(t)
 		}
 	case []byte:
 		return asDate32(string(x))
 	case int64:
-		return arrow.Date32(x), true
+		if x < minArrowDate32Days || x > maxArrowDate32Days {
+			return 0, "outside Date32 range"
+		}
+		return arrow.Date32(x), ""
 	case int32:
-		return arrow.Date32(x), true
+		return arrow.Date32(x), ""
 	}
-	return 0, false
+	return 0, "unsupported date representation"
 }
 
-func asTime64Microseconds(v any) (int64, bool) {
+func date32FromCalendarDate(t time.Time) (arrow.Date32, string) {
+	year, month, day := t.Date()
+	calendarDate := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+	days := calendarDate.Unix() / (24 * 60 * 60)
+	if days < minArrowDate32Days || days > maxArrowDate32Days {
+		return 0, "outside Date32 range"
+	}
+	return arrow.Date32(days), ""
+}
+
+func asTime64Microseconds(v any) (int64, string) {
 	switch x := v.(type) {
 	case time.Time:
 		hour, min, sec := x.Clock()
+		if x.Nanosecond()%1_000 != 0 {
+			return 0, "sub-microsecond precision"
+		}
 		usec := int64(x.Nanosecond() / 1000)
 		total := int64(hour)*3600_000_000 + int64(min)*60_000_000 + int64(sec)*1_000_000 + usec
-		return total, true
+		return total, ""
 	case time.Duration:
-		return x.Microseconds(), true
+		if x%time.Microsecond != 0 {
+			return 0, "sub-microsecond precision"
+		}
+		return x.Microseconds(), ""
 	case int64:
-		return x, true
+		return x, ""
 	case string:
 		raw := strings.TrimSpace(x)
 		neg := false
@@ -1043,35 +1064,76 @@ func asTime64Microseconds(v any) (int64, bool) {
 			raw = strings.TrimPrefix(raw, "-")
 		}
 		parts := strings.Split(raw, ":")
-		if len(parts) >= 2 {
-			h, _ := strconv.ParseInt(parts[0], 10, 64)
-			m, _ := strconv.ParseInt(parts[1], 10, 64)
+		if len(parts) == 3 {
+			h, err := strconv.ParseInt(parts[0], 10, 64)
+			if err != nil {
+				return 0, "invalid time representation"
+			}
+			m, err := strconv.ParseInt(parts[1], 10, 64)
+			if err != nil {
+				return 0, "invalid time representation"
+			}
 			var s int64
 			var usec int64
-			if len(parts) >= 3 {
-				secParts := strings.Split(parts[2], ".")
-				s, _ = strconv.ParseInt(secParts[0], 10, 64)
-				if len(secParts) > 1 {
-					fracStr := secParts[1]
-					for len(fracStr) < 6 {
-						fracStr += "0"
-					}
-					if len(fracStr) > 6 {
-						fracStr = fracStr[:6]
-					}
-					usec, _ = strconv.ParseInt(fracStr, 10, 64)
+			secParts := strings.Split(parts[2], ".")
+			if len(secParts) > 2 {
+				return 0, "invalid time representation"
+			}
+			s, err = strconv.ParseInt(secParts[0], 10, 64)
+			if err != nil {
+				return 0, "invalid time representation"
+			}
+			if len(secParts) == 2 {
+				fracStr := secParts[1]
+				if !decimalDigits(fracStr) {
+					return 0, "invalid time representation"
 				}
+				if len(fracStr) > 6 && strings.Trim(fracStr[6:], "0") != "" {
+					return 0, "sub-microsecond precision"
+				}
+				fracStr = fracStr[:min(len(fracStr), 6)]
+				for len(fracStr) < 6 {
+					fracStr += "0"
+				}
+				usec, err = strconv.ParseInt(fracStr, 10, 64)
+				if err != nil {
+					return 0, "invalid time representation"
+				}
+			}
+			if h < 0 || m < 0 || m >= 60 || s < 0 || s >= 60 {
+				return 0, "invalid time representation"
+			}
+			if h >= 24 {
+				return 0, "outside time-of-day range"
 			}
 			total := h*3600_000_000 + m*60_000_000 + s*1_000_000 + usec
 			if neg {
 				total = -total
 			}
-			return total, true
+			return total, ""
 		}
 	case []byte:
 		return asTime64Microseconds(string(x))
 	}
-	return 0, false
+	return 0, "unsupported time representation"
+}
+
+func timestampMicroseconds(t time.Time) (int64, string) {
+	if t.Nanosecond()%1_000 != 0 {
+		return 0, "sub-microsecond precision"
+	}
+	seconds := t.Unix()
+	microseconds := int64(t.Nanosecond() / 1_000)
+	const minTimestampMicroseconds = int64(-1 << 63)
+	const maxTimestampMicroseconds = int64(1<<63 - 1)
+	if seconds < minTimestampMicroseconds/1_000_000 || seconds > maxTimestampMicroseconds/1_000_000 {
+		return 0, "outside Timestamp[us] range"
+	}
+	base := seconds * 1_000_000
+	if base > maxTimestampMicroseconds-microseconds {
+		return 0, "outside Timestamp[us] range"
+	}
+	return base + microseconds, ""
 }
 
 func asTimestamp(v any) (time.Time, bool) {
@@ -1085,12 +1147,6 @@ func asTimestamp(v any) (time.Time, bool) {
 		raw := strings.TrimSpace(x)
 		if raw == "" || raw == "0000-00-00" || raw == "0000-00-00 00:00:00" {
 			return time.Time{}, false
-		}
-		if strings.EqualFold(raw, "infinity") {
-			return MaxClickHouseTimestamp, true
-		}
-		if strings.EqualFold(raw, "-infinity") {
-			return MinClickHouseTimestamp, true
 		}
 		return parseTimestampValue(raw)
 	case []byte:

@@ -96,7 +96,7 @@ func TestMSSQLPre1970Dates(t *testing.T) {
 	require.Equal(t, "1969-12-31", arr.Value(0).FormattedString())
 	require.Equal(t, "1969-12-31", arr.Value(1).FormattedString())
 
-	// Test year 0001 date boundary clamping for ClickHouse Date32 range [-25567, 120530]
+	// Date32 preserves any value in Arrow's signed 32-bit day range.
 	builder2 := plan.Builder(memory.DefaultAllocator)
 	defer builder2.Release()
 
@@ -105,5 +105,5 @@ func TestMSSQLPre1970Dates(t *testing.T) {
 
 	arr2 := builder2.NewArray().(*array.Date32)
 	defer arr2.Release()
-	require.Equal(t, "1900-01-01", arr2.Value(0).FormattedString())
+	require.Equal(t, "0001-01-01", arr2.Value(0).FormattedString())
 }
