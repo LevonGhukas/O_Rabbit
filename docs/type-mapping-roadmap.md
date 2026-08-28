@@ -278,9 +278,27 @@ Mongo inference now observes every sampled BSON class per field, producing order
 
 The worker holds the inferred `MongoSchemaPlan` for the extraction and rejects late incompatible values or fields with `MongoSchemaViolationError`; it never mutates the file schema. Missing and explicit BSON null intentionally both become Arrow null, recorded as `missing_and_null_collapsed=true`. Auto-create and durable inference use the same deterministic inference function. Sampling remains bounded, so unseen later types fail explicitly rather than being coerced; schema evolution is deferred.
 
-### Phase 5 — Iceberg/ClickHouse matrix (P1)
+### Phase 5 — Arrow/Parquet/Iceberg/ClickHouse compatibility (P1) — 🚧 In Progress
 
-Automate end-to-end type/value compatibility for every canonical representation against supported Arrow/Iceberg/Altinity versions. Gate native mappings on this matrix.
+Fast matrix coverage now exercises the real `internal/parquetio.Writer` and an
+independent `pqarrow` read for every emitted canonical physical form, including
+UInt64 max, Decimal128 boundaries, temporal extremes, bytes, fallback text,
+and PostgreSQL primitive lists. It also exercises the production
+`icetable.ArrowSchemaToIcebergWithFreshIDs` path. The resulting matrix is in
+`docs/type-compatibility-matrix.md`.
+
+The first compatibility finding is blocking completion: Iceberg Go v0.5.0 maps
+all unsigned Arrow widths to signed Iceberg `int`/`long`; full UInt32 and
+UInt64 therefore cannot be considered lossless downstream. Iceberg REST table
+registration and Altinity DataLakeCatalog `DESCRIBE` plus value-query coverage
+still need to be run with the repository Docker setup before a documented,
+minimal fallback decision is made. Gate native mappings on that matrix.
+
+The isolated Phase 5 Docker stack now proves REST-Go registration and schema
+reload, but Altinity `25.8.9.20207.altinityantalya` rejects a DataLakeCatalog
+table as having an empty namespace before `DESCRIBE` or reads. The catalog
+namespace configuration must be corrected and the value matrix rerun before
+this phase can complete.
 
 ### Phase 6 — advanced and rare types (P2/P3)
 
