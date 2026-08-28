@@ -28,17 +28,17 @@ func TestMySQLTypeMapping(t *testing.T) {
 		{"SMALLINT", 0, 0, false, arrow.PrimitiveTypes.Int16},
 		{"TINYINT UNSIGNED", 0, 0, false, arrow.PrimitiveTypes.Uint8},
 		{"TINYINT", 0, 0, false, arrow.PrimitiveTypes.Int8},
-		{"TINYINT(1)", 0, 0, false, arrow.FixedWidthTypes.Boolean},
-		{"BIT(1)", 0, 0, false, arrow.FixedWidthTypes.Boolean},
-		{"BIT(64)", 0, 0, false, arrow.PrimitiveTypes.Uint64},
+		{"TINYINT(1)", 0, 0, false, arrow.PrimitiveTypes.Int8},
+		{"BIT(1)", 0, 0, false, arrow.BinaryTypes.String},
+		{"BIT(64)", 0, 0, false, arrow.BinaryTypes.String},
 		{"FLOAT", 0, 0, false, arrow.PrimitiveTypes.Float32},
 		{"DOUBLE", 0, 0, false, arrow.PrimitiveTypes.Float64},
 		{"DECIMAL(38,10)", 38, 10, true, &arrow.Decimal128Type{Precision: 38, Scale: 10}},
 		{"NUMERIC(18,4)", 18, 4, true, &arrow.Decimal128Type{Precision: 18, Scale: 4}},
 		{"DATE", 0, 0, false, arrow.PrimitiveTypes.Date32},
 		{"DATETIME", 0, 0, false, &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: ""}},
-		{"TIMESTAMP", 0, 0, false, &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}},
-		{"TIME", 0, 0, false, arrow.FixedWidthTypes.Time64us},
+		{"TIMESTAMP", 0, 0, false, &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: ""}},
+		{"TIME", 0, 0, false, arrow.BinaryTypes.String},
 		{"YEAR", 0, 0, false, arrow.PrimitiveTypes.Int16},
 		{"JSON", 0, 0, false, arrow.BinaryTypes.String},
 		{"VARCHAR(255)", 0, 0, false, arrow.BinaryTypes.String},
@@ -77,22 +77,73 @@ func TestMySQLUint64MaxRoundtrip(t *testing.T) {
 	require.Equal(t, uint64(18446744073709551615), arr.Value(1))
 }
 
-func TestMySQLTime64RejectsDurationOutsideTimeOfDay(t *testing.T) {
+func TestMySQLTimePreservesSignedDurationText(t *testing.T) {
 	plan := PlanForSQLColumn("mysql", "col", "TIME(6)", 0, 0, false)
 	builder := plan.Builder(memory.DefaultAllocator)
 	defer builder.Release()
 
-	err := plan.Append(builder, "123:45:56.123456")
-	requireTemporalConversionError(t, err, "Time64[us]", "outside time-of-day range")
-
-	err = plan.Append(builder, "00:00:00.000000")
+	err := plan.Append(builder, "-123:45:56.123456")
+	require.NoError(t, err)
+	err = plan.Append(builder, "838:59:59")
 	require.NoError(t, err)
 
-	arr := builder.NewArray().(*array.Time64)
+	arr := builder.NewArray().(*array.String)
 	defer arr.Release()
 
-	require.Equal(t, 1, arr.Len())
-	require.Equal(t, arrow.Time64(0), arr.Value(0))
+	require.Equal(t, 2, arr.Len())
+	require.Equal(t, "-123:45:56.123456", arr.Value(0))
+	require.Equal(t, "838:59:59", arr.Value(1))
+}
+
+func TestMySQLBitTextPreservesWidthAndLeadingZeroes(t *testing.T) {
+	plan := PlanForSQLColumn("mysql", "bits", "BIT(8)", 0, 0, false)
+	require.Equal(t, MappingFallback, plan.Policy.MappingKind)
+	require.Equal(t, mysqlBitTextCodec, plan.Policy.Fallback.Name)
+	require.True(t, plan.Policy.Metadata.BitWidthKnown)
+	require.Equal(t, int64(8), plan.Policy.Metadata.BitWidth)
+	builder := plan.Builder(memory.DefaultAllocator)
+	defer builder.Release()
+	require.NoError(t, plan.Append(builder, "00000001"))
+	require.NoError(t, plan.Append(builder, []byte{1}))
+	require.Error(t, plan.Append(builder, "1"))
+	arr := builder.NewArray().(*array.String)
+	defer arr.Release()
+	require.Equal(t, "00000001", arr.Value(0))
+	require.Equal(t, "00000001", arr.Value(1))
+}
+
+func TestMySQLSemanticFallbackPolicies(t *testing.T) {
+	for _, tt := range []struct{ typ, codec string }{
+		{"JSON", mysqlJSONTextCodec}, {"ENUM", mysqlEnumTextCodec}, {"SET", mysqlSetTextCodec}, {"POINT", mysqlGeometryBinaryCodec}, {"unrecognized_extension", mysqlExtensionTextCodec},
+	} {
+		t.Run(tt.typ, func(t *testing.T) {
+			plan := PlanForSQLColumn("mysql", "value", tt.typ, 0, 0, false)
+			require.Equal(t, MappingFallback, plan.Policy.MappingKind)
+			require.Equal(t, tt.codec, plan.Policy.Fallback.Name)
+		})
+	}
+}
+
+func TestMySQLJSONDoesNotRemarshalOrAcceptMalformedText(t *testing.T) {
+	plan := PlanForSQLColumn("mysql", "payload", "JSON", 0, 0, false)
+	builder := plan.Builder(memory.DefaultAllocator)
+	defer builder.Release()
+	value := []byte(`{"b":1,"a":2}`)
+	require.NoError(t, plan.Append(builder, value))
+	require.Error(t, plan.Append(builder, `{`))
+	arr := builder.NewArray().(*array.String)
+	defer arr.Release()
+	require.Equal(t, string(value), arr.Value(0))
+}
+
+func TestMariaDBKeepsSeparatePolicies(t *testing.T) {
+	jsonPlan := PlanForSQLColumn("mariadb", "payload", "JSON", 0, 0, false)
+	require.Equal(t, "mariadb", jsonPlan.Policy.SourceEngine)
+	require.Equal(t, mariadbJSONTextCodec, jsonPlan.Policy.Fallback.Name)
+	timePlan := PlanForSQLColumn("mariadb", "duration", "TIME", 0, 0, false)
+	require.Equal(t, mariadbTimeTextCodec, timePlan.Policy.Fallback.Name)
+	bitPlan := PlanForSQLColumn("mariadb", "bits", "BIT(64)", 0, 0, false)
+	require.Equal(t, mariadbBitTextCodec, bitPlan.Policy.Fallback.Name)
 }
 
 func TestMySQLDate32Preservation(t *testing.T) {

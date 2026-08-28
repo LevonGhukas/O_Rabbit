@@ -135,12 +135,12 @@ Store operational metadata first in the internal canonical schema. Mirror non-se
 
 | Source type/group | Current behavior | Target strategy and lossless fallback | Priority | Notes/tests |
 |---|---|---|---|---|
-| Signed/unsigned integer families | Maps by width/sign, including UInt64; narrow types can wrap. | Checked native widths. Validate UInt64 through Iceberg/ClickHouse; if not portable, canonical unsigned decimal text/Binary. | P0 | Each boundary and UInt64 max. |
-| `decimal`, `numeric`, `dec`, `fixed` | Decimal128 up to 38; invalid -> null. | Same exact decimal/fallback contract as PostgreSQL. | P0 | p/s limits and exact driver values. |
+| Signed/unsigned integer families | ✅ Checked native widths, including UInt64. | Preserve declared signedness; UInt64 downstream compatibility remains Phase 5. | P0 | Each boundary and UInt64 max. |
+| `decimal`, `numeric`, `dec`, `fixed` | ✅ Declared Decimal128 or canonical decimal fallback; invalid non-null conversion errors. | Same exact decimal/fallback contract as PostgreSQL. | P0 | p/s limits and exact driver values. |
 | `float`, `double` | Float32/64. | Preserve width; define special-value compatibility through Parquet/Iceberg/ClickHouse integration tests. | P1 | NaN/Inf/signed zero. |
 | `bit(n)`, boolean aliases | `BIT(1)` and `TINYINT(1)` become Bool; other bit values UInt64. | Preserve Boolean aliases only by declared semantic policy. Use exact fixed bit string codec for arbitrary `n`, especially n>64. | P1 | Leading zero and 65-bit values. |
 | char/varchar/text | String without charset/collation/fixed-width metadata. | Decode to UTF-8 only when source charset conversion is verified; otherwise byte-preserving fallback. Retain material collation/fixed padding metadata. | P2 | Non-UTF8 text and trailing spaces. |
-| binary/varbinary/blob | Binary plan but permits implicit textual bytes. | Raw bytes only; subtype-free binary requires no text conversion. | P0 | NUL/invalid UTF-8/large blobs. |
+| binary/varbinary/blob | ✅ Exact-byte Binary plan. | Raw bytes only; subtype-free binary requires no text conversion. | P0 | NUL/invalid UTF-8/large blobs. |
 | enum/set | String. | Enum canonical label plus type/labels metadata. `SET` canonical ordered label list or bitmask+labels metadata. | P1 | Empty and multi-label sets. |
 | date/datetime/timestamp/time/year | Date/timestamp-us/time64/int16; clamp and timezone/session assumptions remain. | Preserve date/range/fractional precision. Treat MySQL `TIME` as signed duration, not wall-clock time. Make TIMESTAMP session-timezone policy explicit. | P0 | Negative/838-hour TIME, zero-date policy, session zone. |
 | JSON | String. | Canonical JSON String with source type metadata; ensure it is not confused with arbitrary text. | P1 | Unicode and large documents. |
@@ -264,9 +264,13 @@ Shared SQL plans now return explicit errors for non-null conversion failures ins
 
 Phase 2C adds batched PostgreSQL catalog reads for unambiguous user-defined types. Phase 2D completes PostgreSQL coverage with named, exact fallbacks for every remaining advanced or unknown PostgreSQL type. It introduces no Arrow extension types, Iceberg changes, or ClickHouse changes. Phase 2B intentionally changes PostgreSQL `BIT(1)` from Boolean and `BIT(n)` from UInt64 to String, eliminating loss of bit-string identity, leading zeroes, and values wider than 64 bits. Arrays previously treated as List now use String fallback when their element type or explicit dimensionality cannot be represented exactly.
 
-### Phase 3 — MySQL and MariaDB core correctness (P0/P1)
+### Phase 3 — MySQL and MariaDB core correctness (P0/P1) — ✅ Completed
 
-Complete unsigned numerics/UInt64 verification, decimal, temporal, BIT, binary/blob, JSON, ENUM/SET, and a MariaDB-specific metadata normalizer. Add spatial and charset/collation handling next.
+MySQL and MariaDB now have separate planner entry points with shared MySQL-family rules. Declared signed/unsigned integer widths (including UInt64), FLOAT/DOUBLE, decimal aliases, date, datetime, timestamp, and YEAR use checked native renderers where exact. DATETIME/TIMESTAMP declarations above microsecond precision use named text fallbacks; TIMESTAMP policy records session-timezone-dependent instant semantics.
+
+BIT is now a width-preserving String fallback (`mysql-bit-text`/`mariadb-bit-text` v1), including `BIT(1)`; ordinary `TINYINT(1)` remains numeric because intent cannot be inferred reliably. MySQL-family TIME is now a signed-duration String fallback (`mysql-time-text`/`mariadb-time-text` v1), preserving negative values, hours above 24, and fractional seconds. JSON, ENUM, SET, geometry, and unknown extensions have engine-specific versioned fallback policies. Geometry remains byte-exact Binary; JSON is validated text without re-marshalling; ENUM/SET retain exact driver text. Native textual and binary families continue to use String and exact []byte Binary respectively.
+
+The current `database/sql.ColumnType` path supplies type name, decimal size, and nullability. The planner records discoverable declaration metadata (signedness, bit width, fixed length, temporal semantics) but does not issue per-column catalog queries. Charset/collation, enum/set labels, and geometry SRID are not exposed by that path and remain optional future connector enrichment rather than guessed metadata. MariaDB UUID and network fallbacks are selected only when those explicit type names are reported.
 
 ### Phase 4 — MongoDB deterministic handling (P0/P1)
 

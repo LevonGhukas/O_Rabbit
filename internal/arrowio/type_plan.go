@@ -58,8 +58,10 @@ func PlanForSQLColumn(engine, name, dbType string, precision, scale int64, hasDe
 
 	var plan ColumnPlan
 	switch normEngine {
-	case "mysql", "mariadb":
+	case "mysql":
 		plan = planMySQLColumn(name, upperType, precision, scale, hasDecimal)
+	case "mariadb":
+		plan = planMariaDBColumn(name, upperType, precision, scale, hasDecimal)
 	case "postgres", "postgresql", "pg":
 		plan = planPostgresColumn(name, upperType, precision, scale, hasDecimal)
 	case "mssql", "sqlserver", "ms-sql", "ms_sql":
@@ -87,6 +89,9 @@ func withSQLTypePolicy(plan ColumnPlan, engine, sourceType string, precision, sc
 	if plan.Policy != nil {
 		plan.Policy.SourceEngine = engine
 		plan.Policy.SourceType = strings.TrimSpace(sourceType)
+		if engine == "mysql" || engine == "mariadb" {
+			populateMySQLFamilyMetadata(&plan.Policy.Metadata, sourceType, engine)
+		}
 		return plan
 	}
 
@@ -117,9 +122,42 @@ func withSQLTypePolicy(plan ColumnPlan, engine, sourceType string, precision, sc
 	}
 	if engine == "postgres" {
 		populatePostgresTemporalMetadata(&policy.Metadata, sourceType)
+	} else if engine == "mysql" || engine == "mariadb" {
+		populateMySQLFamilyMetadata(&policy.Metadata, sourceType, engine)
 	}
 	plan.Policy = policy
 	return plan
+}
+
+func populateMySQLFamilyMetadata(metadata *SourceTypeMetadata, sourceType, engine string) {
+	base := strings.ToUpper(strings.TrimSpace(sourceType))
+	clean := mysqlBaseType(base)
+	metadata.UnsignedKnown = clean == "TINYINT" || clean == "SMALLINT" || clean == "MEDIUMINT" || clean == "INT" || clean == "INTEGER" || clean == "BIGINT"
+	metadata.Unsigned = strings.Contains(base, "UNSIGNED") || strings.Contains(base, "ZEROFILL")
+	if clean == "BIT" {
+		metadata.BitWidth, metadata.BitWidthKnown = mysqlTemporalPrecision(base), strings.Contains(base, "(")
+	}
+	if clean == "CHAR" || clean == "BINARY" {
+		if n := mysqlTemporalPrecision(base); n > 0 {
+			metadata.FixedLengthKnown, metadata.FixedLength = true, n
+		}
+	}
+	switch clean {
+	case "DATE":
+		metadata.TemporalUnit, metadata.TemporalSemantics = "day", "calendar-date"
+	case "DATETIME":
+		metadata.TemporalUnit, metadata.TemporalSemantics = "microsecond", "local-wall-clock"
+	case "TIMESTAMP":
+		metadata.TemporalUnit, metadata.TemporalSemantics = "microsecond", "instant-session-timezone-dependent"
+	case "TIME":
+		metadata.TemporalUnit, metadata.TemporalSemantics = "text", "signed-duration"
+	case "YEAR":
+		metadata.TemporalSemantics = "year-number"
+	}
+	if metadata.Properties == nil {
+		metadata.Properties = map[string]string{}
+	}
+	metadata.Properties[engine+".declared_type"] = strings.TrimSpace(sourceType)
 }
 
 func populatePostgresTemporalMetadata(metadata *SourceTypeMetadata, sourceType string) {
