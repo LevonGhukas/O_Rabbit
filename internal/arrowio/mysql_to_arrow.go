@@ -56,18 +56,7 @@ func planMySQLColumn(name, dbType string, precision, scale int64, hasDecimal boo
 
 	// 3. Exact Decimals
 	case clean == "DECIMAL" || clean == "NUMERIC" || clean == "DEC" || clean == "FIXED":
-		prec := int32(precision)
-		scaleVal := int32(scale)
-		if prec <= 0 || prec > 38 {
-			prec = 38
-		}
-		if scaleVal < 0 {
-			scaleVal = 0
-		}
-		if scaleVal > prec {
-			scaleVal = prec
-		}
-		return planDecimal128(name, prec, scaleVal)
+		return planDeclaredDecimal(name, precision, scale, hasDecimal)
 
 	// 4. Dates & Times
 	case clean == "DATE":

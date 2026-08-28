@@ -12,6 +12,11 @@ func planPostgresColumn(name, dbType string, precision, scale int64, hasDecimal 
 	if strings.HasSuffix(clean, "[]") {
 		elemType := strings.TrimSuffix(clean, "[]")
 		elemPlan := planPostgresColumn("item", elemType, precision, scale, hasDecimal)
+		if !hasDecimal && (elemType == "NUMERIC" || elemType == "DECIMAL") {
+			// PostgreSQL array semantics are deferred to Phase 2; retain the
+			// existing array element mapping in this focused scalar decimal change.
+			elemPlan = planDecimal128("item", 38, 10)
+		}
 		return planList(name, elemPlan)
 	}
 	if strings.HasPrefix(clean, "_") {
@@ -37,21 +42,7 @@ func planPostgresColumn(name, dbType string, precision, scale int64, hasDecimal 
 
 	// 4. Exact Decimals & Monetary
 	case "NUMERIC", "DECIMAL":
-		prec := int32(precision)
-		scaleVal := int32(scale)
-		if prec <= 0 || prec > 38 {
-			prec = 38
-		}
-		if !hasDecimal {
-			scaleVal = 10
-		}
-		if scaleVal < 0 {
-			scaleVal = 0
-		}
-		if scaleVal > prec {
-			scaleVal = prec
-		}
-		return planDecimal128(name, prec, scaleVal)
+		return planDeclaredDecimal(name, precision, scale, hasDecimal)
 
 	case "MONEY":
 		return planDecimal128(name, 19, 2)

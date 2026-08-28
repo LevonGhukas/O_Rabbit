@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -17,7 +18,7 @@ import (
 )
 
 var (
-	precScaleRe = regexp.MustCompile(`\((\d+)(?:,\s*(\d+))?\)`)
+	precScaleRe = regexp.MustCompile(`\((\d+)(?:,\s*(-?\d+))?\)`)
 )
 
 // dereferenceValue unpacks pointers and interfaces until a concrete value or nil is reached.
@@ -85,7 +86,10 @@ func withSQLTypePolicy(plan ColumnPlan, engine, sourceType string, precision, sc
 
 	kind := MappingNative
 	var fallback *FallbackCodec
-	if isStructuredSQLType(engine, sourceType) {
+	if isDecimalSQLType(engine, sourceType) && !decimal128DeclarationSupported(precision, scale, hasDecimal) {
+		kind = MappingFallback
+		fallback = &FallbackCodec{Name: canonicalDecimalTextFallbackCodec, Version: 1}
+	} else if isStructuredSQLType(engine, sourceType) {
 		kind = MappingStructured
 	} else if !isNativeSQLType(engine, sourceType) {
 		kind = MappingFallback
@@ -107,6 +111,22 @@ func withSQLTypePolicy(plan ColumnPlan, engine, sourceType string, precision, sc
 	}
 	plan.Policy = policy
 	return plan
+}
+
+func isDecimalSQLType(engine, sourceType string) bool {
+	base := strings.ToUpper(strings.TrimSpace(sourceType))
+	clean := strings.TrimSpace(strings.Split(base, "(")[0])
+	if engine == "postgres" {
+		return clean == "NUMERIC" || clean == "DECIMAL"
+	}
+	return clean == "DECIMAL" || clean == "NUMERIC" || clean == "DEC" || clean == "FIXED"
+}
+
+// decimal128DeclarationSupported is intentionally limited to Arrow's Decimal128
+// precision and scale multiplier range. Negative scales are representable by
+// Arrow Decimal128 when their absolute value is at most 38.
+func decimal128DeclarationSupported(precision, scale int64, hasDecimal bool) bool {
+	return hasDecimal && precision >= 1 && precision <= 38 && scale >= -38 && scale <= precision
 }
 
 func isStructuredSQLType(engine, sourceType string) bool {
@@ -588,6 +608,73 @@ func planDecimal128(name string, precision, scale int32) ColumnPlan {
 	}
 }
 
+func planDeclaredDecimal(name string, precision, scale int64, hasDecimal bool) ColumnPlan {
+	if !decimal128DeclarationSupported(precision, scale, hasDecimal) {
+		return planDecimalTextFallback(name)
+	}
+	return planExactDecimal128(name, int32(precision), int32(scale))
+}
+
+func planExactDecimal128(name string, precision, scale int32) ColumnPlan {
+	decType := &arrow.Decimal128Type{Precision: precision, Scale: scale}
+	return ColumnPlan{
+		Name:     name,
+		DataType: decType,
+		Builder:  func(mem memory.Allocator) array.Builder { return array.NewDecimal128Builder(mem, decType) },
+		Append: func(b array.Builder, v any) error {
+			bb := b.(*array.Decimal128Builder)
+			v = dereferenceValue(v)
+			if v == nil {
+				bb.AppendNull()
+				return nil
+			}
+			num, reason := exactDecimal128(v, precision, scale)
+			if reason != "" {
+				return &DecimalConversionError{Target: fmt.Sprintf("Decimal128(%d,%d)", precision, scale), InputType: fmt.Sprintf("%T", v), Reason: reason}
+			}
+			bb.Append(num)
+			return nil
+		},
+	}
+}
+
+func planDecimalTextFallback(name string) ColumnPlan {
+	return ColumnPlan{
+		Name:     name,
+		DataType: arrow.BinaryTypes.String,
+		Builder:  func(mem memory.Allocator) array.Builder { return array.NewStringBuilder(mem) },
+		Append: func(b array.Builder, v any) error {
+			bb := b.(*array.StringBuilder)
+			v = dereferenceValue(v)
+			if v == nil {
+				bb.AppendNull()
+				return nil
+			}
+			text, reason := decimalText(v, 0, false)
+			if reason != "" {
+				return &DecimalConversionError{Target: "decimal text fallback", InputType: fmt.Sprintf("%T", v), Reason: reason}
+			}
+			if _, _, _, reason := splitDecimalText(text); reason != "" {
+				return &DecimalConversionError{Target: "decimal text fallback", InputType: fmt.Sprintf("%T", v), Reason: reason}
+			}
+			bb.Append(text)
+			return nil
+		},
+	}
+}
+
+// DecimalConversionError reports a non-null decimal value that cannot be
+// represented by its already-selected Arrow decimal plan.
+type DecimalConversionError struct {
+	Target    string
+	InputType string
+	Reason    string
+}
+
+func (e *DecimalConversionError) Error() string {
+	return fmt.Sprintf("%s conversion from %s failed: %s", e.Target, e.InputType, e.Reason)
+}
+
 func planString(name string) ColumnPlan {
 	return ColumnPlan{
 		Name:     name,
@@ -772,6 +859,139 @@ func asDecimal128(v any, prec, scale int32) (decimal128.Num, bool) {
 		}
 	}
 	return decimal128.Num{}, false
+}
+
+func exactDecimal128(v any, precision, scale int32) (decimal128.Num, string) {
+	text, reason := decimalText(v, scale, true)
+	if reason != "" {
+		return decimal128.Num{}, reason
+	}
+	return decimal128FromExactText(text, precision, scale)
+}
+
+func decimalText(v any, scale int32, allowDecimal128 bool) (string, string) {
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x), ""
+	case []byte:
+		return strings.TrimSpace(string(x)), ""
+	case int:
+		return strconv.Itoa(x), ""
+	case int8:
+		return strconv.FormatInt(int64(x), 10), ""
+	case int16:
+		return strconv.FormatInt(int64(x), 10), ""
+	case int32:
+		return strconv.FormatInt(int64(x), 10), ""
+	case int64:
+		return strconv.FormatInt(x, 10), ""
+	case uint:
+		return strconv.FormatUint(uint64(x), 10), ""
+	case uint8:
+		return strconv.FormatUint(uint64(x), 10), ""
+	case uint16:
+		return strconv.FormatUint(uint64(x), 10), ""
+	case uint32:
+		return strconv.FormatUint(uint64(x), 10), ""
+	case uint64:
+		return strconv.FormatUint(x, 10), ""
+	case decimal128.Num:
+		if allowDecimal128 {
+			return x.ToString(scale), ""
+		}
+	}
+	return "", "unsupported decimal representation"
+}
+
+func decimal128FromExactText(text string, precision, scale int32) (decimal128.Num, string) {
+	negative, whole, fractional, reason := splitDecimalText(text)
+	if reason != "" {
+		return decimal128.Num{}, reason
+	}
+
+	var unscaledText string
+	if scale >= 0 {
+		if int32(len(fractional)) > scale {
+			extra := fractional[scale:]
+			if strings.Trim(extra, "0") != "" {
+				return decimal128.Num{}, "scale mismatch"
+			}
+			fractional = fractional[:scale]
+		}
+		unscaledText = whole + fractional + strings.Repeat("0", int(scale)-len(fractional))
+	} else {
+		if strings.Trim(fractional, "0") != "" {
+			return decimal128.Num{}, "scale mismatch"
+		}
+		unscaledText = whole
+	}
+
+	if unscaledText == "" {
+		unscaledText = "0"
+	}
+	unscaled := new(big.Int)
+	if _, ok := unscaled.SetString(unscaledText, 10); !ok {
+		return decimal128.Num{}, "invalid decimal representation"
+	}
+	if negative {
+		unscaled.Neg(unscaled)
+	}
+	if scale < 0 {
+		factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(-scale)), nil)
+		remainder := new(big.Int)
+		unscaled.QuoRem(unscaled, factor, remainder)
+		if remainder.Sign() != 0 {
+			return decimal128.Num{}, "scale mismatch"
+		}
+	}
+	if unscaled.BitLen() > 127 {
+		return decimal128.Num{}, "precision overflow"
+	}
+	num := decimal128.FromBigInt(unscaled)
+	if !num.FitsInPrecision(precision) {
+		return decimal128.Num{}, "precision overflow"
+	}
+	return num, ""
+}
+
+func splitDecimalText(text string) (negative bool, whole, fractional, reason string) {
+	if text == "" {
+		return false, "", "", "invalid decimal representation"
+	}
+	if text[0] == '+' || text[0] == '-' {
+		negative = text[0] == '-'
+		text = text[1:]
+	}
+	if text == "" {
+		return false, "", "", "invalid decimal representation"
+	}
+	parts := strings.Split(text, ".")
+	if len(parts) > 2 {
+		return false, "", "", "invalid decimal representation"
+	}
+	whole = parts[0]
+	if len(parts) == 2 {
+		fractional = parts[1]
+	}
+	if whole == "" && fractional == "" {
+		return false, "", "", "invalid decimal representation"
+	}
+	if whole == "" {
+		whole = "0"
+	}
+	if !decimalDigits(whole) || !decimalDigits(fractional) {
+		return false, "", "", "invalid decimal representation"
+	}
+	return negative, whole, fractional, ""
+}
+
+func decimalDigits(text string) bool {
+	for _, r := range text {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func asDate32(v any) (arrow.Date32, bool) {

@@ -24,6 +24,8 @@ type FallbackCodec struct {
 
 const genericTextFallbackCodec = "generic-text"
 
+const canonicalDecimalTextFallbackCodec = "canonical-decimal-text"
+
 // SourceTypeMetadata carries common source semantics without changing Arrow,
 // Parquet, or Iceberg schemas. Known flags distinguish a source value of zero
 // or false from metadata unavailable from the source driver.
