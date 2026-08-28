@@ -3,7 +3,6 @@ package arrowio
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -21,7 +20,11 @@ type mongoFieldPlan struct {
 }
 
 func InferMongoSchema(docs []map[string]any) (*arrow.Schema, error) {
-	return InferMongoSchemaWithFieldOrder(docs, nil)
+	plan, err := InferMongoSchemaPlan(docs, nil)
+	if err != nil {
+		return nil, err
+	}
+	return plan.Schema, nil
 }
 
 // InferMongoSchemaWithFieldOrder builds a document schema using fieldOrder
@@ -29,63 +32,11 @@ func InferMongoSchema(docs []map[string]any) (*arrow.Schema, error) {
 // present in fieldOrder retain the deterministic alphabetical fallback used by
 // generic document sources.
 func InferMongoSchemaWithFieldOrder(docs []map[string]any, fieldOrder []string) (*arrow.Schema, error) {
-	if len(docs) == 0 {
-		return nil, fmt.Errorf("cannot infer schema from empty documents")
+	plan, err := InferMongoSchemaPlan(docs, fieldOrder)
+	if err != nil {
+		return nil, err
 	}
-
-	fieldTypes := map[string]arrow.DataType{}
-
-	// First pass: inspect non-null values to determine concrete BSON types
-	for _, doc := range docs {
-		for key, val := range doc {
-			if val == nil {
-				continue
-			}
-			if _, seen := fieldTypes[key]; seen {
-				continue
-			}
-			dt, _, _ := mongoValueToArrowType(val)
-			fieldTypes[key] = dt
-		}
-	}
-
-	// Second pass: for fields that were only ever null across all inspected documents, default to String
-	for _, doc := range docs {
-		for key := range doc {
-			if _, seen := fieldTypes[key]; !seen {
-				fieldTypes[key] = arrow.BinaryTypes.String
-			}
-		}
-	}
-
-	keys := make([]string, 0, len(fieldTypes))
-	seen := make(map[string]struct{}, len(fieldTypes))
-	for _, key := range fieldOrder {
-		if _, exists := fieldTypes[key]; !exists {
-			continue
-		}
-		if _, duplicate := seen[key]; duplicate {
-			continue
-		}
-		keys = append(keys, key)
-		seen[key] = struct{}{}
-	}
-	for k := range fieldTypes {
-		if _, exists := seen[k]; exists {
-			continue
-		}
-		keys = append(keys, k)
-	}
-	if len(keys) > len(seen) {
-		sort.Strings(keys[len(seen):])
-	}
-
-	fields := make([]arrow.Field, len(keys))
-	for i, k := range keys {
-		fields[i] = arrow.Field{Name: k, Type: fieldTypes[k], Nullable: true}
-	}
-
-	return arrow.NewSchema(fields, nil), nil
+	return plan.Schema, nil
 }
 
 func buildPlansFromSchema(schema *arrow.Schema) []mongoFieldPlan {
@@ -108,6 +59,20 @@ func MongoDocsToRecord(alloc memory.Allocator, schema *arrow.Schema, docs []map[
 	if len(docs) == 0 {
 		return nil, nil
 	}
+	// Compatibility entry point. New extraction code retains MongoSchemaPlan so
+	// late values are checked against the locked sampled policy.
+	order := make([]string, schema.NumFields())
+	for i := range order {
+		order[i] = schema.Field(i).Name
+	}
+	plan, err := InferMongoSchemaPlan(docs, order)
+	if err != nil {
+		return nil, err
+	}
+	if !mongoArrowSchemaEqual(schema, plan.Schema) {
+		return nil, &MongoSchemaViolationError{Reason: "provided Arrow schema does not match deterministic BSON schema"}
+	}
+	return MongoDocsToRecordWithPlan(alloc, plan, docs)
 
 	plans := buildPlansFromSchema(schema)
 	builders := make([]array.Builder, len(plans))
@@ -144,6 +109,18 @@ func MongoDocsToRecord(alloc memory.Allocator, schema *arrow.Schema, docs []map[
 	}()
 
 	return array.NewRecordBatch(schema, arrays, int64(len(docs))), nil
+}
+
+func mongoArrowSchemaEqual(left, right *arrow.Schema) bool {
+	if left.NumFields() != right.NumFields() {
+		return false
+	}
+	for i := 0; i < left.NumFields(); i++ {
+		if left.Field(i).Name != right.Field(i).Name || !arrow.TypeEqual(left.Field(i).Type, right.Field(i).Type) {
+			return false
+		}
+	}
+	return true
 }
 
 func mongoValueToArrowType(v any) (arrow.DataType, func(memory.Allocator) array.Builder, func(array.Builder, any)) {

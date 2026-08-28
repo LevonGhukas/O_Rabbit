@@ -47,18 +47,18 @@ type RunRequest struct {
 	RunID        string
 	Registration RunConfig
 
-	SourceEngine string
-	SourceDSN    string
-	SourceMode   string
-	SourceTable  string
-	SourceQuery  string
-	ColumnTypes  map[string]string
-	RecordPath   string
-	FileFormat   string
+	SourceEngine  string
+	SourceDSN     string
+	SourceMode    string
+	SourceTable   string
+	SourceQuery   string
+	ColumnTypes   map[string]string
+	RecordPath    string
+	FileFormat    string
 	SelectColumns []string
-	QueryHash    string
-	Incremental  bool
-	WriteMode    string
+	QueryHash     string
+	Incremental   bool
+	WriteMode     string
 
 	DatasetPrefix            string
 	DatasetS3                s3io.Config
@@ -1181,7 +1181,7 @@ func inferRunIcebergSchema(ctx context.Context, req RunRequest, tableName string
 		}
 		defer db.Close()
 
-		it, err := db.StreamDocuments(ctx, req.SourceTable, documentFilter(req.SourceEngine, req.RecordPath, req.FileFormat), 1000)
+		it, err := db.StreamDocuments(ctx, req.SourceTable, documentFilter(req.SourceEngine, req.RecordPath, req.FileFormat), arrowio.MongoSchemaSampleSize)
 		if err != nil {
 			return nil, fmt.Errorf("stream documents for iceberg auto-create: %w", err)
 		}
@@ -1198,7 +1198,7 @@ func inferRunIcebergSchema(ctx context.Context, req RunRequest, tableName string
 				return nil, fmt.Errorf("decode document for iceberg auto-create: %w", err)
 			}
 			docBuf = append(docBuf, doc)
-			if len(docBuf) >= 1000 {
+			if len(docBuf) >= arrowio.MongoSchemaSampleSize {
 				break
 			}
 		}
@@ -1245,7 +1245,7 @@ func InferDurableIcebergSchema(ctx context.Context, engine, dsn, mode, table, qu
 			return nil, fmt.Errorf("open document source for durable schema: %w", err)
 		}
 		defer reader.Close()
-		it, err := reader.StreamDocuments(ctx, table, documentFilter(engine, recordPath, fileFormat), 1000)
+		it, err := reader.StreamDocuments(ctx, table, documentFilter(engine, recordPath, fileFormat), arrowio.MongoSchemaSampleSize)
 		if err != nil {
 			return nil, fmt.Errorf("stream documents for durable schema: %w", err)
 		}
@@ -1255,7 +1255,7 @@ func InferDurableIcebergSchema(ctx context.Context, engine, dsn, mode, table, qu
 			fieldOrder = ordered.FieldOrder()
 		}
 		var docs []map[string]any
-		for it.Next(ctx) && len(docs) < 1000 {
+		for it.Next(ctx) && len(docs) < arrowio.MongoSchemaSampleSize {
 			doc, decodeErr := it.Decode()
 			if decodeErr != nil {
 				return nil, fmt.Errorf("decode document for durable schema: %w", decodeErr)

@@ -1233,10 +1233,10 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 		return res, fmt.Errorf("%s requires collection name in partition_spec.table or source_sql", sourceEngine)
 	}
 
-	const batchSize = 10000
+	const batchSize = arrowio.MongoSchemaSampleSize
 	var (
 		pw             *parquetRollingWriter
-		schema         *arrow.Schema
+		mongoPlan      *arrowio.MongoSchemaPlan
 		rowsRead       int64
 		lastProg       time.Time
 		schemaInferred bool
@@ -1301,7 +1301,7 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 		docBuf = append(docBuf, doc)
 
 		if !schemaInferred && len(docBuf) >= batchSize {
-			schema, err = arrowio.InferMongoSchemaWithFieldOrder(docBuf, fieldOrder)
+			mongoPlan, err = arrowio.InferMongoSchemaPlan(docBuf, fieldOrder)
 			if err != nil {
 				return res, fmt.Errorf("infer schema: %w", err)
 			}
@@ -1309,7 +1309,7 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 		}
 
 		if schemaInferred && len(docBuf) >= batchSize {
-			if err := writeMongoDocBatch(alloc, pw, schema, docBuf); err != nil {
+			if err := writeMongoDocBatch(alloc, pw, mongoPlan, docBuf); err != nil {
 				return res, err
 			}
 			rowsRead += int64(len(docBuf))
@@ -1339,13 +1339,13 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 	// Flush remaining docs.
 	if len(docBuf) > 0 {
 		if !schemaInferred {
-			schema, err = arrowio.InferMongoSchemaWithFieldOrder(docBuf, fieldOrder)
+			mongoPlan, err = arrowio.InferMongoSchemaPlan(docBuf, fieldOrder)
 			if err != nil {
 				return res, fmt.Errorf("infer schema: %w", err)
 			}
 			schemaInferred = true
 		}
-		if err := writeMongoDocBatch(alloc, pw, schema, docBuf); err != nil {
+		if err := writeMongoDocBatch(alloc, pw, mongoPlan, docBuf); err != nil {
 			return res, err
 		}
 		rowsRead += int64(len(docBuf))
@@ -1368,8 +1368,8 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 	return res, nil
 }
 
-func writeMongoDocBatch(alloc memory.Allocator, pw *parquetRollingWriter, schema *arrow.Schema, docs []map[string]any) error {
-	rec, err := arrowio.MongoDocsToRecord(alloc, schema, docs)
+func writeMongoDocBatch(alloc memory.Allocator, pw *parquetRollingWriter, plan *arrowio.MongoSchemaPlan, docs []map[string]any) error {
+	rec, err := arrowio.MongoDocsToRecordWithPlan(alloc, plan, docs)
 	if err != nil {
 		return fmt.Errorf("convert batch to arrow: %w", err)
 	}
@@ -1377,5 +1377,5 @@ func writeMongoDocBatch(alloc memory.Allocator, pw *parquetRollingWriter, schema
 		return nil
 	}
 	defer rec.Release()
-	return pw.Write(schema, rec)
+	return pw.Write(plan.Schema, rec)
 }

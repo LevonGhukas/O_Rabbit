@@ -272,9 +272,11 @@ BIT is now a width-preserving String fallback (`mysql-bit-text`/`mariadb-bit-tex
 
 The current `database/sql.ColumnType` path supplies type name, decimal size, and nullability. The planner records discoverable declaration metadata (signedness, bit width, fixed length, temporal semantics) but does not issue per-column catalog queries. Charset/collation, enum/set labels, and geometry SRID are not exposed by that path and remain optional future connector enrichment rather than guessed metadata. MariaDB UUID and network fallbacks are selected only when those explicit type names are reported.
 
-### Phase 4 — MongoDB deterministic handling (P0/P1)
+### Phase 4 — MongoDB deterministic handling (P0/P1) — ✅ Completed
 
-Replace first-value inference; unify schema authority; implement mixed-field fallback, numeric widening, BSON Timestamp, Decimal128, Binary subtype, ObjectId, nested documents, arrays, and missing/null policy.
+Mongo inference now observes every sampled BSON class per field, producing order-independent native plans only for stable compatible values. `int32 + int64` widens to Int64 and integer/double to Float64; incompatible classes use one field-wide canonical Extended JSON fallback. BSON Date maps to Timestamp(ms, UTC); BSON Timestamp, Decimal128, ObjectId, nested documents, arrays, rare BSON values, and heterogeneous fields use named lossless String fallbacks. Binary stays Binary only for one observed subtype, which is retained in internal policy; mixed subtypes fall back to Extended JSON.
+
+The worker holds the inferred `MongoSchemaPlan` for the extraction and rejects late incompatible values or fields with `MongoSchemaViolationError`; it never mutates the file schema. Missing and explicit BSON null intentionally both become Arrow null, recorded as `missing_and_null_collapsed=true`. Auto-create and durable inference use the same deterministic inference function. Sampling remains bounded, so unseen later types fail explicitly rather than being coerced; schema evolution is deferred.
 
 ### Phase 5 — Iceberg/ClickHouse matrix (P1)
 

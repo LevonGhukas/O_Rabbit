@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
@@ -155,4 +156,57 @@ func TestInferMongoSchemaSpecialTypes(t *testing.T) {
 	require.NotNil(t, schema)
 
 	require.Equal(t, 4, schema.NumFields())
+}
+
+func TestMongoSchemaPlanIsOrderIndependentAndLossless(t *testing.T) {
+	decimal, err := primitive.ParseDecimal128("12345.6789")
+	require.NoError(t, err)
+	docs := []map[string]any{{"n": int32(1), "mixed": "one", "id": primitive.NewObjectID(), "amount": decimal}, {"n": int64(2), "mixed": int64(2), "stamp": primitive.Timestamp{T: 5, I: 7}}}
+	reversed := []map[string]any{docs[1], docs[0]}
+	left, err := InferMongoSchemaPlan(docs, nil)
+	require.NoError(t, err)
+	right, err := InferMongoSchemaPlan(reversed, nil)
+	require.NoError(t, err)
+	require.True(t, mongoArrowSchemaEqual(left.Schema, right.Schema))
+	require.Equal(t, arrow.PrimitiveTypes.Int64, left.byName["n"].typ)
+	require.Equal(t, mongoExtendedJSONCodec, left.byName["mixed"].policy.Fallback.Name)
+	require.Equal(t, mongoObjectIDCodec, left.byName["id"].policy.Fallback.Name)
+	require.Equal(t, mongoDecimalCodec, left.byName["amount"].policy.Fallback.Name)
+	require.Equal(t, mongoTimestampCodec, left.byName["stamp"].policy.Fallback.Name)
+	record, err := MongoDocsToRecordWithPlan(memory.NewGoAllocator(), left, docs)
+	require.NoError(t, err)
+	defer record.Release()
+	amount := record.Column(0) // deterministic alphabetical order: amount
+	require.Equal(t, "12345.6789", amount.(*array.String).Value(0))
+}
+
+func TestMongoSchemaPlanRejectsLateFieldAndMismatch(t *testing.T) {
+	plan, err := InferMongoSchemaPlan([]map[string]any{{"value": int32(1)}}, nil)
+	require.NoError(t, err)
+	_, err = MongoDocsToRecordWithPlan(memory.NewGoAllocator(), plan, []map[string]any{{"value": "wrong"}})
+	require.ErrorAs(t, err, new(*MongoSchemaViolationError))
+	_, err = MongoDocsToRecordWithPlan(memory.NewGoAllocator(), plan, []map[string]any{{"value": int32(1), "late": true}})
+	require.ErrorAs(t, err, new(*MongoSchemaViolationError))
+}
+
+func TestMongoBinarySubtypeAndMissingNullPolicy(t *testing.T) {
+	plan, err := InferMongoSchemaPlan([]map[string]any{{"bin": primitive.Binary{Subtype: 4, Data: []byte{1}}}, {"bin": primitive.Binary{Subtype: 4, Data: []byte{2}}}, {}}, nil)
+	require.NoError(t, err)
+	require.Equal(t, arrow.BinaryTypes.Binary, plan.byName["bin"].typ)
+	require.Equal(t, "true", plan.byName["bin"].policy.Metadata.Properties["mongodb.missing_and_null_collapsed"])
+	mixed, err := InferMongoSchemaPlan([]map[string]any{{"bin": primitive.Binary{Subtype: 3, Data: []byte{1}}}, {"bin": primitive.Binary{Subtype: 4, Data: []byte{1}}}}, nil)
+	require.NoError(t, err)
+	require.Equal(t, mongoExtendedJSONCodec, mixed.byName["bin"].policy.Fallback.Name)
+}
+
+func TestMongoNumericWideningToFloat64(t *testing.T) {
+	plan, err := InferMongoSchemaPlan([]map[string]any{{"n": int32(1)}, {"n": float64(2.5)}}, nil)
+	require.NoError(t, err)
+	require.Equal(t, arrow.PrimitiveTypes.Float64, plan.byName["n"].typ)
+	record, err := MongoDocsToRecordWithPlan(memory.NewGoAllocator(), plan, []map[string]any{{"n": int32(1)}, {"n": float64(2.5)}})
+	require.NoError(t, err)
+	defer record.Release()
+	values := record.Column(0).(*array.Float64)
+	require.Equal(t, 1.0, values.Value(0))
+	require.Equal(t, 2.5, values.Value(1))
 }
