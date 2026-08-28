@@ -243,17 +243,9 @@ func planInt8(name string) ColumnPlan {
 		Builder:  func(mem memory.Allocator) array.Builder { return array.NewInt8Builder(mem) },
 		Append: func(b array.Builder, v any) error {
 			bb := b.(*array.Int8Builder)
-			v = dereferenceValue(v)
-			if v == nil {
-				bb.AppendNull()
-				return nil
-			}
-			if i, ok := asInt64(v); ok {
+			return appendSignedInteger(b, v, "Int8", -128, 127, func(i int64) {
 				bb.Append(int8(i))
-				return nil
-			}
-			bb.AppendNull()
-			return nil
+			})
 		},
 	}
 }
@@ -265,17 +257,9 @@ func planInt16(name string) ColumnPlan {
 		Builder:  func(mem memory.Allocator) array.Builder { return array.NewInt16Builder(mem) },
 		Append: func(b array.Builder, v any) error {
 			bb := b.(*array.Int16Builder)
-			v = dereferenceValue(v)
-			if v == nil {
-				bb.AppendNull()
-				return nil
-			}
-			if i, ok := asInt64(v); ok {
+			return appendSignedInteger(b, v, "Int16", -32768, 32767, func(i int64) {
 				bb.Append(int16(i))
-				return nil
-			}
-			bb.AppendNull()
-			return nil
+			})
 		},
 	}
 }
@@ -287,17 +271,9 @@ func planInt32(name string) ColumnPlan {
 		Builder:  func(mem memory.Allocator) array.Builder { return array.NewInt32Builder(mem) },
 		Append: func(b array.Builder, v any) error {
 			bb := b.(*array.Int32Builder)
-			v = dereferenceValue(v)
-			if v == nil {
-				bb.AppendNull()
-				return nil
-			}
-			if i, ok := asInt64(v); ok {
+			return appendSignedInteger(b, v, "Int32", -2147483648, 2147483647, func(i int64) {
 				bb.Append(int32(i))
-				return nil
-			}
-			bb.AppendNull()
-			return nil
+			})
 		},
 	}
 }
@@ -309,16 +285,9 @@ func planInt64(name string) ColumnPlan {
 		Builder:  func(mem memory.Allocator) array.Builder { return array.NewInt64Builder(mem) },
 		Append: func(b array.Builder, v any) error {
 			bb := b.(*array.Int64Builder)
-			v = dereferenceValue(v)
-			if v == nil {
-				bb.AppendNull()
-				return nil
-			}
-			if i, ok := asInt64(v); ok {
+			return appendSignedInteger(b, v, "Int64", -1<<63, 1<<63-1, func(i int64) {
 				bb.Append(i)
-				return nil
-			}
-			return fmt.Errorf("int64 append: unsupported %T (%v)", v, v)
+			})
 		},
 	}
 }
@@ -330,17 +299,9 @@ func planUint8(name string) ColumnPlan {
 		Builder:  func(mem memory.Allocator) array.Builder { return array.NewUint8Builder(mem) },
 		Append: func(b array.Builder, v any) error {
 			bb := b.(*array.Uint8Builder)
-			v = dereferenceValue(v)
-			if v == nil {
-				bb.AppendNull()
-				return nil
-			}
-			if u, ok := asUint64(v); ok {
+			return appendUnsignedInteger(b, v, "UInt8", 255, func(u uint64) {
 				bb.Append(uint8(u))
-				return nil
-			}
-			bb.AppendNull()
-			return nil
+			})
 		},
 	}
 }
@@ -352,17 +313,9 @@ func planUint16(name string) ColumnPlan {
 		Builder:  func(mem memory.Allocator) array.Builder { return array.NewUint16Builder(mem) },
 		Append: func(b array.Builder, v any) error {
 			bb := b.(*array.Uint16Builder)
-			v = dereferenceValue(v)
-			if v == nil {
-				bb.AppendNull()
-				return nil
-			}
-			if u, ok := asUint64(v); ok {
+			return appendUnsignedInteger(b, v, "UInt16", 65535, func(u uint64) {
 				bb.Append(uint16(u))
-				return nil
-			}
-			bb.AppendNull()
-			return nil
+			})
 		},
 	}
 }
@@ -374,17 +327,9 @@ func planUint32(name string) ColumnPlan {
 		Builder:  func(mem memory.Allocator) array.Builder { return array.NewUint32Builder(mem) },
 		Append: func(b array.Builder, v any) error {
 			bb := b.(*array.Uint32Builder)
-			v = dereferenceValue(v)
-			if v == nil {
-				bb.AppendNull()
-				return nil
-			}
-			if u, ok := asUint64(v); ok {
+			return appendUnsignedInteger(b, v, "UInt32", 4294967295, func(u uint64) {
 				bb.Append(uint32(u))
-				return nil
-			}
-			bb.AppendNull()
-			return nil
+			})
 		},
 	}
 }
@@ -396,18 +341,60 @@ func planUint64(name string) ColumnPlan {
 		Builder:  func(mem memory.Allocator) array.Builder { return array.NewUint64Builder(mem) },
 		Append: func(b array.Builder, v any) error {
 			bb := b.(*array.Uint64Builder)
-			v = dereferenceValue(v)
-			if v == nil {
-				bb.AppendNull()
-				return nil
-			}
-			if u, ok := asUint64(v); ok {
+			return appendUnsignedInteger(b, v, "UInt64", ^uint64(0), func(u uint64) {
 				bb.Append(u)
-				return nil
-			}
-			return fmt.Errorf("uint64 append: unsupported %T (%v)", v, v)
+			})
 		},
 	}
+}
+
+// IntegerConversionError reports a non-null value that cannot be represented
+// by the fixed Arrow integer type selected before row processing began.
+type IntegerConversionError struct {
+	Target    string
+	InputType string
+	Reason    string
+}
+
+func (e *IntegerConversionError) Error() string {
+	return fmt.Sprintf("%s conversion from %s failed: %s", e.Target, e.InputType, e.Reason)
+}
+
+func appendSignedInteger(b array.Builder, v any, target string, min, max int64, appendValue func(int64)) error {
+	v = dereferenceValue(v)
+	if v == nil {
+		b.AppendNull()
+		return nil
+	}
+	i, reason := toInt64Checked(v)
+	if reason != "" {
+		return &IntegerConversionError{Target: target, InputType: fmt.Sprintf("%T", v), Reason: reason}
+	}
+	if i < min {
+		return &IntegerConversionError{Target: target, InputType: fmt.Sprintf("%T", v), Reason: "underflow"}
+	}
+	if i > max {
+		return &IntegerConversionError{Target: target, InputType: fmt.Sprintf("%T", v), Reason: "overflow"}
+	}
+	appendValue(i)
+	return nil
+}
+
+func appendUnsignedInteger(b array.Builder, v any, target string, max uint64, appendValue func(uint64)) error {
+	v = dereferenceValue(v)
+	if v == nil {
+		b.AppendNull()
+		return nil
+	}
+	u, reason := toUint64Checked(v)
+	if reason != "" {
+		return &IntegerConversionError{Target: target, InputType: fmt.Sprintf("%T", v), Reason: reason}
+	}
+	if u > max {
+		return &IntegerConversionError{Target: target, InputType: fmt.Sprintf("%T", v), Reason: "overflow"}
+	}
+	appendValue(u)
+	return nil
 }
 
 func planFloat32(name string) ColumnPlan {

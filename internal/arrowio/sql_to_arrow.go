@@ -189,107 +189,123 @@ func asBool(v any) (bool, bool) {
 	}
 }
 
-func asInt64(v any) (int64, bool) {
+func toInt64Checked(v any) (int64, string) {
 	switch x := v.(type) {
 	case int64:
-		return x, true
+		return x, ""
 	case int32:
-		return int64(x), true
+		return int64(x), ""
 	case int16:
-		return int64(x), true
+		return int64(x), ""
 	case int8:
-		return int64(x), true
+		return int64(x), ""
 	case int:
-		return int64(x), true
+		return int64(x), ""
 	case uint64:
 		if x > 9223372036854775807 {
-			return 0, false
+			return 0, "overflow"
 		}
-		return int64(x), true
+		return int64(x), ""
 	case uint32:
-		return int64(x), true
+		return int64(x), ""
 	case uint16:
-		return int64(x), true
+		return int64(x), ""
 	case uint8:
-		return int64(x), true
+		return int64(x), ""
 	case uint:
-		return int64(x), true
+		if uint64(x) > 9223372036854775807 {
+			return 0, "overflow"
+		}
+		return int64(x), ""
 	case []byte:
 		i, err := strconv.ParseInt(strings.TrimSpace(string(x)), 10, 64)
 		if err != nil {
-			return 0, false
+			return 0, integerParseReason(err)
 		}
-		return i, true
+		return i, ""
 	case string:
 		i, err := strconv.ParseInt(strings.TrimSpace(x), 10, 64)
 		if err != nil {
-			return 0, false
+			return 0, integerParseReason(err)
 		}
-		return i, true
+		return i, ""
 	default:
-		return 0, false
+		return 0, "invalid integer representation"
 	}
 }
 
-func asUint64(v any) (uint64, bool) {
+func toUint64Checked(v any) (uint64, string) {
 	switch x := v.(type) {
 	case uint64:
-		return x, true
+		return x, ""
 	case uint32:
-		return uint64(x), true
+		return uint64(x), ""
 	case uint16:
-		return uint64(x), true
+		return uint64(x), ""
 	case uint8:
-		return uint64(x), true
+		return uint64(x), ""
 	case uint:
-		return uint64(x), true
+		return uint64(x), ""
 	case int64:
 		if x < 0 {
-			return 0, false
+			return 0, "negative value"
 		}
-		return uint64(x), true
+		return uint64(x), ""
 	case int32:
 		if x < 0 {
-			return 0, false
+			return 0, "negative value"
 		}
-		return uint64(x), true
+		return uint64(x), ""
 	case int16:
 		if x < 0 {
-			return 0, false
+			return 0, "negative value"
 		}
-		return uint64(x), true
+		return uint64(x), ""
 	case int8:
 		if x < 0 {
-			return 0, false
+			return 0, "negative value"
 		}
-		return uint64(x), true
+		return uint64(x), ""
 	case int:
 		if x < 0 {
-			return 0, false
+			return 0, "negative value"
 		}
-		return uint64(x), true
+		return uint64(x), ""
 	case []byte:
 		if len(x) == 8 {
 			var u uint64
 			for _, b := range x {
 				u = (u << 8) | uint64(b)
 			}
-			return u, true
+			return u, ""
 		}
 		i, err := strconv.ParseUint(strings.TrimSpace(string(x)), 10, 64)
 		if err != nil {
-			return 0, false
+			if strings.HasPrefix(strings.TrimSpace(string(x)), "-") {
+				return 0, "negative value"
+			}
+			return 0, integerParseReason(err)
 		}
-		return i, true
+		return i, ""
 	case string:
 		i, err := strconv.ParseUint(strings.TrimSpace(x), 10, 64)
 		if err != nil {
-			return 0, false
+			if strings.HasPrefix(strings.TrimSpace(x), "-") {
+				return 0, "negative value"
+			}
+			return 0, integerParseReason(err)
 		}
-		return i, true
+		return i, ""
 	default:
-		return 0, false
+		return 0, "invalid integer representation"
 	}
+}
+
+func integerParseReason(err error) string {
+	if numErr, ok := err.(*strconv.NumError); ok && numErr.Err == strconv.ErrRange {
+		return "overflow"
+	}
+	return "invalid integer representation"
 }
 
 // RowsToRecordBatches consumes *sql.Rows and emits Arrow Records via onRecord.
