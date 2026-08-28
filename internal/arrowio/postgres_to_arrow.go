@@ -17,18 +17,25 @@ import (
 )
 
 const (
-	postgresUUIDTextCodec      = "postgres-uuid-text"
-	postgresJSONTextCodec      = "postgres-json-text"
-	postgresJSONBTextCodec     = "postgres-jsonb-text"
-	postgresIntervalTextCodec  = "postgres-interval-text"
-	postgresNetworkTextCodec   = "postgres-network-text"
-	postgresMACTextCodec       = "postgres-mac-text"
-	postgresTimetzTextCodec    = "postgres-timetz-text"
-	postgresArrayTextCodec     = "postgres-array-text"
-	postgresBitTextCodec       = "postgres-bit-text"
-	postgresEnumTextCodec      = "postgres-enum-text"
-	postgresDomainTextCodec    = "postgres-domain-text"
-	postgresCompositeTextCodec = "postgres-composite-text"
+	postgresUUIDTextCodec       = "postgres-uuid-text"
+	postgresJSONTextCodec       = "postgres-json-text"
+	postgresJSONBTextCodec      = "postgres-jsonb-text"
+	postgresIntervalTextCodec   = "postgres-interval-text"
+	postgresNetworkTextCodec    = "postgres-network-text"
+	postgresMACTextCodec        = "postgres-mac-text"
+	postgresTimetzTextCodec     = "postgres-timetz-text"
+	postgresArrayTextCodec      = "postgres-array-text"
+	postgresBitTextCodec        = "postgres-bit-text"
+	postgresEnumTextCodec       = "postgres-enum-text"
+	postgresDomainTextCodec     = "postgres-domain-text"
+	postgresCompositeTextCodec  = "postgres-composite-text"
+	postgresRangeTextCodec      = "postgres-range-text"
+	postgresMultirangeTextCodec = "postgres-multirange-text"
+	postgresGeometryTextCodec   = "postgres-geometry-text"
+	postgresHStoreTextCodec     = "postgres-hstore-text"
+	postgresPostGISTextCodec    = "postgres-postgis-text"
+	postgresPostGISBinaryCodec  = "postgres-postgis-binary"
+	postgresExtensionTextCodec  = "postgres-extension-text"
 )
 
 var (
@@ -80,6 +87,19 @@ func planPostgresColumn(name, dbType string, precision, scale int64, hasDecimal 
 	case "BIT", "VARBIT":
 		return planPostgresBitText(name, clean, base)
 
+	// Advanced PostgreSQL values remain source text until a structural Arrow
+	// representation has an end-to-end compatibility contract.
+	case "INT4RANGE", "INT8RANGE", "NUMRANGE", "TSRANGE", "TSTZRANGE", "DATERANGE":
+		return planPostgresNamedText(name, clean, postgresRangeTextCodec, "range")
+	case "INT4MULTIRANGE", "INT8MULTIRANGE", "NUMMULTIRANGE", "TSMULTIRANGE", "TSTZMULTIRANGE", "DATEMULTIRANGE":
+		return planPostgresNamedText(name, clean, postgresMultirangeTextCodec, "multirange")
+	case "POINT", "LINE", "LSEG", "PATH", "POLYGON", "BOX", "CIRCLE":
+		return planPostgresNamedText(name, clean, postgresGeometryTextCodec, "geometry")
+	case "HSTORE":
+		return planPostgresNamedText(name, clean, postgresHStoreTextCodec, "hstore")
+	case "GEOMETRY", "GEOGRAPHY":
+		return planPostgresNamedText(name, clean, postgresPostGISTextCodec, "postgis")
+
 	// 6. Dates & Timestamps
 	case "DATE":
 		return planDate32(name)
@@ -121,8 +141,34 @@ func planPostgresColumn(name, dbType string, precision, scale int64, hasDecimal 
 		return planString(name)
 
 	default:
-		return planGenericSQLColumn(name, base, precision, scale, hasDecimal)
+		return planPostgresNamedText(name, clean, postgresExtensionTextCodec, "extension")
 	}
+}
+
+func planPostgresNamedText(name, sourceType, codec, typeKind string) ColumnPlan {
+	plan := planPostgresText(name, sourceType, MappingFallback, codec, typeKind, func(string) bool { return true })
+	plan.Policy.Metadata.Properties["postgres.type_kind"] = typeKind
+	plan.Policy.Metadata.Properties["postgres.type_name"] = sourceType
+	return plan
+}
+
+func planPostgresBinaryFallback(name, sourceType, codec, typeKind string) ColumnPlan {
+	plan := ColumnPlan{Name: name, DataType: arrow.BinaryTypes.Binary, Builder: func(mem memory.Allocator) array.Builder { return array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary) }, Append: func(b array.Builder, v any) error {
+		bb := b.(*array.BinaryBuilder)
+		v = dereferenceValue(v)
+		if v == nil {
+			bb.AppendNull()
+			return nil
+		}
+		data, ok := v.([]byte)
+		if !ok {
+			return &BinaryConversionError{Target: fmt.Sprintf("PostgreSQL %s binary", sourceType), InputType: fmt.Sprintf("%T", v), Reason: "non-byte source representation"}
+		}
+		bb.Append(data)
+		return nil
+	}}
+	plan.Policy = &TypePolicy{Version: MappingPolicyVersionV1, MappingKind: MappingFallback, Fallback: &FallbackCodec{Name: codec, Version: 1}, Metadata: SourceTypeMetadata{Properties: map[string]string{"postgres.semantic_type": typeKind, "postgres.type_kind": typeKind, "postgres.type_name": sourceType}}}
+	return plan
 }
 
 // PlanForPostgresColumnWithMetadata applies connector-owned catalog metadata
@@ -153,11 +199,17 @@ func PlanForPostgresColumnWithMetadata(name, dbType string, precision, scale int
 		}
 	case "composite":
 		plan = planPostgresText(name, dbType, MappingFallback, postgresCompositeTextCodec, "composite", func(string) bool { return true })
+	case "postgis":
+		if metadata.PostGISBinary {
+			plan = planPostgresBinaryFallback(name, dbType, postgresPostGISBinaryCodec, "postgis")
+		} else {
+			plan = planPostgresText(name, dbType, MappingFallback, postgresPostGISTextCodec, "postgis", func(string) bool { return true })
+		}
 	default:
 		return PlanForSQLColumn("postgres", name, dbType, precision, scale, hasDecimal)
 	}
 	plan = withSQLTypePolicy(plan, "postgres", dbType, precision, scale, hasDecimal)
-	if metadata.Kind == "domain" && plan.Policy.MappingKind == MappingFallback && plan.Policy.Fallback != nil && plan.Policy.Fallback.Name == genericTextFallbackCodec {
+	if metadata.Kind == "domain" && plan.Policy.MappingKind == MappingFallback && plan.Policy.Fallback != nil && (plan.Policy.Fallback.Name == genericTextFallbackCodec || plan.Policy.Fallback.Name == postgresExtensionTextCodec) {
 		plan.Policy.Fallback = &FallbackCodec{Name: postgresDomainTextCodec, Version: 1}
 	}
 	properties := plan.Policy.Metadata.Properties

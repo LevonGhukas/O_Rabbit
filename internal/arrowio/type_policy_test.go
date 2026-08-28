@@ -94,7 +94,7 @@ func TestMappingDiagnosticsExposePolicyWithoutRowValues(t *testing.T) {
 	require.Equal(t, "extension_value", diagnostics[0].ColumnName)
 	require.Equal(t, MappingFallback, diagnostics[0].MappingKind)
 	require.Equal(t, "postgres", diagnostics[0].SourceEngine)
-	require.Equal(t, genericTextFallbackCodec, diagnostics[0].FallbackCodecName)
+	require.Equal(t, postgresExtensionTextCodec, diagnostics[0].FallbackCodecName)
 	require.Equal(t, 1, diagnostics[0].FallbackCodecVersion)
 	require.Equal(t, MappingFallback, diagnostics[1].MappingKind)
 	require.Equal(t, canonicalDecimalTextFallbackCodec, diagnostics[1].FallbackCodecName)

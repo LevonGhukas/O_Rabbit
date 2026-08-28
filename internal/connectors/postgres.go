@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -131,11 +132,16 @@ func (p *Postgres) DescribeTable(ctx context.Context, table string) ([]string, [
 func (p *Postgres) PostgresTypeMetadata(ctx context.Context, columnTypes []*sql.ColumnType) ([]PostgresTypeMetadata, error) {
 	names := make([]string, 0, len(columnTypes))
 	seen := make(map[string]struct{})
+	postGIS := make([]PostgresTypeMetadata, 0, 2)
 	for _, columnType := range columnTypes {
 		if columnType == nil {
 			continue
 		}
 		name := strings.TrimSpace(columnType.DatabaseTypeName())
+		if strings.EqualFold(name, "geometry") || strings.EqualFold(name, "geography") {
+			postGIS = append(postGIS, PostgresTypeMetadata{ReportedType: name, TypeName: name, Kind: "postgis", PostGISBinary: columnType.ScanType() == reflect.TypeOf([]byte(nil))})
+			continue
+		}
 		if name == "" || strings.HasPrefix(name, "_") {
 			continue // Arrays retain Phase 2B's exact array-text fallback.
 		}
@@ -145,7 +151,7 @@ func (p *Postgres) PostgresTypeMetadata(ctx context.Context, columnTypes []*sql.
 		}
 	}
 	if len(names) == 0 {
-		return nil, nil
+		return postGIS, nil
 	}
 
 	rows, err := p.db.QueryContext(ctx, `
@@ -188,7 +194,7 @@ func (p *Postgres) PostgresTypeMetadata(ctx context.Context, columnTypes []*sql.
 		return nil, err
 	}
 	if len(oids) == 0 {
-		return nil, nil
+		return postGIS, nil
 	}
 
 	// A bare DatabaseTypeName is ambiguous when distinct schemas define the
@@ -201,7 +207,7 @@ func (p *Postgres) PostgresTypeMetadata(ctx context.Context, columnTypes []*sql.
 		}
 	}
 	if len(byOID) == 0 {
-		return nil, nil
+		return postGIS, nil
 	}
 	if err := p.resolvePostgresDomainBases(ctx, byOID); err != nil {
 		return nil, err
@@ -209,7 +215,8 @@ func (p *Postgres) PostgresTypeMetadata(ctx context.Context, columnTypes []*sql.
 	if err := p.populatePostgresEnumAndCompositeMetadata(ctx, byOID); err != nil {
 		return nil, err
 	}
-	result := make([]PostgresTypeMetadata, 0, len(byOID))
+	result := make([]PostgresTypeMetadata, 0, len(byOID)+len(postGIS))
+	result = append(result, postGIS...)
 	for _, name := range names {
 		candidates := byName[name]
 		if len(candidates) == 1 {

@@ -97,6 +97,9 @@ type PostgresTypeMetadata struct {
 	DomainNotNull   bool
 	EnumLabels      []string
 	CompositeFields []string
+	// PostGISBinary is set only when a source-specific caller already knows the
+	// driver returned exact geometry bytes; Arrow planning never inspects payloads.
+	PostGISBinary bool
 }
 
 // PostgresTypeMetadataReader is optional so non-PostgreSQL connectors keep

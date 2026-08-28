@@ -126,8 +126,8 @@ Store operational metadata first in the internal canonical schema. Mirror non-se
 | arrays/multidimensional arrays | ✅ Phase 2B: one-dimensional, explicitly supported primitive arrays use Arrow List. Unsupported elements and explicitly multidimensional declarations use exact `postgres-array-text` v1 String fallback. | Preserve PostgreSQL array text whenever dimensions/lower bounds or element semantics cannot be represented by Arrow List. | P1 | Multi-dimensional, null elements, escaped strings, exotic elements. |
 | `inet`, `cidr`, `macaddr`, `macaddr8` | ✅ Phase 2A: validated PostgreSQL text fallbacks with distinct semantic metadata and named network/MAC codecs. | Canonical PostgreSQL text plus source type; no need for a custom Arrow extension in the first release. | P2 | IPv4/IPv6/prefix/MAC forms. |
 | `bit`, `varbit` | ✅ Phase 2B: exact String fallback using `postgres-bit-text` v1 for every width, including `BIT(1)`. Declared width is retained when driver type metadata includes it. | Preserve exact bit string and declared width through canonical text/Binary. | P2 | Width >64, leading zeros. |
-| geometric, range, multirange | Generic String. | Canonical PostgreSQL text fallback initially; structured geometry/range only after an explicit decoder contract. | P3 | Bounds, empty/infinite ranges. |
-| `hstore`, PostGIS, extension/UDT types | Generic String. | Source-specific stable text/Binary codec. For PostGIS prefer EWKB/WKB plus SRID/type metadata if driver exposes it. | P3 | Extension version and SRID coverage. |
+| geometric, range, multirange | ✅ Phase 2D exact String fallbacks: `postgres-geometry-text` v1, `postgres-range-text` v1, and `postgres-multirange-text` v1. | Structured geometry/range only after an explicit decoder contract. | P3 | Bounds, empty/infinite ranges. |
+| `hstore`, PostGIS, extension/UDT types | ✅ Phase 2D exact fallbacks: `postgres-hstore-text` v1, `postgres-postgis-text` v1, `postgres-postgis-binary` v1 for already-byte payloads, and `postgres-extension-text` v1 for all remaining PostgreSQL types. | Source-specific stable text/Binary codec. | P3 | Extension version and SRID coverage. |
 
 ## 6. MySQL roadmap
 
@@ -255,14 +255,14 @@ Implement checked integer conversion, exact-decimal/fallback behavior, unclamped
 
 Shared SQL plans now return explicit errors for non-null conversion failures instead of silently appending null/zero/default values. Source-specific semantic mappings remain deferred: PostgreSQL to Phase 2; MySQL/MariaDB to Phase 3; MongoDB conversion and inference to Phase 4; and Iceberg/ClickHouse compatibility to Phase 5. Durable fallback execution, mapping metadata persistence, and worker-level counters/logging are not implemented here.
 
-### Phase 2 — PostgreSQL core correctness (P0/P1) — 🚧 In Progress
+### Phase 2 — PostgreSQL core correctness (P0/P1) — ✅ Completed
 
 - ✅ Phase 2A — semantic scalar mappings: UUID, JSON/JSONB, XML, interval, INET/CIDR, MACADDR/MACADDR8, and PostgreSQL temporal-policy metadata. `timetz` now uses an offset-preserving text fallback.
 - ✅ Phase 2B — arrays and bit/varbit: safe primitive one-dimensional arrays remain Arrow List; unsupported and multidimensional arrays use `postgres-array-text` v1; bit strings use `postgres-bit-text` v1.
 - ✅ Phase 2C — enums, domains, composites: connector catalog enrichment classifies unambiguous user-defined types; enums and composites use named exact-text fallbacks, while domains reuse safe base mappings with domain identity metadata.
-- ⬜ Phase 2D — ranges, multiranges, PostGIS/hstore/extensions
+- ✅ Phase 2D — ranges, multiranges, geometric types, hstore, PostGIS, and remaining extensions use named exact text/binary fallbacks; no payload parser or Arrow extension type was introduced.
 
-Phase 2C adds three batched PostgreSQL catalog reads per extraction (`pg_type`, `pg_enum`, and composite attributes) for unambiguous user-defined type names. It introduces no Arrow extension types, Iceberg changes, or ClickHouse changes. Phase 2B intentionally changes PostgreSQL `BIT(1)` from Boolean and `BIT(n)` from UInt64 to String, eliminating loss of bit-string identity, leading zeroes, and values wider than 64 bits. Arrays previously treated as List now use String fallback when their element type or explicit dimensionality cannot be represented exactly.
+Phase 2C adds batched PostgreSQL catalog reads for unambiguous user-defined types. Phase 2D completes PostgreSQL coverage with named, exact fallbacks for every remaining advanced or unknown PostgreSQL type. It introduces no Arrow extension types, Iceberg changes, or ClickHouse changes. Phase 2B intentionally changes PostgreSQL `BIT(1)` from Boolean and `BIT(n)` from UInt64 to String, eliminating loss of bit-string identity, leading zeroes, and values wider than 64 bits. Arrays previously treated as List now use String fallback when their element type or explicit dimensionality cannot be represented exactly.
 
 ### Phase 3 — MySQL and MariaDB core correctness (P0/P1)
 
