@@ -669,6 +669,18 @@ type TemporalConversionError struct {
 	Reason    string
 }
 
+// BinaryConversionError reports a non-null value that does not provide an
+// exact byte representation for the selected Arrow binary plan.
+type BinaryConversionError struct {
+	Target    string
+	InputType string
+	Reason    string
+}
+
+func (e *BinaryConversionError) Error() string {
+	return fmt.Sprintf("%s conversion from %s failed: %s", e.Target, e.InputType, e.Reason)
+}
+
 func (e *TemporalConversionError) Error() string {
 	return fmt.Sprintf("%s conversion from %s failed: %s", e.Target, e.InputType, e.Reason)
 }
@@ -708,14 +720,11 @@ func planBinary(name string) ColumnPlan {
 				bb.AppendNull()
 				return nil
 			}
-			switch x := v.(type) {
-			case []byte:
-				bb.Append(x)
-			case string:
-				bb.Append([]byte(x))
-			default:
-				bb.Append([]byte(fmt.Sprint(v)))
+			data, ok := v.([]byte)
+			if !ok {
+				return &BinaryConversionError{Target: "Binary", InputType: fmt.Sprintf("%T", v), Reason: "non-byte source representation"}
 			}
+			bb.Append(data)
 			return nil
 		},
 	}

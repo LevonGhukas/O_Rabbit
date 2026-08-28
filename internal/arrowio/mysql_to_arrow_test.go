@@ -42,6 +42,8 @@ func TestMySQLTypeMapping(t *testing.T) {
 		{"YEAR", 0, 0, false, arrow.PrimitiveTypes.Int16},
 		{"JSON", 0, 0, false, arrow.BinaryTypes.String},
 		{"VARCHAR(255)", 0, 0, false, arrow.BinaryTypes.String},
+		{"BINARY(16)", 0, 0, false, arrow.BinaryTypes.Binary},
+		{"VARBINARY(255)", 0, 0, false, arrow.BinaryTypes.Binary},
 		{"BLOB", 0, 0, false, arrow.BinaryTypes.Binary},
 		{"POINT", 0, 0, false, arrow.BinaryTypes.Binary},
 		{"MULTIPOINT", 0, 0, false, arrow.BinaryTypes.Binary},
