@@ -39,25 +39,25 @@ import (
 )
 
 type partitionSpec struct {
-	Type           string `json:"type"`
-	SourceMode     string `json:"source_mode"`
-	QueryHash      string `json:"query_hash"`
-	Table          string `json:"table"`
-	CursorColumn   string `json:"cursor_column"`
-	CursorDomain   string `json:"cursor_domain"`
-	Lower          string `json:"lower"`
-	Upper          string `json:"upper"`
-	LowerExclusive bool   `json:"lower_exclusive"`
-	UpperInclusive bool   `json:"upper_inclusive"`
-	OutputPart     int64  `json:"output_part"` 
-	WhereClause    string `json:"where_clause,omitempty"` 
-	SelectColumns []string          `json:"select_columns,omitempty"` 
-	ColumnTypes   map[string]string `json:"column_types,omitempty"`
-	RecordPath    string            `json:"record_path,omitempty"`
-	FileFormat    string            `json:"format,omitempty"`
-	IDColumn       string `json:"id_column"` // legacy alias
-	From           int64  `json:"from"`      // legacy alias
-	To             int64  `json:"to"`        // legacy alias
+	Type           string            `json:"type"`
+	SourceMode     string            `json:"source_mode"`
+	QueryHash      string            `json:"query_hash"`
+	Table          string            `json:"table"`
+	CursorColumn   string            `json:"cursor_column"`
+	CursorDomain   string            `json:"cursor_domain"`
+	Lower          string            `json:"lower"`
+	Upper          string            `json:"upper"`
+	LowerExclusive bool              `json:"lower_exclusive"`
+	UpperInclusive bool              `json:"upper_inclusive"`
+	OutputPart     int64             `json:"output_part"`
+	WhereClause    string            `json:"where_clause,omitempty"`
+	SelectColumns  []string          `json:"select_columns,omitempty"`
+	ColumnTypes    map[string]string `json:"column_types,omitempty"`
+	RecordPath     string            `json:"record_path,omitempty"`
+	FileFormat     string            `json:"format,omitempty"`
+	IDColumn       string            `json:"id_column"` // legacy alias
+	From           int64             `json:"from"`      // legacy alias
+	To             int64             `json:"to"`        // legacy alias
 }
 
 type sourceExtract struct {
@@ -595,8 +595,6 @@ func (realLeaseClock) NewTimer(d time.Duration) leaseTimer {
 func (t realLeaseTimer) C() <-chan time.Time { return t.timer.C }
 func (t realLeaseTimer) Stop()               { t.timer.Stop() }
 
-
-
 func executeTaskManaged(ctx context.Context, log *slog.Logger, cp grpcpb.ControlPlaneClient, workerID, workerInstanceID string, t *grpcpb.TaskAssignment, clients *clientCache, manager *workerworkspace.Manager) error {
 	workspace, err := manager.Create(t.RunId, t.TaskId, t.AttemptId, t.AttemptNumber, workerID, workerInstanceID)
 	if err != nil {
@@ -648,8 +646,6 @@ func executeTaskWithBody(ctx context.Context, cp grpcpb.ControlPlaneClient, work
 		return err
 	}
 }
-
-
 
 func renewalDelay(now, deadline time.Time) time.Duration {
 	remaining := deadline.Sub(now)
@@ -1085,6 +1081,17 @@ func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 	}
 	defer rows.Close()
 	res.QueryMS = time.Since(queryStart).Milliseconds()
+	var postgresTypeMetadata []connectors.PostgresTypeMetadata
+	if sourceEngine == "postgres" && len(ps.ColumnTypes) == 0 {
+		if reader, ok := src.(connectors.PostgresTypeMetadataReader); ok {
+			postgresTypeMetadata, err = reader.PostgresTypeMetadata(qctx, colTypes)
+			if err != nil {
+				// Catalog enrichment is optional: preserve the established safe
+				// unknown-type fallback when permissions or metadata are unavailable.
+				log.Warn("PostgreSQL type metadata unavailable; using safe text fallback", slog.String("error", err.Error()))
+			}
+		}
+	}
 
 	alloc := memory.NewGoAllocator()
 	var (
@@ -1094,7 +1101,14 @@ func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 	)
 
 	convertStart := time.Now()
-	total, actualMaxCursor, err := arrowio.RowsToRecordBatchesEngineWithOverrides(sourceEngine, rows, cols, colTypes, ps.ColumnTypes, 50_000, alloc, cursorIdx, connectors.NormalizeCursorDomain(ps.CursorDomain), func(schema *arrow.Schema, rec arrow.RecordBatch) error {
+	var convert func(func(schema *arrow.Schema, rec arrow.RecordBatch) error) (int64, string, error)
+	convert = func(onRecord func(schema *arrow.Schema, rec arrow.RecordBatch) error) (int64, string, error) {
+		if sourceEngine == "postgres" && len(postgresTypeMetadata) > 0 {
+			return arrowio.RowsToRecordBatchesPostgresMetadata(rows, cols, colTypes, ps.ColumnTypes, postgresTypeMetadata, 50_000, alloc, cursorIdx, connectors.NormalizeCursorDomain(ps.CursorDomain), onRecord)
+		}
+		return arrowio.RowsToRecordBatchesEngineWithOverrides(sourceEngine, rows, cols, colTypes, ps.ColumnTypes, 50_000, alloc, cursorIdx, connectors.NormalizeCursorDomain(ps.CursorDomain), onRecord)
+	}
+	total, actualMaxCursor, err := convert(func(schema *arrow.Schema, rec arrow.RecordBatch) error {
 		rowsRead += rec.NumRows()
 		if time.Since(lastProg) > 5*time.Second {
 			lastProg = time.Now()

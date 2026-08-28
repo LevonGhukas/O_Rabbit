@@ -84,6 +84,27 @@ type SourceQueryReader interface {
 	ValidateQueryCursorColumn(ctx context.Context, query, cursorColumn string) (CursorColumnValidation, error)
 }
 
+// PostgresTypeMetadata is the small, source-owned description needed to plan
+// PostgreSQL user-defined types. It deliberately does not model ranges or
+// extensions.
+type PostgresTypeMetadata struct {
+	ReportedType    string
+	TypeName        string
+	Schema          string
+	Kind            string // enum, domain, composite
+	BaseType        string
+	DomainChain     []string
+	DomainNotNull   bool
+	EnumLabels      []string
+	CompositeFields []string
+}
+
+// PostgresTypeMetadataReader is optional so non-PostgreSQL connectors keep
+// their existing planning contract.
+type PostgresTypeMetadataReader interface {
+	PostgresTypeMetadata(ctx context.Context, columnTypes []*sql.ColumnType) ([]PostgresTypeMetadata, error)
+}
+
 type sourceEngineSpec struct {
 	Canonical             string
 	Aliases               []string
@@ -342,6 +363,15 @@ func (w *errorWrappedTableReader) DiscoverCursorStats(ctx context.Context, table
 func (w *errorWrappedTableReader) ValidateCursorColumn(ctx context.Context, table, cursorColumn string) (CursorColumnValidation, error) {
 	v, err := w.inner.ValidateCursorColumn(ctx, table, cursorColumn)
 	return v, ClassifyConnectorError(err)
+}
+
+func (w *errorWrappedTableReader) PostgresTypeMetadata(ctx context.Context, columnTypes []*sql.ColumnType) ([]PostgresTypeMetadata, error) {
+	reader, ok := w.inner.(PostgresTypeMetadataReader)
+	if !ok {
+		return nil, nil
+	}
+	metadata, err := reader.PostgresTypeMetadata(ctx, columnTypes)
+	return metadata, ClassifyConnectorError(err)
 }
 
 type errorWrappedSourceQueryReader struct {

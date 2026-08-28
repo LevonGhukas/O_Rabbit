@@ -124,6 +124,199 @@ func (p *Postgres) DescribeTable(ctx context.Context, table string) ([]string, [
 	return cols, ct, nil
 }
 
+// PostgresTypeMetadata classifies only enum, domain, and composite names
+// reported by pgx's database/sql ColumnType metadata. PostgreSQL reports a
+// user-defined type name (and an underscore-prefixed name for its array), not
+// enough information to distinguish these kinds without pg_type.
+func (p *Postgres) PostgresTypeMetadata(ctx context.Context, columnTypes []*sql.ColumnType) ([]PostgresTypeMetadata, error) {
+	names := make([]string, 0, len(columnTypes))
+	seen := make(map[string]struct{})
+	for _, columnType := range columnTypes {
+		if columnType == nil {
+			continue
+		}
+		name := strings.TrimSpace(columnType.DatabaseTypeName())
+		if name == "" || strings.HasPrefix(name, "_") {
+			continue // Arrays retain Phase 2B's exact array-text fallback.
+		}
+		if _, ok := seen[name]; !ok {
+			names = append(names, name)
+			seen[name] = struct{}{}
+		}
+	}
+	if len(names) == 0 {
+		return nil, nil
+	}
+
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT t.oid, t.typname, n.nspname, t.typtype,
+		       COALESCE(bt.typname, ''), COALESCE(bn.nspname, ''), t.typnotnull
+		FROM pg_type t
+		JOIN pg_namespace n ON n.oid = t.typnamespace
+		LEFT JOIN pg_type bt ON bt.oid = t.typbasetype
+		LEFT JOIN pg_namespace bn ON bn.oid = bt.typnamespace
+		WHERE t.typname = ANY($1::text[]) AND t.typtype IN ('e', 'd', 'c')`, names)
+	if err != nil {
+		return nil, fmt.Errorf("inspect PostgreSQL user-defined types: %w", err)
+	}
+	defer rows.Close()
+
+	type discovered struct {
+		oid  uint32
+		meta PostgresTypeMetadata
+	}
+	byName := make(map[string][]discovered)
+	var oids []uint32
+	for rows.Next() {
+		var d discovered
+		var kind string
+		if err := rows.Scan(&d.oid, &d.meta.TypeName, &d.meta.Schema, &kind, &d.meta.BaseType, new(string), &d.meta.DomainNotNull); err != nil {
+			return nil, fmt.Errorf("scan PostgreSQL user-defined type: %w", err)
+		}
+		switch kind {
+		case "e":
+			d.meta.Kind = "enum"
+		case "d":
+			d.meta.Kind = "domain"
+		case "c":
+			d.meta.Kind = "composite"
+		}
+		byName[d.meta.TypeName] = append(byName[d.meta.TypeName], d)
+		oids = append(oids, d.oid)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(oids) == 0 {
+		return nil, nil
+	}
+
+	// A bare DatabaseTypeName is ambiguous when distinct schemas define the
+	// same name. In that case leave it unclassified and retain safe text.
+	byOID := make(map[uint32]*PostgresTypeMetadata)
+	for _, candidates := range byName {
+		if len(candidates) == 1 {
+			c := candidates[0]
+			byOID[c.oid] = &c.meta
+		}
+	}
+	if len(byOID) == 0 {
+		return nil, nil
+	}
+	if err := p.resolvePostgresDomainBases(ctx, byOID); err != nil {
+		return nil, err
+	}
+	if err := p.populatePostgresEnumAndCompositeMetadata(ctx, byOID); err != nil {
+		return nil, err
+	}
+	result := make([]PostgresTypeMetadata, 0, len(byOID))
+	for _, name := range names {
+		candidates := byName[name]
+		if len(candidates) == 1 {
+			if metadata := byOID[candidates[0].oid]; metadata != nil {
+				metadata.ReportedType = name
+				result = append(result, *metadata)
+			}
+		}
+	}
+	return result, nil
+}
+
+// resolvePostgresDomainBases follows domain-on-domain chains in bounded,
+// batched passes. An ambiguous bare name is intentionally left unresolved so
+// Arrow planning retains a lossless domain-text fallback instead of guessing.
+func (p *Postgres) resolvePostgresDomainBases(ctx context.Context, metadata map[uint32]*PostgresTypeMetadata) error {
+	for depth := 0; depth < 16; depth++ {
+		names, seen := make([]string, 0), map[string]struct{}{}
+		for _, m := range metadata {
+			if m.Kind == "domain" && m.BaseType != "" {
+				if _, ok := seen[m.BaseType]; !ok {
+					names = append(names, m.BaseType)
+					seen[m.BaseType] = struct{}{}
+				}
+			}
+		}
+		if len(names) == 0 {
+			return nil
+		}
+		rows, err := p.db.QueryContext(ctx, `SELECT t.typname, t.typtype, COALESCE(bt.typname, '') FROM pg_type t LEFT JOIN pg_type bt ON bt.oid = t.typbasetype WHERE t.typname = ANY($1::text[]) AND t.typtype = 'd'`, names)
+		if err != nil {
+			return fmt.Errorf("resolve PostgreSQL domain bases: %w", err)
+		}
+		type base struct{ name, next string }
+		candidates := map[string][]base{}
+		for rows.Next() {
+			var b base
+			var kind string
+			if err := rows.Scan(&b.name, &kind, &b.next); err != nil {
+				rows.Close()
+				return err
+			}
+			candidates[b.name] = append(candidates[b.name], b)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		advanced := false
+		for _, m := range metadata {
+			candidate := candidates[m.BaseType]
+			if m.Kind == "domain" && len(candidate) == 1 && candidate[0].next != "" {
+				m.DomainChain = append(m.DomainChain, m.BaseType)
+				m.BaseType = candidate[0].next
+				advanced = true
+			}
+		}
+		if !advanced {
+			return nil
+		}
+	}
+	return nil
+}
+
+func (p *Postgres) populatePostgresEnumAndCompositeMetadata(ctx context.Context, metadata map[uint32]*PostgresTypeMetadata) error {
+	oids := make([]uint32, 0, len(metadata))
+	for oid := range metadata {
+		oids = append(oids, oid)
+	}
+	rows, err := p.db.QueryContext(ctx, `SELECT enumtypid, enumlabel FROM pg_enum WHERE enumtypid = ANY($1::oid[]) ORDER BY enumtypid, enumsortorder`, oids)
+	if err != nil {
+		return fmt.Errorf("inspect PostgreSQL enum labels: %w", err)
+	}
+	for rows.Next() {
+		var oid uint32
+		var label string
+		if err := rows.Scan(&oid, &label); err != nil {
+			rows.Close()
+			return err
+		}
+		if m := metadata[oid]; m != nil {
+			m.EnumLabels = append(m.EnumLabels, label)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	rows, err = p.db.QueryContext(ctx, `SELECT t.oid, a.attname || ':' || a.atttypid::regtype::text FROM pg_type t JOIN pg_class c ON c.oid = t.typrelid JOIN pg_attribute a ON a.attrelid = c.oid WHERE t.oid = ANY($1::oid[]) AND a.attnum > 0 AND NOT a.attisdropped ORDER BY t.oid, a.attnum`, oids)
+	if err != nil {
+		return fmt.Errorf("inspect PostgreSQL composite fields: %w", err)
+	}
+	for rows.Next() {
+		var oid uint32
+		var field string
+		if err := rows.Scan(&oid, &field); err != nil {
+			rows.Close()
+			return err
+		}
+		if m := metadata[oid]; m != nil {
+			m.CompositeFields = append(m.CompositeFields, field)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	return nil
+}
+
 var pgIdentPartRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 
 func quotePostgresMultipartIdent(s string) (string, error) {

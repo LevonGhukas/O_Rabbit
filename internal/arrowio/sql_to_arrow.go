@@ -83,6 +83,41 @@ func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType
 	return plans, arrow.NewSchema(fields, nil), nil
 }
 
+// PlansFromPostgresSQLMetadata overlays catalog-enriched PostgreSQL UDT
+// identity onto the normal ColumnType plans. Other SQL engines are untouched.
+func PlansFromPostgresSQLMetadata(cols []string, colTypes []*sql.ColumnType, metadata []connectors.PostgresTypeMetadata) ([]ColumnPlan, *arrow.Schema, error) {
+	plans, schema, err := PlansFromSQLEngine("postgres", cols, colTypes)
+	if err != nil || len(metadata) == 0 {
+		return plans, schema, err
+	}
+	byType := make(map[string]connectors.PostgresTypeMetadata, len(metadata))
+	for _, item := range metadata {
+		if item.ReportedType != "" {
+			byType[strings.ToUpper(item.ReportedType)] = item
+		}
+	}
+	fields := schema.Fields()
+	for i, columnType := range colTypes {
+		if columnType == nil {
+			continue
+		}
+		item, ok := byType[strings.ToUpper(strings.TrimSpace(columnType.DatabaseTypeName()))]
+		if !ok {
+			continue
+		}
+		precision, scale, hasDecimal := int64(0), int64(0), false
+		if p, s, ok := columnType.DecimalSize(); ok {
+			precision, scale, hasDecimal = int64(p), int64(s), true
+		}
+		plan := PlanForPostgresColumnWithMetadata(cols[i], columnType.DatabaseTypeName(), precision, scale, hasDecimal, &item)
+		plan.Policy.Metadata.NullableKnown = plans[i].Policy.Metadata.NullableKnown
+		plan.Policy.Metadata.Nullable = plans[i].Policy.Metadata.Nullable
+		plans[i] = plan
+		fields[i].Type = plan.DataType
+	}
+	return plans, arrow.NewSchema(fields, nil), nil
+}
+
 func parseTimestampValue(raw string) (time.Time, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -343,7 +378,24 @@ func RowsToRecordBatchesWithOverrides(rows *sql.Rows, cols []string, colTypes []
 }
 
 func RowsToRecordBatchesEngineWithOverrides(engine string, rows *sql.Rows, cols []string, colTypes []*sql.ColumnType, targetTypes map[string]string, batchSize int, alloc memory.Allocator, cursorIdx int, cursorDomain connectors.CursorDomain, onRecord func(schema *arrow.Schema, rec arrow.RecordBatch) error) (int64, string, error) {
-	plans, schema, err := PlansFromSQLEngineWithOverrides(engine, cols, colTypes, targetTypes)
+	return rowsToRecordBatchesEngineWithPostgresMetadata(engine, rows, cols, colTypes, targetTypes, nil, batchSize, alloc, cursorIdx, cursorDomain, onRecord)
+}
+
+// RowsToRecordBatchesPostgresMetadata runs normal SQL conversion with the
+// connector's optional PostgreSQL user-defined-type classification.
+func RowsToRecordBatchesPostgresMetadata(rows *sql.Rows, cols []string, colTypes []*sql.ColumnType, targetTypes map[string]string, metadata []connectors.PostgresTypeMetadata, batchSize int, alloc memory.Allocator, cursorIdx int, cursorDomain connectors.CursorDomain, onRecord func(schema *arrow.Schema, rec arrow.RecordBatch) error) (int64, string, error) {
+	return rowsToRecordBatchesEngineWithPostgresMetadata("postgres", rows, cols, colTypes, targetTypes, metadata, batchSize, alloc, cursorIdx, cursorDomain, onRecord)
+}
+
+func rowsToRecordBatchesEngineWithPostgresMetadata(engine string, rows *sql.Rows, cols []string, colTypes []*sql.ColumnType, targetTypes map[string]string, postgresMetadata []connectors.PostgresTypeMetadata, batchSize int, alloc memory.Allocator, cursorIdx int, cursorDomain connectors.CursorDomain, onRecord func(schema *arrow.Schema, rec arrow.RecordBatch) error) (int64, string, error) {
+	var plans []ColumnPlan
+	var schema *arrow.Schema
+	var err error
+	if strings.EqualFold(engine, "postgres") && len(postgresMetadata) > 0 && len(targetTypes) == 0 {
+		plans, schema, err = PlansFromPostgresSQLMetadata(cols, colTypes, postgresMetadata)
+	} else {
+		plans, schema, err = PlansFromSQLEngineWithOverrides(engine, cols, colTypes, targetTypes)
+	}
 	if err != nil {
 		return 0, "", err
 	}

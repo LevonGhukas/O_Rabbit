@@ -12,18 +12,23 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+
+	"github.com/LevonGhukas/O_Rabbit/internal/connectors"
 )
 
 const (
-	postgresUUIDTextCodec     = "postgres-uuid-text"
-	postgresJSONTextCodec     = "postgres-json-text"
-	postgresJSONBTextCodec    = "postgres-jsonb-text"
-	postgresIntervalTextCodec = "postgres-interval-text"
-	postgresNetworkTextCodec  = "postgres-network-text"
-	postgresMACTextCodec      = "postgres-mac-text"
-	postgresTimetzTextCodec   = "postgres-timetz-text"
-	postgresArrayTextCodec    = "postgres-array-text"
-	postgresBitTextCodec      = "postgres-bit-text"
+	postgresUUIDTextCodec      = "postgres-uuid-text"
+	postgresJSONTextCodec      = "postgres-json-text"
+	postgresJSONBTextCodec     = "postgres-jsonb-text"
+	postgresIntervalTextCodec  = "postgres-interval-text"
+	postgresNetworkTextCodec   = "postgres-network-text"
+	postgresMACTextCodec       = "postgres-mac-text"
+	postgresTimetzTextCodec    = "postgres-timetz-text"
+	postgresArrayTextCodec     = "postgres-array-text"
+	postgresBitTextCodec       = "postgres-bit-text"
+	postgresEnumTextCodec      = "postgres-enum-text"
+	postgresDomainTextCodec    = "postgres-domain-text"
+	postgresCompositeTextCodec = "postgres-composite-text"
 )
 
 var (
@@ -118,6 +123,73 @@ func planPostgresColumn(name, dbType string, precision, scale int64, hasDecimal 
 	default:
 		return planGenericSQLColumn(name, base, precision, scale, hasDecimal)
 	}
+}
+
+// PlanForPostgresColumnWithMetadata applies connector-owned catalog metadata
+// without allowing Arrow conversion code to query PostgreSQL itself.
+func PlanForPostgresColumnWithMetadata(name, dbType string, precision, scale int64, hasDecimal bool, metadata *connectors.PostgresTypeMetadata) ColumnPlan {
+	if metadata == nil || metadata.Kind == "" {
+		return PlanForSQLColumn("postgres", name, dbType, precision, scale, hasDecimal)
+	}
+	var plan ColumnPlan
+	switch metadata.Kind {
+	case "enum":
+		labels := make(map[string]struct{}, len(metadata.EnumLabels))
+		for _, label := range metadata.EnumLabels {
+			labels[label] = struct{}{}
+		}
+		plan = planPostgresText(name, dbType, MappingFallback, postgresEnumTextCodec, "enum", func(text string) bool {
+			if len(labels) == 0 {
+				return true
+			}
+			_, ok := labels[text]
+			return ok
+		})
+	case "domain":
+		if metadata.BaseType == "" {
+			plan = planPostgresText(name, dbType, MappingFallback, postgresDomainTextCodec, "domain", func(string) bool { return true })
+		} else {
+			plan = PlanForSQLColumn("postgres", name, metadata.BaseType, precision, scale, hasDecimal)
+		}
+	case "composite":
+		plan = planPostgresText(name, dbType, MappingFallback, postgresCompositeTextCodec, "composite", func(string) bool { return true })
+	default:
+		return PlanForSQLColumn("postgres", name, dbType, precision, scale, hasDecimal)
+	}
+	plan = withSQLTypePolicy(plan, "postgres", dbType, precision, scale, hasDecimal)
+	if metadata.Kind == "domain" && plan.Policy.MappingKind == MappingFallback && plan.Policy.Fallback != nil && plan.Policy.Fallback.Name == genericTextFallbackCodec {
+		plan.Policy.Fallback = &FallbackCodec{Name: postgresDomainTextCodec, Version: 1}
+	}
+	properties := plan.Policy.Metadata.Properties
+	if properties == nil {
+		properties = map[string]string{}
+		plan.Policy.Metadata.Properties = properties
+	}
+	properties["postgres.type_kind"] = metadata.Kind
+	properties["postgres.type_name"] = metadata.TypeName
+	properties["postgres.schema"] = metadata.Schema
+	if metadata.Kind == "enum" {
+		properties["postgres.enum_labels"] = postgresPolicyJSON(metadata.EnumLabels)
+	}
+	if metadata.Kind == "domain" {
+		properties["postgres.domain_base_type"] = metadata.BaseType
+		properties["postgres.domain_not_null"] = strconv.FormatBool(metadata.DomainNotNull)
+		if len(metadata.DomainChain) > 0 {
+			properties["postgres.domain_chain"] = postgresPolicyJSON(metadata.DomainChain)
+		}
+	}
+	if metadata.Kind == "composite" {
+		properties["postgres.composite_fields"] = postgresPolicyJSON(metadata.CompositeFields)
+	}
+	return plan
+}
+
+func postgresPolicyJSON(values []string) string {
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return "[]"
+	}
+	return string(encoded)
 }
 
 func postgresArrayType(clean string) (element string, dimensions int, ok bool) {
