@@ -19,6 +19,9 @@ type ColumnPlan struct {
 	DataType arrow.DataType
 	Builder  func(mem memory.Allocator) array.Builder
 	Append   func(b array.Builder, v any) error
+	// Policy describes the source type mapping internally. It is not emitted
+	// into Arrow metadata and therefore cannot affect physical output in Phase 0.
+	Policy *TypePolicy
 }
 
 // schemaFromPlans handles schema from plans behavior.
@@ -49,6 +52,7 @@ func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType
 		n := cols[i]
 		dbType := ""
 		nullable := true
+		nullableKnown := false
 		var (
 			precision  int64
 			scale      int64
@@ -63,18 +67,21 @@ func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType
 			}
 			if isNullable, ok := colTypes[i].Nullable(); ok {
 				nullable = isNullable
+				nullableKnown = true
 			}
 		}
 
 		plan := PlanForSQLColumn(engine, n, dbType, precision, scale, hasDecimal)
+		if plan.Policy != nil {
+			plan.Policy.Metadata.NullableKnown = nullableKnown
+			plan.Policy.Metadata.Nullable = nullable
+		}
 		plans = append(plans, plan)
 		fields = append(fields, arrow.Field{Name: plan.Name, Type: plan.DataType, Nullable: nullable})
 	}
 
 	return plans, arrow.NewSchema(fields, nil), nil
 }
-
-
 
 func parseTimestampValue(raw string) (time.Time, bool) {
 	raw = strings.TrimSpace(raw)

@@ -37,6 +37,7 @@ func dereferenceValue(v any) any {
 
 // PlanForSQLColumn routes type planning to dialect-specific handlers based on the source engine.
 func PlanForSQLColumn(engine, name, dbType string, precision, scale int64, hasDecimal bool) ColumnPlan {
+	// Keep this normalization aligned with the pre-policy planner behavior.
 	normEngine := strings.ToLower(strings.TrimSpace(engine))
 	upperType := strings.ToUpper(strings.TrimSpace(dbType))
 
@@ -53,26 +54,86 @@ func PlanForSQLColumn(engine, name, dbType string, precision, scale int64, hasDe
 		}
 	}
 
+	var plan ColumnPlan
 	switch normEngine {
 	case "mysql", "mariadb":
-		return planMySQLColumn(name, upperType, precision, scale, hasDecimal)
+		plan = planMySQLColumn(name, upperType, precision, scale, hasDecimal)
 	case "postgres", "postgresql", "pg":
-		return planPostgresColumn(name, upperType, precision, scale, hasDecimal)
+		plan = planPostgresColumn(name, upperType, precision, scale, hasDecimal)
 	case "mssql", "sqlserver", "ms-sql", "ms_sql":
-		return planMSSQLColumn(name, upperType, precision, scale, hasDecimal)
+		plan = planMSSQLColumn(name, upperType, precision, scale, hasDecimal)
 	case "oracle", "ora":
-		return planOracleColumn(name, upperType, precision, scale, hasDecimal)
+		plan = planOracleColumn(name, upperType, precision, scale, hasDecimal)
 	case "clickhouse", "ch":
-		return planClickHouseColumn(name, upperType, precision, scale, hasDecimal)
+		plan = planClickHouseColumn(name, upperType, precision, scale, hasDecimal)
 	case "trino":
-		return planTrinoColumn(name, upperType, precision, scale, hasDecimal)
+		plan = planTrinoColumn(name, upperType, precision, scale, hasDecimal)
 	case "cassandra", "cql":
-		return planCassandraColumn(name, upperType, precision, scale, hasDecimal)
+		plan = planCassandraColumn(name, upperType, precision, scale, hasDecimal)
 	case "sqlite", "sqlite3":
-		return planSQLiteColumn(name, upperType, precision, scale, hasDecimal)
+		plan = planSQLiteColumn(name, upperType, precision, scale, hasDecimal)
 	default:
-		return planGenericSQLColumn(name, upperType, precision, scale, hasDecimal)
+		plan = planGenericSQLColumn(name, upperType, precision, scale, hasDecimal)
 	}
+	return withSQLTypePolicy(plan, normEngine, dbType, precision, scale, hasDecimal)
+}
+
+func withSQLTypePolicy(plan ColumnPlan, engine, sourceType string, precision, scale int64, hasDecimal bool) ColumnPlan {
+	if engine != "postgres" && engine != "mysql" && engine != "mariadb" {
+		return plan
+	}
+
+	kind := MappingNative
+	var fallback *FallbackCodec
+	if isStructuredSQLType(engine, sourceType) {
+		kind = MappingStructured
+	} else if !isNativeSQLType(engine, sourceType) {
+		kind = MappingFallback
+		fallback = &FallbackCodec{Name: genericTextFallbackCodec, Version: 1}
+	}
+
+	policy := &TypePolicy{
+		Version:      MappingPolicyVersionV1,
+		SourceEngine: engine,
+		SourceType:   strings.TrimSpace(sourceType),
+		MappingKind:  kind,
+		Metadata: SourceTypeMetadata{
+			PrecisionKnown: hasDecimal,
+			Precision:      precision,
+			ScaleKnown:     hasDecimal,
+			Scale:          scale,
+		},
+		Fallback: fallback,
+	}
+	plan.Policy = policy
+	return plan
+}
+
+func isStructuredSQLType(engine, sourceType string) bool {
+	base := strings.ToUpper(strings.TrimSpace(sourceType))
+	clean := strings.TrimSpace(strings.Split(base, "(")[0])
+	if engine == "postgres" {
+		return strings.HasSuffix(clean, "[]") || strings.HasPrefix(clean, "_")
+	}
+	return clean == "GEOMETRY" || clean == "POINT" || clean == "LINESTRING" || clean == "POLYGON" || clean == "MULTIPOINT" || clean == "MULTILINESTRING" || clean == "MULTIPOLYGON" || clean == "GEOMETRYCOLLECTION"
+}
+
+func isNativeSQLType(engine, sourceType string) bool {
+	base := strings.ToUpper(strings.TrimSpace(sourceType))
+	clean := strings.TrimSpace(strings.Split(base, "(")[0])
+	if engine == "postgres" {
+		switch clean {
+		case "INT2", "SMALLINT", "SMALLSERIAL", "INT4", "INTEGER", "INT", "SERIAL", "INT8", "BIGINT", "BIGSERIAL", "FLOAT4", "REAL", "FLOAT8", "DOUBLE PRECISION", "FLOAT", "NUMERIC", "DECIMAL", "MONEY", "BOOL", "BOOLEAN", "DATE", "TIMESTAMP", "TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE", "TIME", "TIME WITHOUT TIME ZONE", "TIMETZ", "TIME WITH TIME ZONE", "BYTEA", "TEXT", "VARCHAR", "CHAR", "BPCHAR", "NAME", "CITEXT", "XML":
+			return true
+		}
+		return false
+	}
+	clean = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(clean, "UNSIGNED", ""), "ZEROFILL", ""))
+	switch clean {
+	case "TINYINT", "BOOL", "BOOLEAN", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT", "BIT", "YEAR", "FLOAT", "DOUBLE", "DOUBLE PRECISION", "REAL", "DECIMAL", "NUMERIC", "DEC", "FIXED", "DATE", "DATETIME", "TIMESTAMP", "TIME", "BINARY", "VARBINARY", "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB", "VARCHAR", "CHAR", "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT", "JSON", "ENUM", "SET":
+		return true
+	}
+	return false
 }
 
 // PlanForTargetType converts an explicit target type name (e.g. "UInt64", "Decimal(38,10)", "DateTime64(6)")
