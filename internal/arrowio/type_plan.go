@@ -84,6 +84,11 @@ func withSQLTypePolicy(plan ColumnPlan, engine, sourceType string, precision, sc
 	if engine != "postgres" && engine != "mysql" && engine != "mariadb" {
 		return plan
 	}
+	if plan.Policy != nil {
+		plan.Policy.SourceEngine = engine
+		plan.Policy.SourceType = strings.TrimSpace(sourceType)
+		return plan
+	}
 
 	kind := MappingNative
 	var fallback *FallbackCodec
@@ -110,8 +115,29 @@ func withSQLTypePolicy(plan ColumnPlan, engine, sourceType string, precision, sc
 		},
 		Fallback: fallback,
 	}
+	if engine == "postgres" {
+		populatePostgresTemporalMetadata(&policy.Metadata, sourceType)
+	}
 	plan.Policy = policy
 	return plan
+}
+
+func populatePostgresTemporalMetadata(metadata *SourceTypeMetadata, sourceType string) {
+	clean := strings.TrimSpace(strings.Split(strings.ToUpper(sourceType), "(")[0])
+	switch clean {
+	case "DATE":
+		metadata.TemporalUnit = "day"
+		metadata.TemporalSemantics = "calendar-date"
+	case "TIMESTAMP", "TIMESTAMP WITHOUT TIME ZONE":
+		metadata.TemporalUnit = "microsecond"
+		metadata.TemporalSemantics = "local-wall-clock"
+	case "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE":
+		metadata.TemporalUnit = "microsecond"
+		metadata.TemporalSemantics = "instant"
+	case "TIME", "TIME WITHOUT TIME ZONE":
+		metadata.TemporalUnit = "microsecond"
+		metadata.TemporalSemantics = "local-time"
+	}
 }
 
 func isDecimalSQLType(engine, sourceType string) bool {
@@ -748,6 +774,10 @@ func planBinary(name string) ColumnPlan {
 }
 
 func planList(name string, itemPlan ColumnPlan) ColumnPlan {
+	return planListWithItems(name, itemPlan, extractSliceItems)
+}
+
+func planListWithItems(name string, itemPlan ColumnPlan, itemsForValue func(any) ([]any, bool)) ColumnPlan {
 	listType := arrow.ListOf(itemPlan.DataType)
 	return ColumnPlan{
 		Name:     name,
@@ -763,7 +793,7 @@ func planList(name string, itemPlan ColumnPlan) ColumnPlan {
 				return nil
 			}
 
-			items, ok := extractSliceItems(v)
+			items, ok := itemsForValue(v)
 			if !ok {
 				return &ScalarConversionError{Target: "List", InputType: fmt.Sprintf("%T", v), Reason: "unsupported list representation"}
 			}

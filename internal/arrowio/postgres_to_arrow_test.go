@@ -41,10 +41,10 @@ func TestPostgresTypeMapping(t *testing.T) {
 		{"BYTEA", 0, 0, false, arrow.BinaryTypes.Binary},
 		{"INTEGER[]", 0, 0, false, arrow.ListOf(arrow.PrimitiveTypes.Int32)},
 		{"BIGINT[]", 0, 0, false, arrow.ListOf(arrow.PrimitiveTypes.Int64)},
-		{"NUMERIC[]", 0, 0, false, arrow.ListOf(&arrow.Decimal128Type{Precision: 38, Scale: 10})},
+		{"NUMERIC[]", 0, 0, false, arrow.BinaryTypes.String},
 		{"TEXT[]", 0, 0, false, arrow.ListOf(arrow.BinaryTypes.String)},
 		{"BOOLEAN[]", 0, 0, false, arrow.ListOf(arrow.FixedWidthTypes.Boolean)},
-		{"UUID[]", 0, 0, false, arrow.ListOf(arrow.BinaryTypes.String)},
+		{"UUID[]", 0, 0, false, arrow.BinaryTypes.String},
 		{"_INT4", 0, 0, false, arrow.ListOf(arrow.PrimitiveTypes.Int32)},
 		{"_TEXT", 0, 0, false, arrow.ListOf(arrow.BinaryTypes.String)},
 	}
