@@ -227,12 +227,15 @@ func canonicalizeType(dt arrow.DataType) canonicalType {
 		}
 	case *arrow.ListType:
 		f := canonicalizeField(t.ElemField())
+		f.Name = "element"
 		out.Element = &f
 	case *arrow.LargeListType:
 		f := canonicalizeField(t.ElemField())
+		f.Name = "element"
 		out.Element = &f
 	case *arrow.FixedSizeListType:
 		f := canonicalizeField(t.ElemField())
+		f.Name = "element"
 		out.Element = &f
 		out.ByteWidth = t.Len()
 	case *arrow.MapType:
