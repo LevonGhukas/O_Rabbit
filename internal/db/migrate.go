@@ -9,7 +9,12 @@ import (
 type migration struct {
 	version int
 	sql     string
-	apply   func(context.Context, *sql.DB) error
+	apply   func(context.Context, migrationExecutor) error
+}
+
+type migrationExecutor interface {
+	queryer
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
 var migrations = []migration{
@@ -636,8 +641,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_config_versions_server_config_version ON c
 CREATE INDEX IF NOT EXISTS idx_config_versions_server_config_created ON config_versions(server_id, config_id, created_at DESC, id DESC);
 `
 
-func runTableHasColumn(ctx context.Context, db *sql.DB, column string) (bool, error) {
-	rows, err := db.QueryContext(ctx, `PRAGMA table_info(runs);`)
+type queryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func runTableHasColumn(ctx context.Context, q queryer, column string) (bool, error) {
+	rows, err := q.QueryContext(ctx, `PRAGMA table_info(runs);`)
 	if err != nil {
 		return false, err
 	}
@@ -665,15 +674,15 @@ func runTableHasColumn(ctx context.Context, db *sql.DB, column string) (bool, er
 	return false, nil
 }
 
-func ensureRunRegistrationConfigColumn(ctx context.Context, db *sql.DB) error {
-	hasColumn, err := runTableHasColumn(ctx, db, "registration_config_json")
+func ensureRunRegistrationConfigColumn(ctx context.Context, exec migrationExecutor) error {
+	hasColumn, err := runTableHasColumn(ctx, exec, "registration_config_json")
 	if err != nil {
 		return err
 	}
 	if hasColumn {
 		return nil
 	}
-	_, err = db.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN registration_config_json TEXT NOT NULL DEFAULT '';`)
+	_, err = exec.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN registration_config_json TEXT NOT NULL DEFAULT '';`)
 	return err
 }
 
@@ -708,18 +717,28 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		if applied[m.version] {
 			continue
 		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin migration %d: %w", m.version, err)
+		}
 		switch {
 		case m.apply != nil:
-			if err := m.apply(ctx, db); err != nil {
+			if err := m.apply(ctx, tx); err != nil {
+				_ = tx.Rollback()
 				return fmt.Errorf("apply migration %d: %w", m.version, err)
 			}
 		default:
-			if _, err := db.ExecContext(ctx, m.sql); err != nil {
+			if _, err := tx.ExecContext(ctx, m.sql); err != nil {
+				_ = tx.Rollback()
 				return fmt.Errorf("apply migration %d: %w", m.version, err)
 			}
 		}
-		if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'));`, m.version); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'));`, m.version); err != nil {
+			_ = tx.Rollback()
 			return fmt.Errorf("record migration %d: %w", m.version, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %d: %w", m.version, err)
 		}
 	}
 	return nil

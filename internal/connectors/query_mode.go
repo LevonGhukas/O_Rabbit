@@ -418,6 +418,56 @@ func classifyQueryCursorType(engine, dataType string, ct *sql.ColumnType) SQLCur
 	return ClassifySQLCursorType(dataType)
 }
 
+
+// ValidateWhereClause ensures a user-supplied WHERE clause fragment is safe:
+// rejects comments, semicolons/multi-statements, and destructive SQL keywords.
+func ValidateWhereClause(where string) error {
+	raw := strings.TrimSpace(where)
+	if raw == "" {
+		return nil
+	}
+	if strings.Contains(raw, "--") || strings.Contains(raw, "/*") || strings.Contains(raw, "*/") {
+		return fmt.Errorf("where_clause must not contain SQL comments")
+	}
+	tokens, semi, err := scanSQLQuery(raw)
+	if err != nil {
+		return fmt.Errorf("invalid where_clause: %w", err)
+	}
+	if semi >= 0 {
+		return fmt.Errorf("where_clause must not contain multiple statements or semicolons")
+	}
+	for _, tok := range tokens {
+		if destructiveSQLKeyword(tok) {
+			return fmt.Errorf("where_clause rejects unsafe SQL keyword %q", tok)
+		}
+	}
+	return nil
+}
+
+// ValidateSelectColumns ensures each column identifier in select_columns is safe:
+// non-empty, no SQL injection punctuation, semicolons, comments, or destructive keywords.
+func ValidateSelectColumns(cols []string) error {
+	for i, c := range cols {
+		col := strings.TrimSpace(c)
+		if col == "" {
+			return fmt.Errorf("select_columns[%d] must be a non-empty column identifier", i)
+		}
+		if strings.Contains(col, ";") || strings.Contains(col, "--") || strings.Contains(col, "/*") || strings.Contains(col, "*/") || strings.Contains(col, ",") || strings.Contains(col, "(") || strings.Contains(col, ")") {
+			return fmt.Errorf("select_columns[%d] contains invalid SQL characters: %q", i, col)
+		}
+		tokens, semi, err := scanSQLQuery(col)
+		if err != nil || semi >= 0 {
+			return fmt.Errorf("select_columns[%d] contains invalid column identifier syntax: %q", i, col)
+		}
+		for _, tok := range tokens {
+			if destructiveSQLKeyword(tok) || tok == "SELECT" {
+				return fmt.Errorf("select_columns[%d] contains unsafe SQL keyword %q", i, tok)
+			}
+		}
+	}
+	return nil
+}
+
 func NormalizeReadOnlySQLQuery(raw string) (string, error) {
 	query := strings.TrimSpace(raw)
 	if query == "" {
@@ -511,7 +561,7 @@ func destructiveSQLKeyword(token string) bool {
 	switch strings.ToUpper(strings.TrimSpace(token)) {
 	case "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE",
 		"GRANT", "REVOKE", "MERGE", "CALL", "EXEC", "EXECUTE", "COPY", "LOAD",
-		"UNLOAD", "REPLACE", "INTO":
+		"UNLOAD", "REPLACE", "INTO", "UNION":
 		return true
 	default:
 		return false

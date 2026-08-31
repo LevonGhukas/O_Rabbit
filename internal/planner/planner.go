@@ -241,6 +241,13 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 		}
 	}
 
+		if err := connectors.ValidateWhereClause(o.WhereClause); err != nil {
+		return db.Run{}, nil, fmt.Errorf("options_json.where_clause is invalid: %w", err)
+	}
+	if err := connectors.ValidateSelectColumns(o.SelectColumns); err != nil {
+		return db.Run{}, nil, fmt.Errorf("options_json.select_columns is invalid: %w", err)
+	}
+
 	tgtConn, err := st.GetConnection(ctx, job.TargetConnectionID)
 	if err != nil {
 		return db.Run{}, nil, err

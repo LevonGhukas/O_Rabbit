@@ -23,7 +23,7 @@ func TestUploadCapacityWaitsWithoutFailingAndReleases(t *testing.T) {
 			}, nil
 		},
 		releaseUpload: func(_ context.Context, req *grpcpb.ReleaseUploadCapacityRequest, _ ...grpc.CallOption) (*grpcpb.ReleaseUploadCapacityResponse, error) {
-			if req.LeaseId != "lease" || req.LeaseToken != "secret" {
+			if req.LeaseId != "lease" || req.LeaseToken != "secret" || req.BootId != "boot-test" {
 				t.Fatalf("unexpected release credential")
 			}
 			releases.Add(1)
@@ -31,7 +31,7 @@ func TestUploadCapacityWaitsWithoutFailingAndReleases(t *testing.T) {
 		},
 	}
 	task := &grpcpb.TaskAssignment{TaskId: "task", AttemptId: "attempt", FencingToken: "fence"}
-	uploadCtx, closeGuard, err := holdUploadCapacity(context.Background(), cp, "worker", task)
+	uploadCtx, closeGuard, err := holdUploadCapacity(context.Background(), cp, "worker", "boot-test", task)
 	if err != nil {
 		t.Fatalf("hold capacity: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestUploadCapacityRevokesContextOnLostLease(t *testing.T) {
 	}
 	task := &grpcpb.TaskAssignment{TaskId: "task", AttemptId: "attempt", FencingToken: "fence"}
 
-	uploadCtx, closeGuard, err := holdUploadCapacity(context.Background(), cp, "worker", task)
+	uploadCtx, closeGuard, err := holdUploadCapacity(context.Background(), cp, "worker", "boot-test", task)
 	if err != nil {
 		t.Fatalf("hold capacity: %v", err)
 	}

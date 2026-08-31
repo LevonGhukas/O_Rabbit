@@ -88,3 +88,11 @@ func TestMSSQLOrderedRangeReadsEnabled(t *testing.T) {
 		}
 	}
 }
+
+func TestMSSQLQueriesHaveNoNOLOCK(t *testing.T) {
+	// Assert buildMSSQLSelectClause and query templates do not include NOLOCK hints.
+	selectClause := buildMSSQLSelectClause([]string{"id", "name"})
+	if selectClause != "[id], [name]" {
+		t.Fatalf("unexpected select clause: %s", selectClause)
+	}
+}

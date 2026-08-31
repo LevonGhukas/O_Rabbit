@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -16,6 +17,16 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/httperr"
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 )
+
+func encryptionTestKey(t *testing.T) crypto.Key {
+	t.Helper()
+	t.Setenv("ORABBIT_MASTER_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	k, err := crypto.LoadMasterKeyFromEnv()
+	if err != nil {
+		t.Fatalf("load test master key: %v", err)
+	}
+	return k
+}
 
 func TestHandlerAuthMiddlewareReturnsJSONUnauthorized(t *testing.T) {
 	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{PID: 1, HTTPAddr: ":9100", GRPCAddr: ":9102", DBPath: "test.sqlite"}, "topsecret")
@@ -106,18 +117,76 @@ func TestHealthzRemainsPlainTextLiveness(t *testing.T) {
 	}
 }
 
-func TestReadyReturnsJSONOKWithoutAuth(t *testing.T) {
+func TestConnectionSecretWritesRequireMasterKeyAndUseAESGCM(t *testing.T) {
+	st := openTestStore(t)
+	body := `{"name":"source","kind":"source","engine":"postgres","metadata":{},"secret":{"dsn":"postgres://u:p@db/app"}}`
+
+	missingKey := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	rec := httptest.NewRecorder()
+	missingKey.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/connections", strings.NewReader(body)))
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "ORABBIT_MASTER_KEY") {
+		t.Fatalf("missing-key create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	key := encryptionTestKey(t)
+	secure := NewServer(nil, st, nil, key, StatusInfo{}, "")
+	rec = httptest.NewRecorder()
+	secure.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/connections", strings.NewReader(body)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("secure create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	connections, err := st.ListConnections(context.Background())
+	if err != nil || len(connections) != 1 {
+		t.Fatalf("connections=%d err=%v", len(connections), err)
+	}
+	if len(connections[0].SecretEncBlob) == 0 || connections[0].SecretEncBlob[0] != 1 {
+		t.Fatalf("connection secret was not AES-GCM version 1: %x", connections[0].SecretEncBlob)
+	}
+	if strings.Contains(string(connections[0].SecretEncBlob), "postgres://u:p@db/app") {
+		t.Fatal("connection secret persisted plaintext")
+	}
+
+	legacyID := "legacy-connection"
+	legacy, err := crypto.Encrypt(crypto.Key{}, []byte(`{"dsn":"postgres://legacy"}`), []byte(legacyID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateConnection(context.Background(), db.Connection{ID: legacyID, Name: "legacy", Kind: "source", Engine: "postgres", MetadataJSON: []byte(`{}`), SecretEncBlob: legacy}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := crypto.Decrypt(crypto.Key{}, legacy, []byte(legacyID)); err != nil || string(got) != `{"dsn":"postgres://legacy"}` {
+		t.Fatalf("legacy plaintext compatibility got=%s err=%v", got, err)
+	}
+
+	rec = httptest.NewRecorder()
+	update := `{"name":"legacy","kind":"source","engine":"postgres","metadata":{},"secret":{"dsn":"postgres://rotated"}}`
+	missingKey.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/connections/"+legacyID, strings.NewReader(update)))
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "ORABBIT_MASTER_KEY") {
+		t.Fatalf("missing-key update status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestReadyRequiresAuthWhenConfigured(t *testing.T) {
 	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "topsecret")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 
 	srv.Handler().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d want=%d", rec.Code, http.StatusOK)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d want=%d", rec.Code, http.StatusUnauthorized)
+	}
+
+	authRec := httptest.NewRecorder()
+	authReq := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	authReq.Header.Set("Authorization", "Bearer topsecret")
+	srv.Handler().ServeHTTP(authRec, authReq)
+
+	if authRec.Code != http.StatusOK {
+		t.Fatalf("status=%d want=%d", authRec.Code, http.StatusOK)
 	}
 	var resp readinessResponse
-	decodeJSONBody(t, rec, &resp)
+	decodeJSONBody(t, authRec, &resp)
 	if !resp.OK {
 		t.Fatalf("ready response ok=%v want true", resp.OK)
 	}
@@ -899,5 +968,53 @@ func decodeJSONBody(t *testing.T, rec *httptest.ResponseRecorder, out any) {
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), out); err != nil {
 		t.Fatalf("decode json body: %v\nbody=%s", err, rec.Body.String())
+	}
+}
+
+func TestReadJSONRejectsPayloadTooLarge(t *testing.T) {
+	st := openTestStore(t)
+	srv := NewServer(nil, st, nil, encryptionTestKey(t), StatusInfo{}, "")
+	
+	// Create payload larger than 1MB
+	oversize := strings.Repeat("x", (1<<20) + 100)
+	body := fmt.Sprintf(`{"name":"test","kind":"source","engine":"postgres","metadata":{"junk":"%s"},"secret":{"dsn":"postgres://u:p@db/app"}}`, oversize)
+	
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/connections", strings.NewReader(body))
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize payload code=%d want 413 body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestReadJSONRejectsTrailingData(t *testing.T) {
+	st := openTestStore(t)
+	srv := NewServer(nil, st, nil, encryptionTestKey(t), StatusInfo{}, "")
+	
+	body := `{"name":"test","kind":"source","engine":"postgres","metadata":{},"secret":{"dsn":"postgres://u:p@db/app"}} extra_data`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/connections", strings.NewReader(body))
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("trailing payload code=%d want 400 body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestStatusSanitizesDBPath(t *testing.T) {
+	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{PID: 42, HTTPAddr: ":9100", DBPath: "/var/lib/private/secret/orabbit.sqlite"}, "")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code=%d want 200", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "/var/lib/private/secret") {
+		t.Fatalf("status leaked full DB path: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "orabbit.sqlite") {
+		t.Fatalf("status missing DB basename: %s", rec.Body.String())
 	}
 }

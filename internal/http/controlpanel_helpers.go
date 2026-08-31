@@ -137,6 +137,10 @@ func (s *Server) loadServerTarget(ctx context.Context, serverID string) (db.Serv
 	if err != nil {
 		return db.Server{}, sshops.SSHTarget{}, err
 	}
+	fingerprint := firstNonEmptyString(secret.HostKeyFingerprint, cred.HostKeyFingerprint)
+	if fingerprint == "" {
+		return db.Server{}, sshops.SSHTarget{}, fmt.Errorf("server credential has no trusted SSH host key fingerprint; update credential with the server SHA-256 fingerprint")
+	}
 	target := sshops.SSHTarget{
 		Host:               srv.Host,
 		Port:               srv.SSHPort,
@@ -144,7 +148,7 @@ func (s *Server) loadServerTarget(ctx context.Context, serverID string) (db.Serv
 		Password:           secret.Password,
 		PrivateKey:         secret.PrivateKey,
 		Passphrase:         secret.Passphrase,
-		HostKeyFingerprint: firstNonEmptyString(secret.HostKeyFingerprint, cred.HostKeyFingerprint),
+		HostKeyFingerprint: fingerprint,
 	}
 	return srv, target, nil
 }

@@ -31,7 +31,7 @@ func (s *Server) handleDeployments(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var req deploymentRequest
 		if err := readJSON(r, &req); err != nil {
-			writeInvalidInput(w, "invalid JSON body", invalidJSONDetails(err))
+			handleJSONReadError(w, err)
 			return
 		}
 		server, target, err := s.loadServerTarget(r.Context(), strings.TrimSpace(req.ServerID))

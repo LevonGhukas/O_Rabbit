@@ -124,6 +124,7 @@ services:
     environment:
       ORABBIT_HTTP_AUTH_TOKEN: "${ORABBIT_HTTP_AUTH_TOKEN:?set ORABBIT_HTTP_AUTH_TOKEN}"
       ORABBIT_WORKER_AUTH_TOKEN: "${ORABBIT_WORKER_AUTH_TOKEN:?set ORABBIT_WORKER_AUTH_TOKEN}"
+      ORABBIT_MASTER_KEY: "${ORABBIT_MASTER_KEY:?set ORABBIT_MASTER_KEY to stable base64 or hex 32-byte key}"
     ports:
       - "9100:9100"
     volumes:

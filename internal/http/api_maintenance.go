@@ -1,8 +1,7 @@
 package httpapi
 
 import (
-	"encoding/json"
-	"net/http"
+		"net/http"
 )
 
 type maintenanceSubmitRequest struct {
@@ -22,8 +21,8 @@ func (s *Server) handleMaintenanceSubmit(w http.ResponseWriter, r *http.Request)
 	}
 
 	var req maintenanceSubmitRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeInvalidInput(w, "Invalid JSON payload", nil)
+	if err := readJSON(r, &req); err != nil {
+		handleJSONReadError(w, err)
 		return
 	}
 

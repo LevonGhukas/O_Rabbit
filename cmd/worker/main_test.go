@@ -177,7 +177,7 @@ func TestArtifactFailureReportingIsSafeAndClassified(t *testing.T) {
 		return &grpcpb.ReportTaskProgressResponse{}, nil
 	}}
 	task := &grpcpb.TaskAssignment{TaskId: "task", RunId: "run", AttemptId: "attempt", AttemptNumber: 2, FencingToken: "do-not-persist"}
-	reportArtifactFailureBestEffort(context.Background(), slog.Default(), cp, "worker", task, &artifact.Failure{Classification: artifact.FailureMultipartCompleteAmbiguous, Ambiguous: true, ReconciliationOK: true, VerificationMethod: artifact.VerificationPortable, ObjectKey: "safe/key", FileIndex: 3})
+	reportArtifactFailureBestEffort(context.Background(), slog.Default(), cp, "worker", "boot-test", task, &artifact.Failure{Classification: artifact.FailureMultipartCompleteAmbiguous, Ambiguous: true, ReconciliationOK: true, VerificationMethod: artifact.VerificationPortable, ObjectKey: "safe/key", FileIndex: 3})
 	if captured == nil {
 		t.Fatal("failure event not reported")
 	}
@@ -323,7 +323,7 @@ func TestLongOperationRenewsWithoutProgressAndStopsCleanly(t *testing.T) {
 	finish := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- executeTaskWithBody(context.Background(), cp, "worker-1", testAssignment(t0), clock, func(ctx context.Context) error {
+		done <- executeTaskWithBody(context.Background(), cp, "worker-1", "boot-1", testAssignment(t0), clock, func(ctx context.Context) error {
 			select {
 			case <-finish:
 				return reportResultWithRetry(ctx, slog.Default(), cp, &grpcpb.ReportTaskResultRequest{TaskId: "task-1", AttemptId: "attempt-1", FencingToken: "secret-token", Status: "SUCCEEDED"})
@@ -364,7 +364,7 @@ func TestWorkerShutdownStopsRenewalAndTimer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- executeTaskWithBody(ctx, cp, "worker", testAssignment(t0), clock, func(taskCtx context.Context) error { <-taskCtx.Done(); return taskCtx.Err() })
+		done <- executeTaskWithBody(ctx, cp, "worker", "boot-1", testAssignment(t0), clock, func(taskCtx context.Context) error { <-taskCtx.Done(); return taskCtx.Err() })
 	}()
 	clock.waitTimer(t)
 	cancel()
@@ -390,7 +390,7 @@ func TestTransientRenewalFailuresUseLastKnownDeadline(t *testing.T) {
 		finish := make(chan struct{})
 		done := make(chan error, 1)
 		go func() {
-			done <- executeTaskWithBody(context.Background(), cp, "worker", testAssignment(t0), clock, func(ctx context.Context) error {
+			done <- executeTaskWithBody(context.Background(), cp, "worker", "boot-1", testAssignment(t0), clock, func(ctx context.Context) error {
 				select {
 				case <-finish:
 					return nil
@@ -424,7 +424,7 @@ func TestTransientRenewalFailuresUseLastKnownDeadline(t *testing.T) {
 		}}
 		done := make(chan error, 1)
 		go func() {
-			done <- executeTaskWithBody(context.Background(), cp, "worker", testAssignment(t0), clock, func(ctx context.Context) error {
+			done <- executeTaskWithBody(context.Background(), cp, "worker", "boot-1", testAssignment(t0), clock, func(ctx context.Context) error {
 				<-ctx.Done()
 				if ctx.Err() == nil {
 					uploadStarted.Store(true)
@@ -465,7 +465,7 @@ func TestDefinitiveRenewalRejectionsCancelImmediately(t *testing.T) {
 			}}
 			done := make(chan error, 1)
 			go func() {
-				done <- executeTaskWithBody(context.Background(), cp, "worker", testAssignment(t0), clock, func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() })
+				done <- executeTaskWithBody(context.Background(), cp, "worker", "boot-1", testAssignment(t0), clock, func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() })
 			}()
 			clock.waitTimer(t)
 			clock.FireNext(t)
@@ -490,7 +490,7 @@ func TestConfirmedFencingSuppressesUploadAndResultBoundaries(t *testing.T) {
 			reached := make(chan struct{})
 			done := make(chan error, 1)
 			go func() {
-				done <- executeTaskWithBody(context.Background(), cp, "worker", testAssignment(t0), clock, func(ctx context.Context) error {
+				done <- executeTaskWithBody(context.Background(), cp, "worker", "boot-1", testAssignment(t0), clock, func(ctx context.Context) error {
 					close(reached)
 					<-ctx.Done()
 					if ctx.Err() == nil {
@@ -536,7 +536,7 @@ func TestConfirmedFencingCancelsInFlightUploadAndResultRPC(t *testing.T) {
 			}
 			done := make(chan error, 1)
 			go func() {
-				done <- executeTaskWithBody(context.Background(), cp, "worker", testAssignment(t0), clock, func(ctx context.Context) error {
+				done <- executeTaskWithBody(context.Background(), cp, "worker", "boot-1", testAssignment(t0), clock, func(ctx context.Context) error {
 					if stage == "upload" {
 						close(started)
 						<-ctx.Done()
@@ -570,7 +570,7 @@ func TestDurableUploadAfterFencingRemainsUnreported(t *testing.T) {
 	}}
 	done := make(chan error, 1)
 	go func() {
-		done <- executeTaskWithBody(context.Background(), cp, "worker", testAssignment(t0), clock, func(ctx context.Context) error {
+		done <- executeTaskWithBody(context.Background(), cp, "worker", "boot-1", testAssignment(t0), clock, func(ctx context.Context) error {
 			close(uploadDurable) // attempt-scoped object became durable
 			<-ctx.Done()
 			if ctx.Err() == nil {
@@ -598,7 +598,7 @@ func TestCheckTaskCancellationReturnsCanceledError(t *testing.T) {
 		},
 	}
 
-	err := checkTaskCancellation(context.Background(), slog.Default(), cp, "worker-1", &grpcpb.TaskAssignment{
+	err := checkTaskCancellation(context.Background(), slog.Default(), cp, "worker-1", "boot-1", &grpcpb.TaskAssignment{
 		TaskId: "task-1",
 		RunId:  "run-1",
 	}, 10, 20, 30)
@@ -612,6 +612,9 @@ func TestCheckTaskCancellationReturnsCanceledError(t *testing.T) {
 }
 
 type fakeControlPlaneClient struct {
+	registerWorker func(context.Context, *grpcpb.RegisterWorkerRequest, ...grpc.CallOption) (*grpcpb.RegisterWorkerResponse, error)
+	heartbeat func(context.Context, *grpcpb.HeartbeatRequest, ...grpc.CallOption) (*grpcpb.HeartbeatResponse, error)
+	requestTask func(context.Context, *grpcpb.RequestTaskRequest, ...grpc.CallOption) (*grpcpb.RequestTaskResponse, error)
 	reportTaskProgress func(context.Context, *grpcpb.ReportTaskProgressRequest, ...grpc.CallOption) (*grpcpb.ReportTaskProgressResponse, error)
 	renewTaskLease     func(context.Context, *grpcpb.RenewTaskLeaseRequest, ...grpc.CallOption) (*grpcpb.RenewTaskLeaseResponse, error)
 	acquireUpload      func(context.Context, *grpcpb.AcquireUploadCapacityRequest, ...grpc.CallOption) (*grpcpb.AcquireUploadCapacityResponse, error)
@@ -619,15 +622,18 @@ type fakeControlPlaneClient struct {
 	reportTaskResult   func(context.Context, *grpcpb.ReportTaskResultRequest, ...grpc.CallOption) (*grpcpb.ReportTaskResultResponse, error)
 }
 
-func (f fakeControlPlaneClient) RegisterWorker(context.Context, *grpcpb.RegisterWorkerRequest, ...grpc.CallOption) (*grpcpb.RegisterWorkerResponse, error) {
+func (f fakeControlPlaneClient) RegisterWorker(ctx context.Context, req *grpcpb.RegisterWorkerRequest, opts ...grpc.CallOption) (*grpcpb.RegisterWorkerResponse, error) {
+	if f.registerWorker != nil { return f.registerWorker(ctx, req, opts...) }
 	panic("unexpected RegisterWorker call")
 }
 
-func (f fakeControlPlaneClient) Heartbeat(context.Context, *grpcpb.HeartbeatRequest, ...grpc.CallOption) (*grpcpb.HeartbeatResponse, error) {
+func (f fakeControlPlaneClient) Heartbeat(ctx context.Context, req *grpcpb.HeartbeatRequest, opts ...grpc.CallOption) (*grpcpb.HeartbeatResponse, error) {
+	if f.heartbeat != nil { return f.heartbeat(ctx, req, opts...) }
 	panic("unexpected Heartbeat call")
 }
 
-func (f fakeControlPlaneClient) RequestTask(context.Context, *grpcpb.RequestTaskRequest, ...grpc.CallOption) (*grpcpb.RequestTaskResponse, error) {
+func (f fakeControlPlaneClient) RequestTask(ctx context.Context, req *grpcpb.RequestTaskRequest, opts ...grpc.CallOption) (*grpcpb.RequestTaskResponse, error) {
+	if f.requestTask != nil { return f.requestTask(ctx, req, opts...) }
 	panic("unexpected RequestTask call")
 }
 
@@ -664,4 +670,50 @@ func (f fakeControlPlaneClient) ReportTaskResult(ctx context.Context, in *grpcpb
 		panic("unexpected ReportTaskResult call")
 	}
 	return f.reportTaskResult(ctx, in, opts...)
+}
+
+func TestWorkerBootIdPopulatedInRegistrationAndRequests(t *testing.T) {
+	var regCaptured *grpcpb.RegisterWorkerRequest
+	var hbCaptured *grpcpb.HeartbeatRequest
+	var reqTaskCaptured *grpcpb.RequestTaskRequest
+
+	cp := fakeControlPlaneClient{
+		registerWorker: func(_ context.Context, req *grpcpb.RegisterWorkerRequest, _ ...grpc.CallOption) (*grpcpb.RegisterWorkerResponse, error) {
+			regCaptured = req
+			return &grpcpb.RegisterWorkerResponse{WorkerId: "worker-1", HeartbeatIntervalMs: 1000}, nil
+		},
+		heartbeat: func(_ context.Context, req *grpcpb.HeartbeatRequest, _ ...grpc.CallOption) (*grpcpb.HeartbeatResponse, error) {
+			hbCaptured = req
+			return &grpcpb.HeartbeatResponse{}, nil
+		},
+		requestTask: func(_ context.Context, req *grpcpb.RequestTaskRequest, _ ...grpc.CallOption) (*grpcpb.RequestTaskResponse, error) {
+			reqTaskCaptured = req
+			return &grpcpb.RequestTaskResponse{}, nil
+		},
+	}
+
+	bootID := "boot-xyz-123"
+	regResp, err := registerWithRetry(context.Background(), slog.Default(), cp, &grpcpb.RegisterWorkerRequest{
+		WorkerId: "worker-1",
+		BootId:   bootID,
+		Hostname: "host-1",
+		Pid:      12345,
+		Version:  "1.0.0",
+	})
+	if err != nil || regResp.WorkerId != "worker-1" {
+		t.Fatalf("register failed: %v", err)
+	}
+	if regCaptured.BootId != bootID || regCaptured.Hostname != "host-1" || regCaptured.Pid != 12345 || regCaptured.Version != "1.0.0" {
+		t.Fatalf("unexpected regCaptured: %+v", regCaptured)
+	}
+
+	_, _ = cp.Heartbeat(context.Background(), &grpcpb.HeartbeatRequest{WorkerId: "worker-1", BootId: bootID, NowUnixMs: time.Now().UnixMilli()})
+	if hbCaptured == nil || hbCaptured.BootId != bootID {
+		t.Fatalf("unexpected hbCaptured: %+v", hbCaptured)
+	}
+
+	_, _ = cp.RequestTask(context.Background(), &grpcpb.RequestTaskRequest{WorkerId: "worker-1", BootId: bootID, ProtocolVersion: 5})
+	if reqTaskCaptured == nil || reqTaskCaptured.BootId != bootID {
+		t.Fatalf("unexpected reqTaskCaptured: %+v", reqTaskCaptured)
+	}
 }

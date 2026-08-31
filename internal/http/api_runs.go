@@ -55,7 +55,7 @@ type runSubmitSourceRequest struct {
 	CursorColumn string `json:"cursor_column"`
 	Incremental  bool   `json:"incremental"` 
 	WhereClause  string `json:"where_clause,omitempty"` 
-	SelectColumns []string          `json:"select_columns,omitempty"` 
+	SelectColumns []string          `json:"select_columns,omitempty"`
 	ColumnTypes   map[string]string `json:"column_types,omitempty"`
 }
 
@@ -396,6 +396,10 @@ func (s *Server) handleRunSubmit(w http.ResponseWriter, r *http.Request) {
 		writeInvalidInput(w, "invalid JSON body", invalidJSONDetails(err))
 		return
 	}
+	if s.k.IsZero() {
+		writeMasterKeyRequired(w, "connection secrets")
+		return
+	}
 	spec, err := validateRunSubmitRequest(req)
 	if err != nil {
 		s.writeRunSubmitError(w, err)
@@ -666,6 +670,12 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 		return validatedRunSubmitSpec{}, invalidSubmitField("source.mode", "source.mode must be table or query", map[string]any{
 			"supported_modes": []string{"table", "query"},
 		})
+	}
+		if err := connectors.ValidateWhereClause(req.Source.WhereClause); err != nil {
+		return validatedRunSubmitSpec{}, invalidSubmitField("source.where_clause", err.Error(), nil)
+	}
+	if err := connectors.ValidateSelectColumns(req.Source.SelectColumns); err != nil {
+		return validatedRunSubmitSpec{}, invalidSubmitField("source.select_columns", err.Error(), nil)
 	}
 	cursorColumn := strings.TrimSpace(req.Source.CursorColumn)
 	if cursorColumn == "" && req.Source.Incremental && !connectors.SupportsDocumentReader(engine) {
@@ -1080,6 +1090,9 @@ func anyStringValue(v any) string {
 }
 
 func (s *Server) upsertConnectionByName(r *http.Request, req connectionCreateRequest) (db.Connection, error) {
+	if s.k.IsZero() {
+		return db.Connection{}, db.ErrMasterKeyRequired
+	}
 	connections, err := s.st.ListConnections(r.Context())
 	if err != nil {
 		return db.Connection{}, err
