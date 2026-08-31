@@ -458,12 +458,21 @@ func PlansFromSQLEngineWithOverrides(engine string, cols []string, colTypes []*s
 		return plans, schema, err
 	}
 
+	targetTypesLower := make(map[string]string, len(targetTypes))
+	for k, v := range targetTypes {
+		targetTypesLower[strings.ToLower(strings.TrimSpace(k))] = v
+	}
+
 	fields := schema.Fields()
 	newFields := make([]arrow.Field, len(fields))
 	copy(newFields, fields)
 
 	for i, f := range fields {
-		if targetTypeStr, ok := targetTypes[f.Name]; ok && strings.TrimSpace(targetTypeStr) != "" {
+		targetTypeStr, ok := targetTypes[f.Name]
+		if !ok {
+			targetTypeStr, ok = targetTypesLower[strings.ToLower(strings.TrimSpace(f.Name))]
+		}
+		if ok && strings.TrimSpace(targetTypeStr) != "" {
 			tStr := strings.TrimSpace(targetTypeStr)
 			nullable := strings.HasPrefix(strings.ToLower(tStr), "nullable(")
 
