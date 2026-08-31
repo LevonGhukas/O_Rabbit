@@ -73,42 +73,6 @@ func MongoDocsToRecord(alloc memory.Allocator, schema *arrow.Schema, docs []map[
 		return nil, &MongoSchemaViolationError{Reason: "provided Arrow schema does not match deterministic BSON schema"}
 	}
 	return MongoDocsToRecordWithPlan(alloc, plan, docs)
-
-	plans := buildPlansFromSchema(schema)
-	builders := make([]array.Builder, len(plans))
-	for i, p := range plans {
-		b := p.Builder(alloc)
-		b.Reserve(len(docs))
-		builders[i] = b
-	}
-	defer func() {
-		for _, b := range builders {
-			b.Release()
-		}
-	}()
-
-	for _, doc := range docs {
-		for i, p := range plans {
-			val := doc[p.Name]
-			if val == nil {
-				builders[i].AppendNull()
-			} else {
-				p.Append(builders[i], val)
-			}
-		}
-	}
-
-	arrays := make([]arrow.Array, len(builders))
-	for i, b := range builders {
-		arrays[i] = b.NewArray()
-	}
-	defer func() {
-		for _, a := range arrays {
-			a.Release()
-		}
-	}()
-
-	return array.NewRecordBatch(schema, arrays, int64(len(docs))), nil
 }
 
 func mongoArrowSchemaEqual(left, right *arrow.Schema) bool {
