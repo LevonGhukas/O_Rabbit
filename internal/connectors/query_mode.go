@@ -137,14 +137,22 @@ func (d queryModeDialect) quoteCursorColumn(cursorColumn string) (string, error)
 	if leaf == "" {
 		return "", fmt.Errorf("cursor column is required")
 	}
-	if d.engine == "oracle" {
+	switch d.engine {
+	case "oracle":
 		qc, err := quoteOracleQueryResultIdentifier(leaf)
 		if err != nil {
 			return "", err
 		}
 		return queryModeAlias + "." + qc, nil
+	case "mysql", "mariadb", "clickhouse":
+		return fmt.Sprintf("`%s`.`%s`", queryModeAlias, strings.ReplaceAll(leaf, "`", "``")), nil
+	case "mssql":
+		return fmt.Sprintf("[%s].[%s]", queryModeAlias, strings.ReplaceAll(leaf, "]", "]]")), nil
+	case "postgres", "trino":
+		return fmt.Sprintf(`"%s"."%s"`, queryModeAlias, strings.ReplaceAll(leaf, `"`, `""`)), nil
+	default:
+		return d.quoteIdent(queryModeAlias + "." + leaf)
 	}
-	return d.quoteIdent(queryModeAlias + "." + leaf)
 }
 
 // QueryHash returns a short stable hash of the normalized query for state,
