@@ -10,22 +10,24 @@ import (
 )
 
 const (
-	mysqlBitTextCodec          = "mysql-bit-text"
-	mysqlTimeTextCodec         = "mysql-time-text"
-	mysqlJSONTextCodec         = "mysql-json-text"
-	mysqlEnumTextCodec         = "mysql-enum-text"
-	mysqlSetTextCodec          = "mysql-set-text"
-	mysqlGeometryBinaryCodec   = "mysql-geometry-binary"
-	mysqlExtensionTextCodec    = "mysql-extension-text"
-	mariadbBitTextCodec        = "mariadb-bit-text"
-	mariadbTimeTextCodec       = "mariadb-time-text"
-	mariadbJSONTextCodec       = "mariadb-json-text"
-	mariadbEnumTextCodec       = "mariadb-enum-text"
-	mariadbSetTextCodec        = "mariadb-set-text"
-	mariadbGeometryBinaryCodec = "mariadb-geometry-binary"
-	mariadbUUIDTextCodec       = "mariadb-uuid-text"
-	mariadbNetworkTextCodec    = "mariadb-network-text"
-	mariadbExtensionTextCodec  = "mariadb-extension-text"
+	mysqlBitTextCodec           = "mysql-bit-text"
+	mysqlTimeTextCodec          = "mysql-time-text"
+	mysqlJSONTextCodec          = "mysql-json-text"
+	mysqlEnumTextCodec          = "mysql-enum-text"
+	mysqlSetTextCodec           = "mysql-set-text"
+	mysqlGeometryBinaryCodec    = "mysql-geometry-binary"
+	mysqlUnsignedIntegerCodec   = "mysql-unsigned-integer-text"
+	mysqlExtensionTextCodec     = "mysql-extension-text"
+	mariadbBitTextCodec         = "mariadb-bit-text"
+	mariadbTimeTextCodec        = "mariadb-time-text"
+	mariadbJSONTextCodec        = "mariadb-json-text"
+	mariadbEnumTextCodec        = "mariadb-enum-text"
+	mariadbSetTextCodec         = "mariadb-set-text"
+	mariadbGeometryBinaryCodec  = "mariadb-geometry-binary"
+	mariadbUnsignedIntegerCodec = "mariadb-unsigned-integer-text"
+	mariadbUUIDTextCodec        = "mariadb-uuid-text"
+	mariadbNetworkTextCodec     = "mariadb-network-text"
+	mariadbExtensionTextCodec   = "mariadb-extension-text"
 )
 
 func planMySQLColumn(name, dbType string, precision, scale int64, hasDecimal bool) ColumnPlan {
@@ -63,13 +65,21 @@ func planMySQLFamilyColumn(name, dbType string, precision, scale int64, hasDecim
 
 	case clean == "MEDIUMINT" || clean == "INT" || clean == "INTEGER":
 		if isUnsigned {
+			// INT/INTEGER exposes the full UInt32 domain. Iceberg has only a
+			// signed 32-bit int, so retain the exact decimal representation rather
+			// than allowing a later Arrow->Iceberg schema conversion to narrow it.
+			if clean == "INT" || clean == "INTEGER" {
+				return planMySQLUnsignedIntegerText(name, clean, engine, ^uint64(0)>>32)
+			}
 			return planUint32(name)
 		}
 		return planInt32(name)
 
 	case clean == "BIGINT":
 		if isUnsigned {
-			return planUint64(name)
+			// BIGINT UNSIGNED exceeds Iceberg's signed long domain. This fallback
+			// is declaration-driven, never selected from sampled values.
+			return planMySQLUnsignedIntegerText(name, clean, engine, ^uint64(0))
 		}
 		return planInt64(name)
 
@@ -171,6 +181,37 @@ func planMySQLText(name, sourceType, engine, codec, semantic string, valid func(
 		return nil
 	}
 	plan.Policy = &TypePolicy{Version: MappingPolicyVersionV1, MappingKind: MappingFallback, Fallback: &FallbackCodec{Name: codec, Version: 1}, Metadata: SourceTypeMetadata{Properties: map[string]string{engine + ".semantic_type": semantic, engine + ".type_name": sourceType}}}
+	return plan
+}
+
+func planMySQLUnsignedIntegerText(name, sourceType, engine string, max uint64) ColumnPlan {
+	plan := planString(name)
+	plan.Append = func(b array.Builder, v any) error {
+		bb := b.(*array.StringBuilder)
+		v = dereferenceValue(v)
+		if v == nil {
+			bb.AppendNull()
+			return nil
+		}
+		u, reason := toUint64Checked(v)
+		if reason != "" {
+			return &IntegerConversionError{Target: fmt.Sprintf("%s %s unsigned integer text", engine, sourceType), InputType: fmt.Sprintf("%T", v), Reason: reason}
+		}
+		if u > max {
+			return &IntegerConversionError{Target: fmt.Sprintf("%s %s unsigned integer text", engine, sourceType), InputType: fmt.Sprintf("%T", v), Reason: "overflow"}
+		}
+		bb.Append(strconv.FormatUint(u, 10))
+		return nil
+	}
+	plan.Policy = &TypePolicy{
+		Version:     MappingPolicyVersionV1,
+		MappingKind: MappingFallback,
+		Fallback:    &FallbackCodec{Name: mysqlCodec(engine, mysqlUnsignedIntegerCodec, mariadbUnsignedIntegerCodec), Version: 1},
+		Metadata: SourceTypeMetadata{Properties: map[string]string{
+			engine + ".semantic_type": "unsigned-integer",
+			engine + ".type_name":     sourceType,
+		}},
+	}
 	return plan
 }
 

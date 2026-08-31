@@ -18,9 +18,9 @@ func TestMySQLTypeMapping(t *testing.T) {
 		hasDecimal bool
 		wantType   arrow.DataType
 	}{
-		{"BIGINT UNSIGNED", 0, 0, false, arrow.PrimitiveTypes.Uint64},
+		{"BIGINT UNSIGNED", 0, 0, false, arrow.BinaryTypes.String},
 		{"BIGINT", 0, 0, false, arrow.PrimitiveTypes.Int64},
-		{"INT UNSIGNED", 0, 0, false, arrow.PrimitiveTypes.Uint32},
+		{"INT UNSIGNED", 0, 0, false, arrow.BinaryTypes.String},
 		{"INT", 0, 0, false, arrow.PrimitiveTypes.Int32},
 		{"MEDIUMINT UNSIGNED", 0, 0, false, arrow.PrimitiveTypes.Uint32},
 		{"MEDIUMINT", 0, 0, false, arrow.PrimitiveTypes.Int32},
@@ -57,24 +57,58 @@ func TestMySQLTypeMapping(t *testing.T) {
 	}
 }
 
-func TestMySQLUint64MaxRoundtrip(t *testing.T) {
-	plan := PlanForSQLColumn("mysql", "col", "BIGINT UNSIGNED", 0, 0, false)
-	builder := plan.Builder(memory.DefaultAllocator)
-	defer builder.Release()
+func TestMySQLFamilyUnsignedIntegerIcebergPolicy(t *testing.T) {
+	for _, tt := range []struct {
+		engine, typ, codec string
+		value              any
+		wantType           arrow.DataType
+		wantText           string
+	}{
+		{"mysql", "TINYINT UNSIGNED", "", uint64(255), arrow.PrimitiveTypes.Uint8, ""},
+		{"mysql", "SMALLINT UNSIGNED", "", uint64(65535), arrow.PrimitiveTypes.Uint16, ""},
+		{"mysql", "INT UNSIGNED", mysqlUnsignedIntegerCodec, uint64(4294967295), arrow.BinaryTypes.String, "4294967295"},
+		{"mysql", "BIGINT UNSIGNED", mysqlUnsignedIntegerCodec, uint64(18446744073709551615), arrow.BinaryTypes.String, "18446744073709551615"},
+		{"mariadb", "INT UNSIGNED", mariadbUnsignedIntegerCodec, uint64(4294967295), arrow.BinaryTypes.String, "4294967295"},
+		{"mariadb", "BIGINT UNSIGNED", mariadbUnsignedIntegerCodec, uint64(18446744073709551615), arrow.BinaryTypes.String, "18446744073709551615"},
+	} {
+		t.Run(tt.engine+"_"+tt.typ, func(t *testing.T) {
+			plan := PlanForSQLColumn(tt.engine, "col", tt.typ, 0, 0, false)
+			require.Equal(t, tt.wantType, plan.DataType)
+			builder := plan.Builder(memory.DefaultAllocator)
+			defer builder.Release()
+			require.NoError(t, plan.Append(builder, tt.value))
+			require.NoError(t, plan.Append(builder, nil))
+			arr := builder.NewArray()
+			defer arr.Release()
 
-	// 18446744073709551615 (MaxUint64)
-	err := plan.Append(builder, uint64(18446744073709551615))
-	require.NoError(t, err)
+			if tt.codec == "" {
+				require.Equal(t, MappingNative, plan.Policy.MappingKind)
+				switch values := arr.(type) {
+				case *array.Uint8:
+					require.Equal(t, uint8(255), values.Value(0))
+					require.True(t, values.IsNull(1))
+				case *array.Uint16:
+					require.Equal(t, uint16(65535), values.Value(0))
+					require.True(t, values.IsNull(1))
+				default:
+					t.Fatalf("native unsigned array=%T", arr)
+				}
+				return
+			}
+			require.Equal(t, MappingFallback, plan.Policy.MappingKind)
+			require.Equal(t, tt.codec, plan.Policy.Fallback.Name)
+			require.Equal(t, 1, plan.Policy.Fallback.Version)
+			require.Equal(t, tt.engine, plan.Policy.SourceEngine)
+			require.Equal(t, tt.typ, plan.Policy.SourceType)
+			require.True(t, plan.Policy.Metadata.UnsignedKnown)
+			require.True(t, plan.Policy.Metadata.Unsigned)
+			require.Equal(t, tt.typ, plan.Policy.Metadata.Properties[tt.engine+".declared_type"])
 
-	err = plan.Append(builder, "18446744073709551615")
-	require.NoError(t, err)
-
-	arr := builder.NewArray().(*array.Uint64)
-	defer arr.Release()
-
-	require.Equal(t, 2, arr.Len())
-	require.Equal(t, uint64(18446744073709551615), arr.Value(0))
-	require.Equal(t, uint64(18446744073709551615), arr.Value(1))
+			values := arr.(*array.String)
+			require.Equal(t, tt.wantText, values.Value(0))
+			require.True(t, values.IsNull(1))
+		})
+	}
 }
 
 func TestMySQLTimePreservesSignedDurationText(t *testing.T) {

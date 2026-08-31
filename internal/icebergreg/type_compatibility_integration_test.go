@@ -117,8 +117,9 @@ func TestTypeCompatibilityRESTAndClickHouse(t *testing.T) {
 				t.Fatal("registered schema lost value")
 			}
 
-			describe := clickHouseQuery(t, "DESCRIBE ice_compat.compat_"+tc.name+" FORMAT TSV")
-			values := clickHouseQuery(t, "SELECT value FROM ice_compat.compat_"+tc.name+" FORMAT TSV")
+			chTable := "ice.`compat." + tc.name + "`"
+			describe := clickHouseQuery(t, "DESCRIBE TABLE "+chTable+" FORMAT TSV")
+			values := clickHouseQuery(t, "SELECT value FROM "+chTable+" FORMAT TSV")
 			t.Logf("DESCRIBE: %s", describe)
 			t.Logf("VALUES: %s", values)
 		})
