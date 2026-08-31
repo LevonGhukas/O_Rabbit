@@ -634,6 +634,11 @@ func cmdRunInteractive(ctx context.Context, args []string) int {
 			RegistrationEngine: registrationEngine(cfg),
 		}, runID, runStatus, finalDetails, sseBench, observedStart)
 	}
+	if err == nil && strings.EqualFold(runStatus, "FAILED") {
+		if runErr := runFailureError(finalDetails); runErr != nil {
+			fmt.Fprintln(os.Stderr, runErr)
+		}
+	}
 
 	// Scale local workers down after the run completes (best-effort).
 	// The master stays running; use `orabbit-client stack stop --all` to stop everything.
@@ -703,6 +708,11 @@ func cmdRunWatch(ctx context.Context, args []string) int {
 	initialStatus := strings.ToUpper(strings.TrimSpace(details.Run.Status))
 	if initialStatus == "SUCCEEDED" || initialStatus == "FAILED" || initialStatus == "CANCELED" {
 		out.eventln("run " + initialStatus)
+		if initialStatus == "FAILED" {
+			if runErr := runFailureError(details); runErr != nil {
+				fmt.Fprintln(os.Stderr, runErr)
+			}
+		}
 		return exitStatusForRun(initialStatus)
 	}
 
@@ -719,6 +729,13 @@ func cmdRunWatch(ctx context.Context, args []string) int {
 			return exitCode(serr)
 		}
 		runStatus = strings.ToUpper(strings.TrimSpace(fallbackStatus))
+	}
+	if strings.EqualFold(runStatus, "FAILED") {
+		if details, err := getRunDetails(ctx, base, runID); err != nil {
+			fmt.Fprintln(os.Stderr, "failed to fetch run failure details:", err)
+		} else if runErr := runFailureError(details); runErr != nil {
+			fmt.Fprintln(os.Stderr, runErr)
+		}
 	}
 	return exitStatusForRun(runStatus)
 }
@@ -861,6 +878,21 @@ func exitStatusForRun(status string) int {
 	default:
 		return exitOperational
 	}
+}
+
+func runFailureError(details runDetails) error {
+	for _, task := range details.Tasks {
+		if !strings.EqualFold(task.Status, "FAILED") && !strings.EqualFold(task.Status, "QUARANTINED") {
+			continue
+		}
+		if task.ErrorMessage != nil && strings.TrimSpace(*task.ErrorMessage) != "" {
+			return fmt.Errorf("run failed: %s", strings.TrimSpace(*task.ErrorMessage))
+		}
+	}
+	if details.Run.ErrorSummary != nil && strings.TrimSpace(*details.Run.ErrorSummary) != "" {
+		return fmt.Errorf("run failed: %s", strings.TrimSpace(*details.Run.ErrorSummary))
+	}
+	return fmt.Errorf("run failed")
 }
 
 func takeLeadingPositionalArg(args []string) (string, []string) {

@@ -599,6 +599,18 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *grpcpb.ReportTaskRes
 		if s.bc != nil {
 			s.bc.Publish(e)
 		}
+		if finalStatus == "FAILED" {
+			jobID := ""
+			if run, err := s.st.GetRun(ctx, runID); err == nil {
+				jobID = run.JobID
+			}
+			s.log.Error("task failed",
+				slog.String("job_id", jobID),
+				slog.String("run_id", runID),
+				slog.String("task_id", req.TaskId),
+				slog.String("err", req.ErrorMessage),
+			)
+		}
 	}
 
 	// Try to finalize the run (commit only when all tasks succeeded).

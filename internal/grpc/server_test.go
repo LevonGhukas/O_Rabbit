@@ -1,11 +1,13 @@
 package grpcapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -250,6 +252,55 @@ func TestReportTaskResultCoercesLateSuccessToCanceled(t *testing.T) {
 	}
 	if run.Status != "CANCELED" {
 		t.Fatalf("run status=%q want CANCELED", run.Status)
+	}
+}
+
+func TestReportTaskResultLogsWorkerFailureAtMaster(t *testing.T) {
+	st := openGRPCTestStore(t)
+	ctx := context.Background()
+	const runID = "run-result-failure"
+	const jobID = "job-result-failure"
+	const taskID = "task-result-failure"
+	createGRPCTestRunAndTask(t, st, runID, jobID, taskID, "PENDING")
+	a := assignGRPCTestAttempt(t, st, taskID, "worker-1")
+
+	var logs bytes.Buffer
+	srv := NewServer(slog.New(slog.NewJSONHandler(&logs, nil)), st, nil, crypto.Key{}, 5*time.Second, nil)
+	if _, err := srv.ReportTaskResult(ctx, &grpcpb.ReportTaskResultRequest{
+		WorkerId:     "worker-1",
+		TaskId:       taskID,
+		RunId:        runID,
+		AttemptId:    a.AttemptID,
+		FencingToken: a.FencingToken,
+		Status:       "FAILED",
+		ErrorMessage: "source connection refused",
+	}); err != nil {
+		t.Fatalf("ReportTaskResult: %v", err)
+	}
+
+	run, err := st.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if run.Status != "FAILED" {
+		t.Fatalf("run status=%q want FAILED", run.Status)
+	}
+
+	var record map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatalf("decode master log: %v; logs=%s", err, logs.String())
+	}
+	for key, want := range map[string]string{
+		"level":   "ERROR",
+		"msg":     "task failed",
+		"job_id":  jobID,
+		"run_id":  runID,
+		"task_id": taskID,
+		"err":     "source connection refused",
+	} {
+		if got, _ := record[key].(string); got != want {
+			t.Errorf("log %s=%q want %q", key, got, want)
+		}
 	}
 }
 

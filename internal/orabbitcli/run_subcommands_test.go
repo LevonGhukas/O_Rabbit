@@ -59,6 +59,41 @@ func TestCmdRunWatchStreamsExistingRun(t *testing.T) {
 	}
 }
 
+func TestCmdRunWatchSurfacesWorkerTaskFailure(t *testing.T) {
+	var runLookups atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/runs/run-1":
+			w.Header().Set("Content-Type", "application/json")
+			if runLookups.Add(1) == 1 {
+				fmt.Fprint(w, `{"run":{"id":"run-1","status":"RUNNING"},"tasks":[]}`)
+				return
+			}
+			fmt.Fprint(w, `{"run":{"id":"run-1","status":"FAILED","error_summary":"1 task(s) failed"},"tasks":[{"id":"task-1","status":"FAILED","error_message":"read to arrow/parquet: Decimal128(38,0) conversion from float64 failed: unsupported decimal representation"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/sse":
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"message\":\"run FAILED\",\"level\":\"ERROR\",\"run_id\":\"run-1\",\"ts\":\"2026-01-01T00:00:00Z\",\"fields_json\":{}}\n\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	code, _, stderr := captureCommandOutput(t, func() int {
+		return cmdRun(context.Background(), []string{"watch", "run-1", "--master-http", server.URL})
+	})
+
+	if code != exitOperational {
+		t.Fatalf("exit code=%d want=%d stderr=%q", code, exitOperational, stderr)
+	}
+	if runLookups.Load() != 2 {
+		t.Fatalf("run detail lookups=%d want 2", runLookups.Load())
+	}
+	if !strings.Contains(stderr, "read to arrow/parquet: Decimal128(38,0) conversion from float64 failed: unsupported decimal representation") {
+		t.Fatalf("expected worker task failure in stderr, got %q", stderr)
+	}
+}
+
 func TestCmdRunWatchInterruptStopsWatchingWithoutCancelingRun(t *testing.T) {
 	var cancelCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
