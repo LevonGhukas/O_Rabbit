@@ -31,6 +31,7 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/connectors"
 	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
 
 type Manager struct {
@@ -1239,15 +1240,22 @@ func inferRunIcebergSchema(ctx context.Context, req RunRequest, tableName string
 // stable JSON representation before a zero-artifact run enters its durable
 // commit boundary.
 func InferDurableIcebergSchema(ctx context.Context, engine, dsn, mode, table, query, recordPath, fileFormat string) (json.RawMessage, error) {
+	schema, _, err := InferDurableIcebergSchemaWithWarnings(ctx, engine, dsn, mode, table, query, recordPath, fileFormat)
+	return schema, err
+}
+
+// InferDurableIcebergSchemaWithWarnings snapshots the durable source schema and
+// returns the document inference warnings produced by that same sample.
+func InferDurableIcebergSchemaWithWarnings(ctx context.Context, engine, dsn, mode, table, query, recordPath, fileFormat string) (json.RawMessage, []typesystem.TypeWarning, error) {
 	if connectors.SupportsDocumentReader(engine) {
 		reader, err := connectors.OpenDocumentReader(ctx, engine, dsn)
 		if err != nil {
-			return nil, fmt.Errorf("open document source for durable schema: %w", err)
+			return nil, nil, fmt.Errorf("open document source for durable schema: %w", err)
 		}
 		defer reader.Close()
 		it, err := reader.StreamDocuments(ctx, table, documentFilter(engine, recordPath, fileFormat), 1000)
 		if err != nil {
-			return nil, fmt.Errorf("stream documents for durable schema: %w", err)
+			return nil, nil, fmt.Errorf("stream documents for durable schema: %w", err)
 		}
 		defer it.Close()
 		var fieldOrder []string
@@ -1258,42 +1266,47 @@ func InferDurableIcebergSchema(ctx context.Context, engine, dsn, mode, table, qu
 		for it.Next(ctx) && len(docs) < 1000 {
 			doc, decodeErr := it.Decode()
 			if decodeErr != nil {
-				return nil, fmt.Errorf("decode document for durable schema: %w", decodeErr)
+				return nil, nil, fmt.Errorf("decode document for durable schema: %w", decodeErr)
 			}
 			docs = append(docs, doc)
 		}
-		arrSchema, err := arrowio.InferMongoSchemaWithFieldOrder(docs, fieldOrder)
+		inference, err := arrowio.InferMongoSchemaResult(docs, fieldOrder)
 		if err != nil {
-			return nil, fmt.Errorf("infer document durable schema: %w", err)
+			return nil, nil, fmt.Errorf("infer document durable schema: %w", err)
 		}
-		iceSchema, err := icetable.ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
+		iceSchema, err := icetable.ArrowSchemaToIcebergWithFreshIDs(inference.Schema, false)
 		if err != nil {
-			return nil, fmt.Errorf("arrow->iceberg durable schema: %w", err)
+			return nil, nil, fmt.Errorf("arrow->iceberg durable schema: %w", err)
 		}
-		return json.Marshal(iceSchema)
+		schema, err := json.Marshal(iceSchema)
+		if err != nil {
+			return nil, nil, err
+		}
+		return schema, arrowio.MongoTypeWarnings(inference), nil
 	}
 	reader, err := connectors.OpenIntRangeReader(ctx, engine, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("open source for durable schema: %w", err)
+		return nil, nil, fmt.Errorf("open source for durable schema: %w", err)
 	}
 	defer reader.Close()
 	req := RunRequest{SourceEngine: engine, SourceMode: mode, SourceTable: table, SourceQuery: query}
 	cols, columnTypes, err := describeSourceSchemaForAutoCreate(ctx, reader, req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(cols) == 0 {
-		return nil, fmt.Errorf("durable source schema has no columns")
+		return nil, nil, fmt.Errorf("durable source schema has no columns")
 	}
 	_, arrSchema, err := arrowio.PlansFromSQLEngine(engine, cols, columnTypes)
 	if err != nil {
-		return nil, fmt.Errorf("sql->arrow durable schema: %w", err)
+		return nil, nil, fmt.Errorf("sql->arrow durable schema: %w", err)
 	}
 	iceSchema, err := icetable.ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
 	if err != nil {
-		return nil, fmt.Errorf("arrow->iceberg durable schema: %w", err)
+		return nil, nil, fmt.Errorf("arrow->iceberg durable schema: %w", err)
 	}
-	return json.Marshal(iceSchema)
+	schema, err := json.Marshal(iceSchema)
+	return schema, nil, err
 }
 
 func normalizedRunRequestSourceMode(raw string) string {

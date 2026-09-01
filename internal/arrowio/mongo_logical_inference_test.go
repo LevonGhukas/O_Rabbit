@@ -28,6 +28,18 @@ func TestMongoLogicalInferencePromotionsAndWarnings(t *testing.T) {
 	require.NotEmpty(t, result.Warnings)
 }
 
+func TestMongoTypeWarningsDeduplicated(t *testing.T) {
+	result, err := InferMongoSchemaResult([]map[string]any{{"value": int64(7)}, {"value": "seven"}}, nil)
+	require.NoError(t, err)
+	warnings := MongoTypeWarnings(result)
+	require.Len(t, warnings, 1)
+	require.Equal(t, "value", warnings[0].Column)
+	require.Equal(t, typesystem.MappingUnsupportedFallback, warnings[0].Class)
+	normal, err := InferMongoSchemaResult([]map[string]any{{"value": int64(7)}, {"value": int64(8)}}, nil)
+	require.NoError(t, err)
+	require.Empty(t, MongoTypeWarnings(normal))
+}
+
 func TestMongoLogicalInferenceBSONArraysAndRecords(t *testing.T) {
 	oid := primitive.NewObjectID()
 	ts := primitive.Timestamp{T: 7, I: 9}
