@@ -1,89 +1,104 @@
 package arrowio
 
 import (
+	"fmt"
 	"strings"
+
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
 
-func planPostgresColumn(name, dbType string, precision, scale int64, hasDecimal bool) ColumnPlan {
-	base := strings.ToUpper(strings.TrimSpace(dbType))
-	clean := strings.TrimSpace(strings.Split(base, "(")[0])
-
-	// 1. Array types (e.g. INTEGER[], NUMERIC[], _INT4, _TEXT, etc.)
+// LogicalTypeForPostgresColumn translates PostgreSQL source metadata into
+// source-independent semantics. Unsupported PostgreSQL semantic types remain
+// unknown so their values take the explicit lossless fallback path.
+func LogicalTypeForPostgresColumn(dbType string, precision, scale int64, hasDecimal bool) (typesystem.LogicalType, error) {
+	raw := strings.ToUpper(strings.TrimSpace(dbType))
+	clean := strings.TrimSpace(strings.Split(raw, "(")[0])
 	if strings.HasSuffix(clean, "[]") {
-		elemType := strings.TrimSuffix(clean, "[]")
-		elemPlan := planPostgresColumn("item", elemType, precision, scale, hasDecimal)
-		return planList(name, elemPlan)
+		element, err := LogicalTypeForPostgresColumn(strings.TrimSuffix(clean, "[]"), precision, scale, hasDecimal)
+		if err != nil {
+			return typesystem.LogicalType{}, err
+		}
+		// PostgreSQL array text represents NULL elements explicitly, but column
+		// metadata does not expose element nullability. Preserve that practical
+		// source behavior rather than rejecting valid driver values.
+		element.Nullable = true
+		return typesystem.ArrayOf(element), nil
 	}
 	if strings.HasPrefix(clean, "_") {
-		elemType := strings.TrimPrefix(clean, "_")
-		elemPlan := planPostgresColumn("item", elemType, precision, scale, hasDecimal)
-		return planList(name, elemPlan)
+		element, err := LogicalTypeForPostgresColumn(strings.TrimPrefix(clean, "_"), precision, scale, hasDecimal)
+		if err != nil {
+			return typesystem.LogicalType{}, err
+		}
+		element.Nullable = true
+		return typesystem.ArrayOf(element), nil
 	}
-
+	known := func(kind typesystem.Kind) (typesystem.LogicalType, error) {
+		return typesystem.LogicalType{Kind: kind}, nil
+	}
 	switch clean {
-	// 2. Integers & Serials
 	case "INT2", "SMALLINT", "SMALLSERIAL":
-		return planInt16(name)
+		return known(typesystem.KindInt16)
 	case "INT4", "INTEGER", "INT", "SERIAL":
-		return planInt32(name)
+		return known(typesystem.KindInt32)
 	case "INT8", "BIGINT", "BIGSERIAL":
-		return planInt64(name)
-
-	// 3. Floats
+		return known(typesystem.KindInt64)
 	case "FLOAT4", "REAL":
-		return planFloat32(name)
+		return known(typesystem.KindFloat32)
 	case "FLOAT8", "DOUBLE PRECISION", "FLOAT":
-		return planFloat64(name)
-
-	// 4. Exact Decimals & Monetary
+		return known(typesystem.KindFloat64)
 	case "NUMERIC", "DECIMAL":
-		prec := int32(precision)
-		scaleVal := int32(scale)
-		if prec <= 0 || prec > 38 {
-			prec = 38
-		}
 		if !hasDecimal {
-			scaleVal = 10
+			return postgresUnknown(clean), nil
 		}
-		if scaleVal < 0 {
-			scaleVal = 0
+		t := typesystem.Decimal(int32(precision), int32(scale))
+		if err := t.Validate(); err != nil {
+			return postgresUnknown(clean), nil
 		}
-		if scaleVal > prec {
-			scaleVal = prec
-		}
-		return planDecimal128(name, prec, scaleVal)
-
+		return t, nil
 	case "MONEY":
-		return planDecimal128(name, 19, 2)
-
-	// 5. Booleans & Bits
+		return typesystem.Decimal(19, 2), nil
 	case "BOOL", "BOOLEAN":
-		return planBool(name)
-	case "BIT":
-		if base == "BIT(1)" {
-			return planBool(name)
-		}
-		return planUint64(name)
-	case "VARBIT":
-		return planString(name)
-
-	// 6. Dates & Timestamps
+		return known(typesystem.KindBool)
 	case "DATE":
-		return planDate32(name)
+		return known(typesystem.KindDate)
 	case "TIMESTAMP", "TIMESTAMP WITHOUT TIME ZONE":
-		return planTimestampUs(name, "")
+		return known(typesystem.KindTimestamp)
 	case "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE":
-		return planTimestampUs(name, "UTC")
-	case "TIME", "TIME WITHOUT TIME ZONE", "TIMETZ", "TIME WITH TIME ZONE":
-		return planTime64(name)
-
-	// 7. Binary & Strings
+		return typesystem.LogicalType{Kind: typesystem.KindTimestampTZ, Timezone: "UTC"}, nil
+	case "TIME", "TIME WITHOUT TIME ZONE":
+		return known(typesystem.KindTime)
+	case "TIMETZ", "TIME WITH TIME ZONE":
+		return postgresUnknown(clean), nil
 	case "BYTEA":
-		return planBinary(name)
-	case "UUID", "JSON", "JSONB", "XML", "TEXT", "VARCHAR", "CHAR", "BPCHAR", "NAME", "CITEXT", "INET", "CIDR", "MACADDR", "MACADDR8":
-		return planString(name)
-
+		return known(typesystem.KindBinary)
+	case "UUID":
+		return known(typesystem.KindUUID)
+	case "JSON", "JSONB":
+		return known(typesystem.KindJSON)
+	case "TEXT", "VARCHAR", "CHAR", "BPCHAR", "NAME", "CITEXT":
+		return known(typesystem.KindString)
 	default:
-		return planGenericSQLColumn(name, base, precision, scale, hasDecimal)
+		return postgresUnknown(clean), nil
 	}
+}
+
+func postgresUnknown(source string) typesystem.LogicalType {
+	return typesystem.LogicalType{Kind: typesystem.KindUnknown, SourceTypeName: source}
+}
+
+// planPostgresColumn retains the legacy planner signature while routing only
+// PostgreSQL through LogicalType, shared conversion, and canonical appenders.
+func planPostgresColumn(name, dbType string, precision, scale int64, hasDecimal bool) ColumnPlan {
+	t, err := LogicalTypeForPostgresColumn(dbType, precision, scale, hasDecimal)
+	if err == nil {
+		plan, _, planErr := PlanForLogicalType(name, t)
+		if planErr == nil {
+			return plan
+		}
+	}
+	plan, _, fallbackErr := PlanForLogicalType(name, postgresUnknown(strings.ToUpper(strings.TrimSpace(dbType))))
+	if fallbackErr != nil {
+		panic(fmt.Sprintf("postgres fallback plan: %v", fallbackErr))
+	}
+	return plan
 }

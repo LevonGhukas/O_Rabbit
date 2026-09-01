@@ -111,6 +111,14 @@ func parseDecimal(text string) (*big.Int, int32, bool) {
 	if text == "" {
 		return nil, 0, false
 	}
+	// PostgreSQL money values are commonly exposed as "$12,345.67". This is a
+	// driver text representation, not a float conversion; normalize it before
+	// exact base-10 parsing.
+	if strings.HasPrefix(text, "-$") {
+		text = "-" + strings.ReplaceAll(strings.TrimPrefix(text, "-$"), ",", "")
+	} else if strings.HasPrefix(text, "$") {
+		text = strings.ReplaceAll(strings.TrimPrefix(text, "$"), ",", "")
+	}
 	sign := ""
 	if text[0] == '+' || text[0] == '-' {
 		sign = text[:1]
