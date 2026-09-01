@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -16,6 +17,8 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/httperr"
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
+	_ "modernc.org/sqlite"
 )
 
 func TestAPIRunSubmitPlannerFailureIncludesDetails(t *testing.T) {
@@ -885,8 +888,10 @@ func TestAPIRunValidateReturnsDerivedValues(t *testing.T) {
 		t.Fatalf("status=%d want=%d body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	var resp struct {
-		OK               bool `json:"ok"`
-		AvailableWorkers int  `json:"available_workers"`
+		OK               bool              `json:"ok"`
+		AvailableWorkers int               `json:"available_workers"`
+		TypeMappings     []json.RawMessage `json:"type_mappings"`
+		TypeWarnings     []json.RawMessage `json:"type_warnings"`
 		Derived          struct {
 			JobName      string `json:"job_name"`
 			TargetPrefix string `json:"target_prefix"`
@@ -899,6 +904,9 @@ func TestAPIRunValidateReturnsDerivedValues(t *testing.T) {
 	decodeJSONBody(t, rec, &resp)
 	if !resp.OK {
 		t.Fatalf("ok=%v want true", resp.OK)
+	}
+	if resp.TypeMappings == nil || resp.TypeWarnings == nil {
+		t.Fatalf("validation type arrays must be present: mappings=%v warnings=%v", resp.TypeMappings, resp.TypeWarnings)
 	}
 	if resp.AvailableWorkers != 1 {
 		t.Fatalf("available_workers=%d want=1", resp.AvailableWorkers)
@@ -920,6 +928,57 @@ func TestAPIRunValidateReturnsDerivedValues(t *testing.T) {
 	}
 	if !resp.Derived.ForcePath {
 		t.Fatalf("s3_force_path_style=%v want true", resp.Derived.ForcePath)
+	}
+}
+
+func TestValidationTypeMappingsReportsFallbacksAndOverrides(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE source_types (id INTEGER, extension EXTENSION)`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query(`SELECT id, extension FROM source_types`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columnTypes, err := rows.ColumnTypes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := validatedRunSubmitSpec{SourceEngine: "sqlite", ColumnTypes: map[string]string{}}
+	mappings, warnings := validationTypeMappingsFromDescription(spec, []string{"id", "extension"}, columnTypes)
+	if len(mappings) != 2 || len(warnings) != 1 {
+		t.Fatalf("mappings=%v warnings=%v", mappings, warnings)
+	}
+	if mappings[0]["class"] != typesystem.MappingExact || mappings[0]["fallback"] != false {
+		t.Fatalf("exact mapping=%v", mappings[0])
+	}
+	if warnings[0].Class != "unsupported_fallback" {
+		t.Fatalf("warning class=%q want unsupported_fallback", warnings[0].Class)
+	}
+
+	spec.ColumnTypes = map[string]string{"id": "uint64"}
+	mappings, warnings = validationTypeMappingsFromDescription(spec, []string{"id"}, columnTypes[:1])
+	if len(mappings) != 1 || mappings[0]["storage_type"] != "string" || mappings[0]["class"] != typesystem.MappingSemanticFallback || len(warnings) != 1 || warnings[0].Class != "semantic_fallback" {
+		t.Fatalf("uint64 override mappings=%v warnings=%v", mappings, warnings)
+	}
+}
+
+func TestAPIRunValidateRejectsInvalidColumnType(t *testing.T) {
+	st := openTestStore(t)
+	srv := newSubmitTestServer(st)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/validate", strings.NewReader(`{
+		"source":{"engine":"postgres","dsn":"postgresql://user:pass@db:5432/app?sslmode=disable","table":"public.orders","cursor_column":"id","column_types":{"id":"not-a-canonical-type"}},
+		"target":{"s3_endpoint":"http://minio:9000","s3_bucket":"bucket1","s3_access_key_id":"minioadmin","s3_secret_access_key":"miniosecret"}
+	}`))
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want=%d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 }
 

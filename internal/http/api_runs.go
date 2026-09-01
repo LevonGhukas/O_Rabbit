@@ -423,6 +423,12 @@ func validationTypeMappings(ctx context.Context, spec validatedRunSubmitSpec) ([
 	if err != nil {
 		return out, warnings
 	}
+	return validationTypeMappingsFromDescription(spec, cols, types)
+}
+
+func validationTypeMappingsFromDescription(spec validatedRunSubmitSpec, cols []string, types []*sql.ColumnType) ([]map[string]any, []typesystem.TypeWarning) {
+	out := []map[string]any{}
+	warnings := []typesystem.TypeWarning{}
 	result, err := arrowio.PlansFromSQLEngineResult(spec.SourceEngine, cols, types, spec.ColumnTypes)
 	if err != nil {
 		return out, warnings

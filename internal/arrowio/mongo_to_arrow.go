@@ -33,6 +33,32 @@ type MongoInferenceResult struct {
 	Warnings []MongoInferenceWarning
 }
 
+func MongoTypeWarnings(result *MongoInferenceResult) []typesystem.TypeWarning {
+	if result == nil {
+		return []typesystem.TypeWarning{}
+	}
+	byColumn := map[string]string{}
+	for _, w := range result.Warnings {
+		byColumn[w.Field] = w.Reason
+	}
+	out := make([]typesystem.TypeWarning, 0)
+	for _, field := range result.Fields {
+		if !field.Mapping.Fallback {
+			continue
+		}
+		reason := field.Mapping.Reason
+		if byColumn[field.Name] != "" {
+			reason = byColumn[field.Name]
+		}
+		mapping := field.Mapping
+		mapping.Reason = reason
+		if w, ok := typesystem.WarningForMapping(field.Name, mapping); ok {
+			out = append(out, w)
+		}
+	}
+	return typesystem.DeduplicateTypeWarnings(out)
+}
+
 func InferMongoSchema(docs []map[string]any) (*arrow.Schema, error) {
 	return InferMongoSchemaWithFieldOrder(docs, nil)
 }
