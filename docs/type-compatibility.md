@@ -96,6 +96,8 @@ Current migrated mappings: `UInt64` is logical `uint64` with string storage fall
 
 ## Trino
 
+Migration status: Trino now uses `LogicalTypeForTrinoColumn -> PlanForLogicalType -> typesystem.Convert`. Decimal metadata is retained without a precision-38 invention; UUID/JSON are semantic fallback, arrays resolve recursively, and time-with-time-zone, ROW/MAP/IP/interval, and unknown plugin types are unknown fallback.
+
 Planner: `internal/arrowio/trino_to_arrow.go:planTrinoColumn`.
 
 | Source types / aliases recognized | Arrow type | Value conversion / classification | Fallback and notes |
@@ -109,6 +111,8 @@ Planner: `internal/arrowio/trino_to_arrow.go:planTrinoColumn`.
 
 ## Cassandra
 
+Migration status: Cassandra now uses `LogicalTypeForCassandraColumn -> PlanForLogicalType -> typesystem.Convert`. `varint`, unconstrained decimal, collections/UDTs, duration, inet, and unknown types use unknown lossless fallback. The connector preserves blobs as bytes, emits `uint64` as exact decimal text, UUIDs canonically, and uses conservative lossless serialization rather than `fmt.Sprintf`.
+
 Planner: `internal/arrowio/cassandra_to_arrow.go:planCassandraColumn`. Actual Cassandra scan values first pass through `internal/connectors/cassandra.go:cassandraToDriverValue`.
 
 | Source types / aliases recognized | Arrow type | Value conversion / classification | Fallback and notes |
@@ -121,7 +125,9 @@ Planner: `internal/arrowio/cassandra_to_arrow.go:planCassandraColumn`. Actual Ca
 
 ## SQLite
 
-Planner: `internal/arrowio/sqlite_to_arrow.go:planSQLiteColumn`, which always delegates to `planGenericSQLColumn`. SQLite’s dynamic storage classes mean the type name alone cannot establish the runtime value kind.
+Migration status: SQLite now uses `LogicalTypeForSQLiteColumn -> PlanForLogicalType -> typesystem.Convert`. Explicit declarations map conservatively; dynamic SQLite values must still satisfy their declared logical type. Unknown/empty declarations and unconstrained numeric use unknown fallback rather than loose affinity or substring inference.
+
+Planner: `internal/arrowio/sqlite_to_arrow.go:planSQLiteColumn`. SQLite’s dynamic storage classes mean the type name alone cannot establish the runtime value kind.
 
 | Source type / aliases recognized | Arrow type | Value conversion / classification | Fallback and notes |
 | --- | --- | --- | --- |

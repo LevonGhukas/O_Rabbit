@@ -1,70 +1,74 @@
 package arrowio
 
 import (
+	"fmt"
+	"math"
 	"strings"
+
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
 
-func planCassandraColumn(name, dbType string, precision, scale int64, hasDecimal bool) ColumnPlan {
-	base := strings.ToLower(strings.TrimSpace(dbType))
-	clean := strings.TrimSpace(strings.Split(base, "(")[0])
-	clean = strings.TrimSpace(strings.Split(clean, "<")[0])
-
-	switch clean {
-	// 1. Integers
-	case "tinyint":
-		return planInt8(name)
-	case "smallint":
-		return planInt16(name)
-	case "int", "integer":
-		return planInt32(name)
-	case "bigint", "varint", "counter":
-		return planInt64(name)
-
-	// 2. Floats
-	case "float":
-		return planFloat32(name)
-	case "double":
-		return planFloat64(name)
-
-	// 3. Exact Decimals
-	case "decimal":
-		prec := int32(precision)
-		scaleVal := int32(scale)
-		if prec <= 0 || prec > 38 {
-			prec = 38
-		}
-		if !hasDecimal {
-			scaleVal = 10
-		}
-		if scaleVal < 0 {
-			scaleVal = 0
-		}
-		if scaleVal > prec {
-			scaleVal = prec
-		}
-		return planDecimal128(name, prec, scaleVal)
-
-	// 4. Boolean
-	case "boolean", "bool":
-		return planBool(name)
-
-	// 5. Dates & Times
-	case "date":
-		return planDate32(name)
-	case "time":
-		return planTime64(name)
-	case "timestamp":
-		return planTimestampUs(name, "UTC")
-
-	// 6. Binary
-	case "blob":
-		return planBinary(name)
-
-	// 7. Strings, UUID, Inet, Collections, UDTs
-	case "uuid", "timeuuid", "text", "varchar", "ascii", "inet", "list", "set", "map", "tuple", "udt", "frozen":
-		return planString(name)
-
-	default:
-		return planGenericSQLColumn(name, strings.ToUpper(base), precision, scale, hasDecimal)
+func LogicalTypeForCassandraColumn(dbType string, precision, scale int64, hasDecimal bool) (typesystem.LogicalType, error) {
+	raw := strings.TrimSpace(dbType)
+	lower := strings.ToLower(raw)
+	base := lower
+	if i := strings.IndexAny(base, "(<"); i >= 0 {
+		base = strings.TrimSpace(base[:i])
 	}
+	known := func(k typesystem.Kind) (typesystem.LogicalType, error) { return typesystem.LogicalType{Kind: k}, nil }
+	switch base {
+	case "tinyint":
+		return known(typesystem.KindInt8)
+	case "smallint":
+		return known(typesystem.KindInt16)
+	case "int", "integer":
+		return known(typesystem.KindInt32)
+	case "bigint", "counter":
+		return known(typesystem.KindInt64)
+	case "float":
+		return known(typesystem.KindFloat32)
+	case "double":
+		return known(typesystem.KindFloat64)
+	case "boolean", "bool":
+		return known(typesystem.KindBool)
+	case "date":
+		return known(typesystem.KindDate)
+	case "time":
+		return known(typesystem.KindTime)
+	case "timestamp":
+		return typesystem.LogicalType{Kind: typesystem.KindTimestampTZ, Timezone: "UTC"}, nil
+	case "blob":
+		return known(typesystem.KindBinary)
+	case "text", "varchar", "ascii":
+		return known(typesystem.KindString)
+	case "uuid", "timeuuid":
+		return known(typesystem.KindUUID)
+	case "decimal":
+		if !hasDecimal || precision <= 0 || scale < 0 || scale > precision || precision > math.MaxInt32 || scale > math.MaxInt32 {
+			return cassandraUnknown(base), nil
+		}
+		return typesystem.Decimal(int32(precision), int32(scale)), nil
+	case "varint", "inet", "list", "set", "map", "tuple", "udt", "frozen", "duration":
+		return cassandraUnknown(base), nil
+	default:
+		return cassandraUnknown(lower), nil
+	}
+}
+
+func cassandraUnknown(source string) typesystem.LogicalType {
+	return typesystem.LogicalType{Kind: typesystem.KindUnknown, SourceTypeName: source}
+}
+
+func planCassandraColumn(name, dbType string, precision, scale int64, hasDecimal bool) ColumnPlan {
+	t, err := LogicalTypeForCassandraColumn(dbType, precision, scale, hasDecimal)
+	if err == nil {
+		if plan, _, planErr := PlanForLogicalType(name, t); planErr == nil {
+			return plan
+		}
+	}
+	plan, _, fallbackErr := PlanForLogicalType(name, cassandraUnknown(strings.ToLower(strings.TrimSpace(dbType))))
+	if fallbackErr != nil {
+		panic(fmt.Sprintf("Cassandra fallback plan: %v", fallbackErr))
+	}
+	return plan
 }
