@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
@@ -155,4 +156,51 @@ func TestInferMongoSchemaSpecialTypes(t *testing.T) {
 	require.NotNil(t, schema)
 
 	require.Equal(t, 4, schema.NumFields())
+}
+
+func TestCurrentMongoUnexpectedIntegerValueBecomesZero(t *testing.T) {
+	docs := []map[string]any{
+		{"value": int64(7)},
+		{"value": "not-an-integer"},
+	}
+	schema, err := InferMongoSchema(docs)
+	require.NoError(t, err)
+	require.Equal(t, arrow.PrimitiveTypes.Int64, schema.Field(0).Type)
+
+	record, err := MongoDocsToRecord(memory.NewGoAllocator(), schema, docs)
+	require.NoError(t, err)
+	defer record.Release()
+	values := record.Column(0).(*array.Int64)
+	require.Equal(t, int64(7), values.Value(0))
+	require.False(t, values.IsNull(1))
+	require.Equal(t, int64(0), values.Value(1))
+}
+
+func TestCurrentMongoIncompatibleValuesBecomeNull(t *testing.T) {
+	docs := []map[string]any{
+		{"value": float64(1.5)},
+		{"value": "not-a-float"},
+	}
+	schema, err := InferMongoSchema(docs)
+	require.NoError(t, err)
+	require.Equal(t, arrow.PrimitiveTypes.Float64, schema.Field(0).Type)
+
+	record, err := MongoDocsToRecord(memory.NewGoAllocator(), schema, docs)
+	require.NoError(t, err)
+	defer record.Release()
+	values := record.Column(0).(*array.Float64)
+	require.Equal(t, float64(1.5), values.Value(0))
+	require.True(t, values.IsNull(1))
+}
+
+func TestCurrentMongoInferenceFallsBackToString(t *testing.T) {
+	schema, err := InferMongoSchema([]map[string]any{{
+		"document": primitive.M{"nested": true},
+		"empty":    nil,
+		"id":       primitive.NewObjectID(),
+	}})
+	require.NoError(t, err)
+	require.Equal(t, arrow.BinaryTypes.String, schema.Field(0).Type)
+	require.Equal(t, arrow.BinaryTypes.String, schema.Field(1).Type)
+	require.Equal(t, arrow.BinaryTypes.String, schema.Field(2).Type)
 }
