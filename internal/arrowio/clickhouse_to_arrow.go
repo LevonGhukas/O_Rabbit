@@ -1,116 +1,262 @@
 package arrowio
 
 import (
+	"fmt"
+	"math"
+	"strconv"
 	"strings"
+
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
 
-func planClickHouseColumn(name, dbType string, precision, scale int64, hasDecimal bool) ColumnPlan {
-	base := strings.TrimSpace(dbType)
-	upper := strings.ToUpper(base)
-
-	// Unwrap Nullable(...) and LowCardinality(...)
-	for {
-		if strings.HasPrefix(upper, "NULLABLE(") && strings.HasSuffix(upper, ")") {
-			upper = strings.TrimSuffix(strings.TrimPrefix(upper, "NULLABLE("), ")")
-			upper = strings.TrimSpace(upper)
-			continue
+// LogicalTypeForClickHouseColumn translates the ClickHouse source type
+// grammar into ORabbit semantics. It deliberately keeps unsupported source
+// semantics unknown rather than pretending their textual storage is native.
+func LogicalTypeForClickHouseColumn(dbType string, precision, scale int64, hasDecimal bool) (typesystem.LogicalType, error) {
+	raw := strings.TrimSpace(dbType)
+	if raw == "" {
+		return clickHouseUnknown(""), nil
+	}
+	if inner, ok := clickHouseOuter(raw, "Nullable"); ok {
+		t, err := LogicalTypeForClickHouseColumn(inner, precision, scale, hasDecimal)
+		if err != nil {
+			return typesystem.LogicalType{}, err
 		}
-		if strings.HasPrefix(upper, "LOWCARDINALITY(") && strings.HasSuffix(upper, ")") {
-			upper = strings.TrimSuffix(strings.TrimPrefix(upper, "LOWCARDINALITY("), ")")
-			upper = strings.TrimSpace(upper)
-			continue
+		t.Nullable = true
+		return t, nil
+	}
+	if inner, ok := clickHouseOuter(raw, "LowCardinality"); ok {
+		return LogicalTypeForClickHouseColumn(inner, precision, scale, hasDecimal)
+	}
+	if inner, ok := clickHouseOuter(raw, "Array"); ok {
+		element, err := LogicalTypeForClickHouseColumn(inner, 0, 0, false)
+		if err != nil {
+			return typesystem.LogicalType{}, err
 		}
-		break
+		return typesystem.ArrayOf(element), nil
 	}
 
-	clean := strings.TrimSpace(strings.Split(upper, "(")[0])
-
-	switch {
-	// 1. Unsigned Integers
-	case clean == "UINT8":
-		return planUint8(name)
-	case clean == "UINT16":
-		return planUint16(name)
-	case clean == "UINT32":
-		return planUint32(name)
-	case clean == "UINT64":
-		return planUint64(name)
-
-	// 2. Signed Integers
-	case clean == "INT8":
-		return planInt8(name)
-	case clean == "INT16":
-		return planInt16(name)
-	case clean == "INT32":
-		return planInt32(name)
-	case clean == "INT64":
-		return planInt64(name)
-
-	// 3. Floats & BFloat
-	case clean == "FLOAT32" || clean == "BFLOAT16":
-		return planFloat32(name)
-	case clean == "FLOAT64":
-		return planFloat64(name)
-
-	// 4. Boolean
-	case clean == "BOOL" || clean == "BOOLEAN":
-		return planBool(name)
-
-	// 5. Decimals
-	case clean == "DECIMAL":
-		prec := int32(precision)
-		scaleVal := int32(scale)
-		if prec <= 0 || prec > 38 {
-			prec = 38
+	base, args, hasArgs := clickHouseBaseAndArgs(raw)
+	known := func(kind typesystem.Kind) (typesystem.LogicalType, error) {
+		return typesystem.LogicalType{Kind: kind}, nil
+	}
+	switch base {
+	case "INT8":
+		return known(typesystem.KindInt8)
+	case "INT16":
+		return known(typesystem.KindInt16)
+	case "INT32":
+		return known(typesystem.KindInt32)
+	case "INT64":
+		return known(typesystem.KindInt64)
+	case "UINT8":
+		return known(typesystem.KindUInt8)
+	case "UINT16":
+		return known(typesystem.KindUInt16)
+	case "UINT32":
+		return known(typesystem.KindUInt32)
+	case "UINT64":
+		return known(typesystem.KindUInt64)
+	case "FLOAT32", "BFLOAT16":
+		return known(typesystem.KindFloat32)
+	case "FLOAT64":
+		return known(typesystem.KindFloat64)
+	case "BOOL", "BOOLEAN":
+		return known(typesystem.KindBool)
+	case "DATE", "DATE32":
+		return known(typesystem.KindDate)
+	case "DATETIME", "DATETIME64":
+		zone, err := clickHouseTimezone(args, hasArgs, base == "DATETIME64")
+		if err != nil {
+			return typesystem.LogicalType{}, err
 		}
-		if scaleVal < 0 {
-			scaleVal = 0
+		if zone != "" {
+			return typesystem.LogicalType{Kind: typesystem.KindTimestampTZ, Timezone: zone}, nil
 		}
-		if scaleVal > prec {
-			scaleVal = prec
-		}
-		return planDecimal128(name, prec, scaleVal)
-	case clean == "DECIMAL32":
-		scaleVal := int32(scale)
-		if scaleVal < 0 {
-			scaleVal = 0
-		}
-		return planDecimal128(name, 9, scaleVal)
-	case clean == "DECIMAL64":
-		scaleVal := int32(scale)
-		if scaleVal < 0 {
-			scaleVal = 0
-		}
-		return planDecimal128(name, 18, scaleVal)
-	case clean == "DECIMAL128":
-		scaleVal := int32(scale)
-		if scaleVal < 0 {
-			scaleVal = 0
-		}
-		return planDecimal128(name, 38, scaleVal)
-
-	// 6. Dates & Times
-	case clean == "DATE" || clean == "DATE32":
-		return planDate32(name)
-	case clean == "DATETIME" || clean == "DATETIME64":
-		if strings.Contains(upper, "UTC") || strings.Contains(upper, "'UTC'") {
-			return planTimestampUs(name, "UTC")
-		}
-		return planTimestampUs(name, "")
-	case clean == "TIME" || clean == "TIME64":
-		return planTime64(name)
-
-	// 7. Arrays
-	case strings.HasPrefix(upper, "ARRAY(") && strings.HasSuffix(upper, ")"):
-		inner := strings.TrimSuffix(strings.TrimPrefix(upper, "ARRAY("), ")")
-		innerPlan := planClickHouseColumn("item", inner, 0, 0, false)
-		return planList(name, innerPlan)
-
-	// 8. Strings, UUID, IP, JSON, Tuples, Maps, Enums
-	case clean == "UUID" || clean == "IPV4" || clean == "IPV6" || clean == "STRING" || clean == "FIXEDSTRING" || clean == "ENUM8" || clean == "ENUM16" || clean == "JSON" || clean == "TUPLE" || clean == "MAP" || clean == "DYNAMIC" || clean == "VARIANT" || clean == "INT128" || clean == "INT256" || clean == "UINT128" || clean == "UINT256" || clean == "POINT" || clean == "RING" || clean == "POLYGON" || clean == "MULTIPOLYGON" || clean == "LINESTRING" || clean == "MULTILINESTRING":
-		return planString(name)
-
+		return known(typesystem.KindTimestamp)
+	case "TIME", "TIME64":
+		// ClickHouse Time values are duration-like and need not fit a 24-hour
+		// time-of-day. Preserve them through the explicit lossless fallback.
+		return clickHouseUnknown(base), nil
+	case "STRING", "FIXEDSTRING":
+		return known(typesystem.KindString)
+	case "UUID":
+		return known(typesystem.KindUUID)
+	case "JSON":
+		return known(typesystem.KindJSON)
+	case "DECIMAL", "DECIMAL32", "DECIMAL64", "DECIMAL128", "DECIMAL256":
+		return clickHouseDecimal(base, args, hasArgs, precision, scale, hasDecimal)
 	default:
-		return planGenericSQLColumn(name, upper, precision, scale, hasDecimal)
+		return clickHouseUnknown(strings.ToUpper(raw)), nil
 	}
+}
+
+func clickHouseDecimal(base string, args []string, hasArgs bool, precision, scale int64, hasDecimal bool) (typesystem.LogicalType, error) {
+	var p, s int64
+	if base == "DECIMAL" {
+		if !hasArgs {
+			if !hasDecimal {
+				return typesystem.LogicalType{}, fmt.Errorf("ClickHouse Decimal requires precision and scale")
+			}
+			p, s = precision, scale
+		} else if len(args) != 2 {
+			return typesystem.LogicalType{}, fmt.Errorf("ClickHouse Decimal requires precision and scale")
+		}
+		if hasArgs {
+			var err error
+			p, err = clickHouseIntArg(args[0])
+			if err != nil {
+				return typesystem.LogicalType{}, fmt.Errorf("ClickHouse Decimal precision: %w", err)
+			}
+			s, err = clickHouseIntArg(args[1])
+			if err != nil {
+				return typesystem.LogicalType{}, fmt.Errorf("ClickHouse Decimal scale: %w", err)
+			}
+		}
+	} else {
+		if !hasArgs || len(args) != 1 {
+			return typesystem.LogicalType{}, fmt.Errorf("ClickHouse %s requires scale", base)
+		}
+		var err error
+		s, err = clickHouseIntArg(args[0])
+		if err != nil {
+			return typesystem.LogicalType{}, fmt.Errorf("ClickHouse %s scale: %w", base, err)
+		}
+		switch base {
+		case "DECIMAL32":
+			p = 9
+		case "DECIMAL64":
+			p = 18
+		case "DECIMAL128":
+			p = 38
+		case "DECIMAL256":
+			p = 76
+		}
+	}
+	if p > math.MaxInt32 || s > math.MaxInt32 || p < math.MinInt32 || s < math.MinInt32 {
+		return typesystem.LogicalType{}, fmt.Errorf("ClickHouse %s precision or scale out of range", base)
+	}
+	t := typesystem.Decimal(int32(p), int32(s))
+	if err := t.Validate(); err != nil {
+		return typesystem.LogicalType{}, fmt.Errorf("ClickHouse %s: %w", base, err)
+	}
+	return t, nil
+}
+
+func clickHouseTimezone(args []string, hasArgs, requiresPrecision bool) (string, error) {
+	if !hasArgs {
+		return "", nil
+	}
+	if requiresPrecision {
+		if len(args) == 1 {
+			if _, err := clickHouseIntArg(args[0]); err != nil {
+				return "", fmt.Errorf("ClickHouse DateTime64 precision: %w", err)
+			}
+			return "", nil
+		}
+		if len(args) != 2 {
+			return "", fmt.Errorf("ClickHouse DateTime64 expects precision and optional timezone")
+		}
+		if _, err := clickHouseIntArg(args[0]); err != nil {
+			return "", fmt.Errorf("ClickHouse DateTime64 precision: %w", err)
+		}
+		return clickHouseZoneArg(args[1])
+	}
+	if len(args) != 1 {
+		return "", fmt.Errorf("ClickHouse DateTime expects optional timezone")
+	}
+	return clickHouseZoneArg(args[0])
+}
+
+func clickHouseZoneArg(arg string) (string, error) {
+	zone := strings.Trim(strings.TrimSpace(arg), "'\"")
+	if zone == "" {
+		return "", fmt.Errorf("ClickHouse timezone cannot be empty")
+	}
+	return zone, nil
+}
+
+func clickHouseIntArg(arg string) (int64, error) {
+	return strconv.ParseInt(strings.TrimSpace(arg), 10, 64)
+}
+
+func clickHouseBaseAndArgs(raw string) (string, []string, bool) {
+	if open := strings.IndexByte(raw, '('); open >= 0 && strings.HasSuffix(strings.TrimSpace(raw), ")") {
+		return strings.ToUpper(strings.TrimSpace(raw[:open])), clickHouseSplitArgs(strings.TrimSpace(raw[open+1 : len(strings.TrimSpace(raw))-1])), true
+	}
+	return strings.ToUpper(strings.TrimSpace(raw)), nil, false
+}
+
+func clickHouseSplitArgs(input string) []string {
+	var result []string
+	start, depth := 0, 0
+	quote := byte(0)
+	for i := 0; i < len(input); i++ {
+		c := input[i]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		if c == '\'' || c == '"' {
+			quote = c
+			continue
+		}
+		switch c {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				result = append(result, strings.TrimSpace(input[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	result = append(result, strings.TrimSpace(input[start:]))
+	return result
+}
+
+func clickHouseOuter(raw, name string) (string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	prefix := name + "("
+	if len(trimmed) < len(prefix) || !strings.EqualFold(trimmed[:len(prefix)], prefix) {
+		return "", false
+	}
+	depth := 0
+	for i := len(name); i < len(trimmed); i++ {
+		switch trimmed[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				if strings.TrimSpace(trimmed[i+1:]) != "" {
+					return "", false
+				}
+				return trimmed[len(name)+1 : i], true
+			}
+		}
+	}
+	return "", false
+}
+
+func clickHouseUnknown(source string) typesystem.LogicalType {
+	return typesystem.LogicalType{Kind: typesystem.KindUnknown, SourceTypeName: source}
+}
+
+func planClickHouseColumn(name, dbType string, precision, scale int64, hasDecimal bool) ColumnPlan {
+	t, err := LogicalTypeForClickHouseColumn(dbType, precision, scale, hasDecimal)
+	if err == nil {
+		if plan, _, planErr := PlanForLogicalType(name, t); planErr == nil {
+			return plan
+		}
+	}
+	plan, _, fallbackErr := PlanForLogicalType(name, clickHouseUnknown(strings.ToUpper(strings.TrimSpace(dbType))))
+	if fallbackErr != nil {
+		panic(fmt.Sprintf("ClickHouse fallback plan: %v", fallbackErr))
+	}
+	return plan
 }

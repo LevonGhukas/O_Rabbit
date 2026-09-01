@@ -21,7 +21,7 @@ func TestCurrentPlannerMappingsAndFallbacks(t *testing.T) {
 	}{
 		{"postgres_array_alias", "postgres", "_INT4", 0, 0, false, arrow.ListOf(arrow.PrimitiveTypes.Int32)},
 		{"mysql_boolean_spelling", "mysql", "TINYINT(1)", 0, 0, false, arrow.FixedWidthTypes.Boolean},
-		{"mariadb_unsigned", "mariadb", "BIGINT UNSIGNED", 0, 0, false, arrow.PrimitiveTypes.Uint64},
+		{"mariadb_unsigned_storage_fallback", "mariadb", "BIGINT UNSIGNED", 0, 0, false, arrow.BinaryTypes.String},
 		{"mssql_rowversion", "mssql", "ROWVERSION", 0, 0, false, arrow.BinaryTypes.Binary},
 		{"oracle_number_precision", "oracle", "NUMBER", 4, 0, true, arrow.PrimitiveTypes.Int16},
 		{"clickhouse_structural_fallback", "clickhouse", "Tuple(String, UInt64)", 0, 0, false, arrow.BinaryTypes.String},
