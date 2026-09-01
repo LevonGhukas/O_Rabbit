@@ -982,6 +982,154 @@ func TestAPIRunValidateRejectsInvalidColumnType(t *testing.T) {
 	}
 }
 
+func TestAPIRunValidateDocumentTypeMappings(t *testing.T) {
+	tests := []struct {
+		name         string
+		docs         []map[string]any
+		wantWarnings int
+		check        func(*testing.T, []struct {
+			Column      string `json:"column"`
+			LogicalType string `json:"logical_type"`
+			StorageType string `json:"storage_type"`
+			Class       string `json:"class"`
+			Fallback    bool   `json:"fallback"`
+		})
+	}{
+		{name: "compatible", docs: []map[string]any{{"id": int64(1), "name": "one"}}, wantWarnings: 0, check: func(t *testing.T, mappings []struct {
+			Column      string `json:"column"`
+			LogicalType string `json:"logical_type"`
+			StorageType string `json:"storage_type"`
+			Class       string `json:"class"`
+			Fallback    bool   `json:"fallback"`
+		}) {
+			if len(mappings) != 2 {
+				t.Fatalf("mappings=%v", mappings)
+			}
+		}},
+		{name: "mixed", docs: []map[string]any{{"value": int64(1)}, {"value": "one"}}, wantWarnings: 1, check: func(t *testing.T, mappings []struct {
+			Column      string `json:"column"`
+			LogicalType string `json:"logical_type"`
+			StorageType string `json:"storage_type"`
+			Class       string `json:"class"`
+			Fallback    bool   `json:"fallback"`
+		}) {
+			if len(mappings) != 1 || !mappings[0].Fallback || mappings[0].StorageType != "utf8" || mappings[0].Class != "unsupported_fallback" {
+				t.Fatalf("mappings=%v", mappings)
+			}
+		}},
+		{name: "array", docs: []map[string]any{{"tags": []string{"a", "b"}}}, wantWarnings: 0, check: func(t *testing.T, mappings []struct {
+			Column      string `json:"column"`
+			LogicalType string `json:"logical_type"`
+			StorageType string `json:"storage_type"`
+			Class       string `json:"class"`
+			Fallback    bool   `json:"fallback"`
+		}) {
+			if len(mappings) != 1 || !strings.HasPrefix(mappings[0].LogicalType, "array<") || !strings.Contains(mappings[0].StorageType, "list") {
+				t.Fatalf("mappings=%v", mappings)
+			}
+		}},
+		{name: "all null", docs: []map[string]any{{"value": nil}, {"value": nil}}, wantWarnings: 1, check: func(t *testing.T, mappings []struct {
+			Column      string `json:"column"`
+			LogicalType string `json:"logical_type"`
+			StorageType string `json:"storage_type"`
+			Class       string `json:"class"`
+			Fallback    bool   `json:"fallback"`
+		}) {
+			if len(mappings) != 1 || !mappings[0].Fallback {
+				t.Fatalf("mappings=%v", mappings)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			previous := openDocumentReader
+			openDocumentReader = func(context.Context, string, string) (connectors.DocumentReader, error) {
+				return &validationDocumentReader{docs: tt.docs, fieldOrder: []string{"id", "name", "value", "tags"}}, nil
+			}
+			t.Cleanup(func() { openDocumentReader = previous })
+			st := openTestStore(t)
+			srv := newSubmitTestServer(st)
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/runs/validate", strings.NewReader(`{"source":{"engine":"mongodb","dsn":"mongodb://unused","table":"items","cursor_column":"_id"},"target":{"s3_endpoint":"http://minio:9000","s3_bucket":"bucket1","s3_access_key_id":"minioadmin","s3_secret_access_key":"miniosecret"}}`))
+			srv.Handler().ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			var response struct {
+				TypeMappings []struct {
+					Column      string `json:"column"`
+					LogicalType string `json:"logical_type"`
+					StorageType string `json:"storage_type"`
+					Class       string `json:"class"`
+					Fallback    bool   `json:"fallback"`
+				} `json:"type_mappings"`
+				TypeWarnings []typesystem.TypeWarning `json:"type_warnings"`
+			}
+			decodeJSONBody(t, rec, &response)
+			if response.TypeMappings == nil || response.TypeWarnings == nil || len(response.TypeWarnings) != tt.wantWarnings {
+				t.Fatalf("mappings=%v warnings=%v", response.TypeMappings, response.TypeWarnings)
+			}
+			tt.check(t, response.TypeMappings)
+		})
+	}
+}
+
+func TestAPIRunValidateDocumentSchemaError(t *testing.T) {
+	previous := openDocumentReader
+	openDocumentReader = func(context.Context, string, string) (connectors.DocumentReader, error) {
+		return nil, errors.New("document source unavailable")
+	}
+	t.Cleanup(func() { openDocumentReader = previous })
+	srv := newSubmitTestServer(openTestStore(t))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/validate", strings.NewReader(`{"source":{"engine":"mongodb","dsn":"mongodb://unused","table":"items","cursor_column":"_id"},"target":{"s3_endpoint":"http://minio:9000","s3_bucket":"bucket1","s3_access_key_id":"minioadmin","s3_secret_access_key":"miniosecret"}}`))
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want=%d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+type validationDocumentReader struct {
+	docs       []map[string]any
+	fieldOrder []string
+}
+
+func (r *validationDocumentReader) Close() error { return nil }
+func (r *validationDocumentReader) DescribeCollection(context.Context, string) ([]connectors.DocumentField, error) {
+	return nil, nil
+}
+func (r *validationDocumentReader) StreamDocuments(context.Context, string, map[string]any, int) (connectors.DocumentIterator, error) {
+	return &validationDocumentIterator{docs: r.docs, fieldOrder: r.fieldOrder}, nil
+}
+func (r *validationDocumentReader) DiscoverCollectionStats(context.Context, string) (connectors.CollectionStats, error) {
+	return connectors.CollectionStats{}, nil
+}
+func (r *validationDocumentReader) ValidateCursorColumn(context.Context, string, string) (connectors.CursorColumnValidation, error) {
+	return connectors.CursorColumnValidation{}, nil
+}
+func (r *validationDocumentReader) DiscoverCursorStats(context.Context, string, string, connectors.CursorDomain) (connectors.CursorStats, error) {
+	return connectors.CursorStats{}, nil
+}
+func (r *validationDocumentReader) BuildCursorFilter(connectors.CursorQuery) (map[string]any, error) {
+	return nil, nil
+}
+
+type validationDocumentIterator struct {
+	docs       []map[string]any
+	fieldOrder []string
+	index      int
+}
+
+func (it *validationDocumentIterator) Next(context.Context) bool { return it.index < len(it.docs) }
+func (it *validationDocumentIterator) Decode() (map[string]any, error) {
+	doc := it.docs[it.index]
+	it.index++
+	return doc, nil
+}
+func (it *validationDocumentIterator) Close() error         { return nil }
+func (it *validationDocumentIterator) Err() error           { return nil }
+func (it *validationDocumentIterator) FieldOrder() []string { return it.fieldOrder }
+
 func TestAPISourceEnginesListsCapabilities(t *testing.T) {
 	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
 
