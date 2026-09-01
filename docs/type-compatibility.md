@@ -12,6 +12,8 @@ Potential Iceberg implications are limited to what is visible here: `internal/ic
 
 ## PostgreSQL
 
+Migration status: PostgreSQL is now the first migrated engine. The table below is retained as the Milestone 1 legacy baseline; current PostgreSQL execution instead uses `LogicalTypeForPostgresColumn -> PlanForLogicalType -> typesystem.Convert`. It no longer clamps unconstrained `NUMERIC`, treats UUID/JSON as native strings semantically, or silently nulls/wraps failed conversions. Unsupported semantic types, including `TIMETZ`, `INET`, and `VARBIT`, are `KindUnknown` and use an observable lossless-string fallback. Other engine sections remain legacy behavior.
+
 Planner: `internal/arrowio/postgres_to_arrow.go:planPostgresColumn`. It explicitly recognizes arrays by the `[]` and `_` forms before scalar matching.
 
 | Source types / aliases recognized | Arrow type | Value conversion / classification | Fallback and notes |
