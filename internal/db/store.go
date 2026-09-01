@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -319,6 +321,7 @@ type Run struct {
 	FinishedAt                     *string                   `json:"finished_at"`
 	ErrorSummary                   *string                   `json:"error_summary"`
 	FailureClass                   string                    `json:"failure_class,omitempty"`
+	TypeWarnings                   []typesystem.TypeWarning  `json:"type_warnings"`
 	RegistrationConfigJSON         json.RawMessage           `json:"-"`
 	CommitID                       string                    `json:"commit_id,omitempty"`
 	CommitIntentJSON               json.RawMessage           `json:"-"`
@@ -556,9 +559,13 @@ func (s *Store) FindActiveRunByDatasetKey(ctx context.Context, datasetKey string
 func (s *Store) CreateRun(ctx context.Context, r Run) error {
 	var err error
 	registrationConfig := string(r.RegistrationConfigJSON)
+	warnings, err := json.Marshal(r.TypeWarnings)
+	if err != nil {
+		return err
+	}
 	err = withBusyRetry(ctx, func() error {
-		_, err = s.db.ExecContext(ctx, `INSERT INTO runs(id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-			r.ID, r.JobID, r.DatasetKey, r.Status, r.CorrelationID, r.StartedAt, r.FinishedAt, r.ErrorSummary, r.FailureClass, registrationConfig)
+		_, err = s.db.ExecContext(ctx, `INSERT INTO runs(id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+			r.ID, r.JobID, r.DatasetKey, r.Status, r.CorrelationID, r.StartedAt, r.FinishedAt, r.ErrorSummary, r.FailureClass, registrationConfig, string(warnings))
 		if err != nil {
 			msg := err.Error()
 			if strings.Contains(msg, "idx_runs_dataset_active") || strings.Contains(msg, "runs.dataset_key") {
@@ -571,15 +578,15 @@ func (s *Store) CreateRun(ctx context.Context, r Run) error {
 }
 
 func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, commit_id, commit_intent_json, commit_phase FROM runs ORDER BY started_at DESC;`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json, commit_id, commit_intent_json, commit_phase FROM runs ORDER BY started_at DESC;`)
 	if err != nil {
 		return nil, wrapRunRegistrationConfigColumnErr(err)
 	}
 	var out []Run
 	for rows.Next() {
 		var r Run
-		var registrationConfig, commitIntent string
-		if err := rows.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &registrationConfig, &r.CommitID, &commitIntent, &r.CommitPhase); err != nil {
+		var registrationConfig, warningJSON, commitIntent string
+		if err := rows.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &registrationConfig, &warningJSON, &r.CommitID, &commitIntent, &r.CommitPhase); err != nil {
 			return nil, err
 		}
 		if strings.TrimSpace(registrationConfig) != "" {
@@ -587,6 +594,9 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 		}
 		if strings.TrimSpace(commitIntent) != "" {
 			r.CommitIntentJSON = []byte(commitIntent)
+		}
+		if err := decodeRunWarnings(warningJSON, &r); err != nil {
+			return nil, err
 		}
 		out = append(out, r)
 	}
@@ -606,10 +616,13 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 
 func (s *Store) GetRun(ctx context.Context, id string) (Run, error) {
 	var r Run
-	var registrationConfig, commitIntent string
-	row := s.db.QueryRowContext(ctx, `SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, commit_id, commit_intent_json, commit_phase FROM runs WHERE id=?;`, id)
-	if err := row.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &registrationConfig, &r.CommitID, &commitIntent, &r.CommitPhase); err != nil {
+	var registrationConfig, warningJSON, commitIntent string
+	row := s.db.QueryRowContext(ctx, `SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json, commit_id, commit_intent_json, commit_phase FROM runs WHERE id=?;`, id)
+	if err := row.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &registrationConfig, &warningJSON, &r.CommitID, &commitIntent, &r.CommitPhase); err != nil {
 		return Run{}, wrapRunRegistrationConfigColumnErr(err)
+	}
+	if err := decodeRunWarnings(warningJSON, &r); err != nil {
+		return Run{}, err
 	}
 	if strings.TrimSpace(registrationConfig) != "" {
 		r.RegistrationConfigJSON = []byte(registrationConfig)
@@ -624,7 +637,7 @@ func (s *Store) GetRun(ctx context.Context, id string) (Run, error) {
 
 // ListSucceededRunsForJob returns succeeded runs oldest-first for retention.
 func (s *Store) ListSucceededRunsForJob(ctx context.Context, jobID string) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json FROM runs WHERE job_id = ? AND status = 'SUCCEEDED' ORDER BY started_at ASC;`, jobID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json FROM runs WHERE job_id = ? AND status = 'SUCCEEDED' ORDER BY started_at ASC;`, jobID)
 	if err != nil {
 		return nil, wrapRunRegistrationConfigColumnErr(err)
 	}
@@ -632,8 +645,11 @@ func (s *Store) ListSucceededRunsForJob(ctx context.Context, jobID string) ([]Ru
 	var out []Run
 	for rows.Next() {
 		var r Run
-		var registrationConfig string
-		if err := rows.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &registrationConfig); err != nil {
+		var registrationConfig, warningJSON string
+		if err := rows.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &registrationConfig, &warningJSON); err != nil {
+			return nil, err
+		}
+		if err := decodeRunWarnings(warningJSON, &r); err != nil {
 			return nil, err
 		}
 		if strings.TrimSpace(registrationConfig) != "" {
@@ -642,6 +658,20 @@ func (s *Store) ListSucceededRunsForJob(ctx context.Context, jobID string) ([]Ru
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func decodeRunWarnings(raw string, r *Run) error {
+	r.TypeWarnings = []typesystem.TypeWarning{}
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	if err := json.Unmarshal([]byte(raw), &r.TypeWarnings); err != nil {
+		return fmt.Errorf("decode run type warnings: %w", err)
+	}
+	if r.TypeWarnings == nil {
+		r.TypeWarnings = []typesystem.TypeWarning{}
+	}
+	return nil
 }
 
 func (s *Store) attachRegistrationProjection(ctx context.Context, r *Run) {
