@@ -50,3 +50,25 @@ Destination-specific code remains responsible for warnings when it selects the f
 `*` means the storage representation is a fallback. It is deliberately selected on both sides of the current Arrow-to-Iceberg bridge. Arrow alone can express `uint64`, but Iceberg `long` cannot safely hold its complete range, so the resolver uses `string` instead. Arrow Decimal256 is likewise not selected because the current bridge accepts Decimal128 only. Although the installed Iceberg library has a native UUID type, the current runtime converter emits UUID text and native Iceberg UUID requires Arrow UUID extension values; UUID therefore remains text until that end-to-end path is implemented.
 
 For `timestamp_tz`, an empty logical timezone becomes Arrow `UTC`, matching the canonical conversion output. A non-UTC timezone is preserved by the standalone Arrow mapper, but the resolved storage mapper falls back to string because the current bridge only accepts `UTC`, `+00:00`, `Etc/UTC`, and `Z` for Iceberg `timestamptz`.
+
+## Target type syntax
+
+`typesystem.ParseType` is the authoritative parser for explicit ORabbit target types. Preferred canonical syntax is case-insensitive:
+
+```text
+string
+bool
+int8 | int16 | int32 | int64
+uint8 | uint16 | uint32 | uint64
+float32 | float64
+decimal(p,s)
+date | time | timestamp | timestamp_tz[zone]
+uuid | binary | json
+array<T> | nullable<T>
+```
+
+Whitespace and nesting are supported, such as `array < nullable < string > >`. Repeated nullable wrappers normalize idempotently to one nullable logical type.
+
+Legacy compatibility syntax is accepted but is not the preferred API: ClickHouse-style `Array(T)`, `Nullable(T)`, and `LowCardinality(T)`; `Numeric(p,s)`, `Number(p,s)`, `Money`, and `SmallMoney`; `DateTime`, `DateTime64`, `Time64`; SQL spelling aliases such as `VARCHAR`, `BYTEA`, and `UNIQUEIDENTIFIER`. `LowCardinality` is stripped because it has no independent logical meaning. `XML` currently normalizes to `string` because the logical vocabulary has no XML kind.
+
+Unknown source-database types may still use the documented lossless string fallback. Unknown **explicit target type strings** are configuration errors: `ParseType("FooBar")`, `array<>`, and malformed decimals return errors rather than silently becoming `unknown` or `string`. Decimal precision is retained without a parser limit; for example, `decimal(50,10)` parses successfully and storage resolution later chooses its explicit fallback.
