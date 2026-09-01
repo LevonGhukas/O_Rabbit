@@ -30,7 +30,7 @@ func TestIcebergMappingForLogicalType(t *testing.T) {
 		{"uint64", typesystem.LogicalType{Kind: typesystem.KindUInt64}, "string", typesystem.MappingSemanticFallback, true},
 		{"float32", typesystem.LogicalType{Kind: typesystem.KindFloat32}, "float", typesystem.MappingExact, false},
 		{"float64", typesystem.LogicalType{Kind: typesystem.KindFloat64}, "double", typesystem.MappingExact, false},
-		{"decimal", decimal, "decimal(18,2)", typesystem.MappingExact, false},
+		{"decimal", decimal, "decimal(18, 2)", typesystem.MappingExact, false},
 		{"date", typesystem.LogicalType{Kind: typesystem.KindDate}, "date", typesystem.MappingExact, false},
 		{"time", typesystem.LogicalType{Kind: typesystem.KindTime}, "time", typesystem.MappingExact, false},
 		{"timestamp", typesystem.LogicalType{Kind: typesystem.KindTimestamp}, "timestamp", typesystem.MappingExact, false},

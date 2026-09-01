@@ -84,7 +84,7 @@ func IcebergMappingForLogicalType(t typesystem.LogicalType) (IcebergMapping, err
 		if *t.Precision > 38 {
 			return fallback(typesystem.MappingSemanticFallback, "Iceberg decimal precision is limited to 38"), nil
 		}
-		return exact(fmt.Sprintf("decimal(%d,%d)", *t.Precision, *t.Scale)), nil
+		return exact(fmt.Sprintf("decimal(%d, %d)", *t.Precision, *t.Scale)), nil
 	case typesystem.KindDate:
 		return exact("date"), nil
 	case typesystem.KindTime:
