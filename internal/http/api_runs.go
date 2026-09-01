@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/arrowio"
 	"github.com/LevonGhukas/O_Rabbit/internal/connectors"
 	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/dataset"
@@ -17,6 +19,7 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
 
 const (
@@ -47,15 +50,15 @@ type runSubmitConsistencyRequest struct {
 }
 
 type runSubmitSourceRequest struct {
-	Engine       string `json:"engine"`
-	DSN          string `json:"dsn"`
-	Mode         string `json:"mode"`
-	Table        string `json:"table"`
-	Query        string `json:"query"`
-	CursorColumn string `json:"cursor_column"`
-	Incremental  bool   `json:"incremental"` 
-	WhereClause  string `json:"where_clause,omitempty"` 
-	SelectColumns []string          `json:"select_columns,omitempty"` 
+	Engine        string            `json:"engine"`
+	DSN           string            `json:"dsn"`
+	Mode          string            `json:"mode"`
+	Table         string            `json:"table"`
+	Query         string            `json:"query"`
+	CursorColumn  string            `json:"cursor_column"`
+	Incremental   bool              `json:"incremental"`
+	WhereClause   string            `json:"where_clause,omitempty"`
+	SelectColumns []string          `json:"select_columns,omitempty"`
 	ColumnTypes   map[string]string `json:"column_types,omitempty"`
 }
 
@@ -356,7 +359,14 @@ func (s *Server) handleRunValidate(w http.ResponseWriter, r *http.Request) {
 		s.writeRunSubmitError(w, err)
 		return
 	}
+	for column, target := range spec.ColumnTypes {
+		if _, err := typesystem.ParseType(target); err != nil {
+			writeInvalidInput(w, "invalid column_types", map[string]any{"column": column, "error": err.Error()})
+			return
+		}
+	}
 	applyFrontendDestinationIdentity(&spec)
+	mappings, warnings := validationTypeMappings(r.Context(), spec)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                        true,
 		"source_engine":             spec.SourceEngine,
@@ -365,14 +375,16 @@ func (s *Server) handleRunValidate(w http.ResponseWriter, r *http.Request) {
 		"query_supported":           spec.QuerySupported,
 		"frontend_submit_supported": spec.FrontendSubmitSupported,
 		"available_workers":         s.activeWorkerCount(r.Context()),
+		"type_mappings":             mappings,
+		"type_warnings":             warnings,
 		"derived": map[string]any{
 			"job_name":               spec.JobName,
 			"source_connection_name": spec.SourceConnectionName,
 			"source_name":            spec.SourceName,
 			"query_hash":             spec.QueryHash,
-		"where_clause":           spec.WhereClause,
-		"select_columns":         spec.SelectColumns,
-		"column_types":           spec.ColumnTypes,
+			"where_clause":           spec.WhereClause,
+			"select_columns":         spec.SelectColumns,
+			"column_types":           spec.ColumnTypes,
 			"target_connection_name": spec.TargetConnectionName,
 			"target_prefix":          spec.TargetPrefix,
 			"iceberg_table":          spec.IcebergTable,
@@ -384,6 +396,64 @@ func (s *Server) handleRunValidate(w http.ResponseWriter, r *http.Request) {
 			"s3_force_path_style":    spec.TargetForcePathStyle,
 		},
 	})
+}
+
+func validationTypeMappings(ctx context.Context, spec validatedRunSubmitSpec) ([]map[string]any, []typesystem.TypeWarning) {
+	out := []map[string]any{}
+	warnings := []typesystem.TypeWarning{}
+	if connectors.SupportsDocumentReader(spec.SourceEngine) {
+		return out, warnings
+	}
+	reader, err := connectors.OpenIntRangeReader(ctx, spec.SourceEngine, spec.SourceDSN)
+	if err != nil {
+		return out, warnings
+	}
+	defer reader.Close()
+	var cols []string
+	var types []*sql.ColumnType
+	if spec.SourceMode == "query" {
+		q, ok := reader.(connectors.SourceQueryReader)
+		if !ok {
+			return out, warnings
+		}
+		cols, types, err = q.DescribeQuery(ctx, spec.SourceQuery)
+	} else {
+		cols, types, err = reader.DescribeTable(ctx, spec.SourceTable)
+	}
+	if err != nil {
+		return out, warnings
+	}
+	result, err := arrowio.PlansFromSQLEngineResult(spec.SourceEngine, cols, types, spec.ColumnTypes)
+	if err != nil {
+		return out, warnings
+	}
+	for i, col := range cols {
+		var dbType string
+		var p, s int64
+		var dec bool
+		if types[i] != nil {
+			dbType = types[i].DatabaseTypeName()
+			if pp, ss, ok := types[i].DecimalSize(); ok {
+				p = int64(pp)
+				s = int64(ss)
+				dec = true
+			}
+		}
+		logical, e := arrowio.LogicalTypeForSQLColumn(spec.SourceEngine, dbType, p, s, dec)
+		if e != nil {
+			continue
+		}
+		if raw, ok := spec.ColumnTypes[col]; ok {
+			if parsed, e := typesystem.ParseType(raw); e == nil {
+				logical = parsed
+			}
+		}
+		_, mapping, e := arrowio.PlanForLogicalType(col, logical)
+		if e == nil {
+			out = append(out, map[string]any{"column": col, "logical_type": logical.String(), "storage_type": mapping.Destination, "class": mapping.Class, "fallback": mapping.Fallback, "reason": mapping.Reason})
+		}
+	}
+	return out, result.Warnings
 }
 
 func (s *Server) handleRunSubmit(w http.ResponseWriter, r *http.Request) {
@@ -816,9 +886,9 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 		SourceTable:             sourceTable,
 		SourceQuery:             sourceQuery,
 		QueryHash:               queryHash,
-			WhereClause:             strings.TrimSpace(req.Source.WhereClause),
-			SelectColumns:           req.Source.SelectColumns,
-			ColumnTypes:             req.Source.ColumnTypes,
+		WhereClause:             strings.TrimSpace(req.Source.WhereClause),
+		SelectColumns:           req.Source.SelectColumns,
+		ColumnTypes:             req.Source.ColumnTypes,
 		SourceName:              sourceName,
 		CursorColumn:            cursorColumn,
 		Incremental:             req.Source.Incremental,
