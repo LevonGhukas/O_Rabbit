@@ -11,12 +11,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/url"
 	"runtime"
 	"strings"
 	"time"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/arrowio"
 	"github.com/LevonGhukas/O_Rabbit/internal/connectors"
 	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/dataset"
@@ -437,6 +439,29 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 			closeReader = r.Close
 		}
 		defer closeReader()
+		if !connectors.SupportsDocumentReader(srcEngine) {
+			var cols []string
+			var types []*sql.ColumnType
+			var schemaErr error
+			if sourceMode == "query" {
+				if q, ok := reader.(connectors.SourceQueryReader); ok {
+					cols, types, schemaErr = q.DescribeQuery(ctx, sourceQuery)
+				}
+			} else if d, ok := reader.(tableDescriber); ok {
+				cols, types, schemaErr = d.DescribeTable(ctx, o.Table)
+			}
+			if schemaErr == nil && len(cols) > 0 {
+				if result, e := arrowio.PlansFromSQLEngineResult(srcEngine, cols, types, o.ColumnTypes); e == nil {
+					run.TypeWarnings = result.Warnings
+					if e = st.SetRunTypeWarnings(ctx, run.ID, result.Warnings); e != nil {
+						return db.Run{}, nil, e
+					}
+					for _, warning := range result.Warnings {
+						slog.Warn("type mapping fallback", "run_id", run.ID, "source_engine", srcEngine, "column", warning.Column, "logical_type", warning.LogicalType, "storage_type", warning.StorageType, "mapping_class", warning.Class, "reason", warning.Reason)
+					}
+				}
+			}
+		}
 
 		validationStart := time.Now()
 		cv := connectors.CursorColumnValidation{}
