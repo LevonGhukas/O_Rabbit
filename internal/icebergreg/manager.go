@@ -1253,24 +1253,7 @@ func InferDurableIcebergSchemaWithWarnings(ctx context.Context, engine, dsn, mod
 			return nil, nil, fmt.Errorf("open document source for durable schema: %w", err)
 		}
 		defer reader.Close()
-		it, err := reader.StreamDocuments(ctx, table, documentFilter(engine, recordPath, fileFormat), 1000)
-		if err != nil {
-			return nil, nil, fmt.Errorf("stream documents for durable schema: %w", err)
-		}
-		defer it.Close()
-		var fieldOrder []string
-		if ordered, ok := it.(connectors.OrderedDocumentIterator); ok {
-			fieldOrder = ordered.FieldOrder()
-		}
-		var docs []map[string]any
-		for it.Next(ctx) && len(docs) < 1000 {
-			doc, decodeErr := it.Decode()
-			if decodeErr != nil {
-				return nil, nil, fmt.Errorf("decode document for durable schema: %w", decodeErr)
-			}
-			docs = append(docs, doc)
-		}
-		inference, err := arrowio.InferMongoSchemaResult(docs, fieldOrder)
+		inference, err := arrowio.InferMongoSchemaFromReader(ctx, reader, table, documentFilter(engine, recordPath, fileFormat))
 		if err != nil {
 			return nil, nil, fmt.Errorf("infer document durable schema: %w", err)
 		}

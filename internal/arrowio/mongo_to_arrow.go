@@ -1,6 +1,7 @@
 package arrowio
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"reflect"
@@ -14,6 +15,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/connectors"
 	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
 
@@ -21,7 +23,7 @@ type MongoInferenceWarning struct {
 	Field, Reason string
 	SourceTypes   []string
 }
-type mongoFieldPlan struct {
+type MongoInferenceField struct {
 	Name        string
 	LogicalType typesystem.LogicalType
 	ColumnPlan  ColumnPlan
@@ -29,8 +31,33 @@ type mongoFieldPlan struct {
 }
 type MongoInferenceResult struct {
 	Schema   *arrow.Schema
-	Fields   []mongoFieldPlan
+	Fields   []MongoInferenceField
 	Warnings []MongoInferenceWarning
+}
+
+// InferMongoSchemaFromReader samples one document stream and infers its schema.
+func InferMongoSchemaFromReader(ctx context.Context, reader connectors.DocumentReader, collection string, filter map[string]any) (*MongoInferenceResult, error) {
+	it, err := reader.StreamDocuments(ctx, collection, filter, 1000)
+	if err != nil {
+		return nil, fmt.Errorf("stream documents: %w", err)
+	}
+	defer it.Close()
+	var fieldOrder []string
+	if ordered, ok := it.(connectors.OrderedDocumentIterator); ok {
+		fieldOrder = ordered.FieldOrder()
+	}
+	docs := make([]map[string]any, 0, 1000)
+	for it.Next(ctx) && len(docs) < 1000 {
+		doc, err := it.Decode()
+		if err != nil {
+			return nil, fmt.Errorf("decode document: %w", err)
+		}
+		docs = append(docs, doc)
+	}
+	if err := it.Err(); err != nil {
+		return nil, fmt.Errorf("iterate documents: %w", err)
+	}
+	return InferMongoSchemaResult(docs, fieldOrder)
 }
 
 func MongoTypeWarnings(result *MongoInferenceResult) []typesystem.TypeWarning {
@@ -83,7 +110,7 @@ func InferMongoSchemaResult(docs []map[string]any, fieldOrder []string) (*MongoI
 		}
 	}
 	keys := mongoOrderedKeys(values, fieldOrder)
-	result := &MongoInferenceResult{Fields: make([]mongoFieldPlan, 0, len(keys))}
+	result := &MongoInferenceResult{Fields: make([]MongoInferenceField, 0, len(keys))}
 	fields := make([]arrow.Field, 0, len(keys))
 	for _, key := range keys {
 		logical, warning := inferMongoField(values[key], present[key] != len(docs))
@@ -95,7 +122,7 @@ func InferMongoSchemaResult(docs []map[string]any, fieldOrder []string) (*MongoI
 		if err != nil {
 			return nil, err
 		}
-		result.Fields = append(result.Fields, mongoFieldPlan{Name: key, LogicalType: logical, ColumnPlan: plan, Mapping: mapping})
+		result.Fields = append(result.Fields, MongoInferenceField{Name: key, LogicalType: logical, ColumnPlan: plan, Mapping: mapping})
 		fields = append(fields, arrow.Field{Name: key, Type: plan.DataType, Nullable: logical.Nullable})
 	}
 	result.Schema = arrow.NewSchema(fields, nil)
@@ -283,7 +310,7 @@ func MongoDocsToRecord(alloc memory.Allocator, schema *arrow.Schema, docs []map[
 	if err != nil {
 		return nil, err
 	}
-	plans := map[string]mongoFieldPlan{}
+	plans := map[string]MongoInferenceField{}
 	for _, p := range result.Fields {
 		plans[p.Name] = p
 	}
@@ -299,7 +326,7 @@ func MongoDocsToRecord(alloc memory.Allocator, schema *arrow.Schema, docs []map[
 		f := schema.Field(i)
 		p, ok := plans[f.Name]
 		if !ok {
-			p = mongoFieldPlan{Name: f.Name, LogicalType: mongoLogicalFromArrow(f.Type)}
+			p = MongoInferenceField{Name: f.Name, LogicalType: mongoLogicalFromArrow(f.Type)}
 			p.ColumnPlan, _, err = PlanForLogicalType(f.Name, p.LogicalType)
 			if err != nil {
 				return nil, err

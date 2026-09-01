@@ -30,6 +30,8 @@ const (
 	defaultFrontendWriteMode            = "append"
 )
 
+var openDocumentReader = connectors.OpenDocumentReader
+
 func resolveFrontendWriteMode(incremental bool) string {
 	if incremental {
 		return "append"
@@ -366,7 +368,11 @@ func (s *Server) handleRunValidate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	applyFrontendDestinationIdentity(&spec)
-	mappings, warnings := validationTypeMappings(r.Context(), spec)
+	mappings, warnings, err := validationTypeMappings(r.Context(), spec)
+	if err != nil {
+		writeInvalidInput(w, "source schema validation failed", map[string]any{"error": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                        true,
 		"source_engine":             spec.SourceEngine,
@@ -398,15 +404,27 @@ func (s *Server) handleRunValidate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func validationTypeMappings(ctx context.Context, spec validatedRunSubmitSpec) ([]map[string]any, []typesystem.TypeWarning) {
+func validationTypeMappings(ctx context.Context, spec validatedRunSubmitSpec) ([]map[string]any, []typesystem.TypeWarning, error) {
 	out := []map[string]any{}
 	warnings := []typesystem.TypeWarning{}
 	if connectors.SupportsDocumentReader(spec.SourceEngine) {
-		return out, warnings
+		reader, err := openDocumentReader(ctx, spec.SourceEngine, spec.SourceDSN)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open document source: %w", err)
+		}
+		defer reader.Close()
+		inference, err := arrowio.InferMongoSchemaFromReader(ctx, reader, spec.SourceTable, nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("infer document schema: %w", err)
+		}
+		for _, field := range inference.Fields {
+			out = append(out, map[string]any{"column": field.Name, "logical_type": field.LogicalType.String(), "storage_type": field.Mapping.Destination, "class": field.Mapping.Class, "fallback": field.Mapping.Fallback, "reason": field.Mapping.Reason})
+		}
+		return out, arrowio.MongoTypeWarnings(inference), nil
 	}
 	reader, err := connectors.OpenIntRangeReader(ctx, spec.SourceEngine, spec.SourceDSN)
 	if err != nil {
-		return out, warnings
+		return out, warnings, nil
 	}
 	defer reader.Close()
 	var cols []string
@@ -414,16 +432,17 @@ func validationTypeMappings(ctx context.Context, spec validatedRunSubmitSpec) ([
 	if spec.SourceMode == "query" {
 		q, ok := reader.(connectors.SourceQueryReader)
 		if !ok {
-			return out, warnings
+			return out, warnings, nil
 		}
 		cols, types, err = q.DescribeQuery(ctx, spec.SourceQuery)
 	} else {
 		cols, types, err = reader.DescribeTable(ctx, spec.SourceTable)
 	}
 	if err != nil {
-		return out, warnings
+		return out, warnings, nil
 	}
-	return validationTypeMappingsFromDescription(spec, cols, types)
+	out, warnings = validationTypeMappingsFromDescription(spec, cols, types)
+	return out, warnings, nil
 }
 
 func validationTypeMappingsFromDescription(spec validatedRunSubmitSpec, cols []string, types []*sql.ColumnType) ([]map[string]any, []typesystem.TypeWarning) {
