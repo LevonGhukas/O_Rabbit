@@ -47,16 +47,18 @@ type runSubmitConsistencyRequest struct {
 }
 
 type runSubmitSourceRequest struct {
-	Engine       string `json:"engine"`
-	DSN          string `json:"dsn"`
-	Mode         string `json:"mode"`
-	Table        string `json:"table"`
-	Query        string `json:"query"`
-	CursorColumn string `json:"cursor_column"`
-	Incremental  bool   `json:"incremental"` 
-	WhereClause  string `json:"where_clause,omitempty"` 
-	SelectColumns []string          `json:"select_columns,omitempty"` 
+	Engine        string            `json:"engine"`
+	DSN           string            `json:"dsn"`
+	Mode          string            `json:"mode"`
+	Table         string            `json:"table"`
+	Query         string            `json:"query"`
+	CursorColumn  string            `json:"cursor_column"`
+	Incremental   bool              `json:"incremental"`
+	WhereClause   string            `json:"where_clause,omitempty"`
+	SelectColumns []string          `json:"select_columns,omitempty"`
 	ColumnTypes   map[string]string `json:"column_types,omitempty"`
+	RecordPath    string            `json:"record_path,omitempty"`
+	FileFormat    string            `json:"format,omitempty"`
 }
 
 type runSubmitTargetRequest struct {
@@ -101,6 +103,8 @@ type validatedRunSubmitSpec struct {
 	WhereClause             string
 	SelectColumns           []string
 	ColumnTypes             map[string]string
+	RecordPath              string
+	FileFormat              string
 	SourceName              string
 	CursorColumn            string
 	Incremental             bool
@@ -774,7 +778,8 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 			QueryHash:               queryHash,
 			WhereClause:             strings.TrimSpace(req.Source.WhereClause),
 			SelectColumns:           req.Source.SelectColumns,
-			ColumnTypes:             req.Source.ColumnTypes,
+			RecordPath:              strings.TrimSpace(req.Source.RecordPath),
+			FileFormat:              strings.TrimSpace(req.Source.FileFormat),
 			SourceName:              sourceName,
 			CursorColumn:            cursorColumn,
 			Incremental:             req.Source.Incremental,
@@ -816,9 +821,11 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 		SourceTable:             sourceTable,
 		SourceQuery:             sourceQuery,
 		QueryHash:               queryHash,
-			WhereClause:             strings.TrimSpace(req.Source.WhereClause),
-			SelectColumns:           req.Source.SelectColumns,
-			ColumnTypes:             req.Source.ColumnTypes,
+		WhereClause:             strings.TrimSpace(req.Source.WhereClause),
+		SelectColumns:           req.Source.SelectColumns,
+		ColumnTypes:             req.Source.ColumnTypes,
+		RecordPath:              strings.TrimSpace(req.Source.RecordPath),
+		FileFormat:              strings.TrimSpace(req.Source.FileFormat),
 		SourceName:              sourceName,
 		CursorColumn:            cursorColumn,
 		Incremental:             req.Source.Incremental,
@@ -923,6 +930,12 @@ func buildFrontendJobRequest(spec validatedRunSubmitSpec, sourceConnectionID, ta
 		"where_clause":           spec.WhereClause,
 		"select_columns":         spec.SelectColumns,
 		"column_types":           spec.ColumnTypes,
+	}
+	if strings.TrimSpace(spec.RecordPath) != "" {
+		options["record_path"] = strings.TrimSpace(spec.RecordPath)
+	}
+	if strings.TrimSpace(spec.FileFormat) != "" {
+		options["format"] = strings.TrimSpace(spec.FileFormat)
 	}
 	options = icebergreg.MergeJobConfig(options, icebergreg.JobConfig{
 		Enabled: spec.IcebergEnabled,
