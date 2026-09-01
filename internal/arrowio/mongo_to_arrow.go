@@ -1,9 +1,11 @@
 package arrowio
 
 import (
-	"encoding/json"
 	"fmt"
+	"math"
+	"reflect"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -11,128 +13,289 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
 
+type MongoInferenceWarning struct {
+	Field, Reason string
+	SourceTypes   []string
+}
 type mongoFieldPlan struct {
-	Name    string
-	Type    arrow.DataType
-	Builder func(mem memory.Allocator) array.Builder
-	Append  func(b array.Builder, v any)
+	Name        string
+	LogicalType typesystem.LogicalType
+	ColumnPlan  ColumnPlan
+	Mapping     typesystem.MappingResult
+}
+type MongoInferenceResult struct {
+	Schema   *arrow.Schema
+	Fields   []mongoFieldPlan
+	Warnings []MongoInferenceWarning
 }
 
 func InferMongoSchema(docs []map[string]any) (*arrow.Schema, error) {
 	return InferMongoSchemaWithFieldOrder(docs, nil)
 }
-
-// InferMongoSchemaWithFieldOrder builds a document schema using fieldOrder
-// when a source parser has already supplied an authoritative order. Fields not
-// present in fieldOrder retain the deterministic alphabetical fallback used by
-// generic document sources.
 func InferMongoSchemaWithFieldOrder(docs []map[string]any, fieldOrder []string) (*arrow.Schema, error) {
+	result, err := InferMongoSchemaResult(docs, fieldOrder)
+	if err != nil {
+		return nil, err
+	}
+	return result.Schema, nil
+}
+
+func InferMongoSchemaResult(docs []map[string]any, fieldOrder []string) (*MongoInferenceResult, error) {
 	if len(docs) == 0 {
 		return nil, fmt.Errorf("cannot infer schema from empty documents")
 	}
-
-	fieldTypes := map[string]arrow.DataType{}
-
-	// First pass: inspect non-null values to determine concrete BSON types
+	values := map[string][]any{}
+	present := map[string]int{}
 	for _, doc := range docs {
-		for key, val := range doc {
-			if val == nil {
-				continue
-			}
-			if _, seen := fieldTypes[key]; seen {
-				continue
-			}
-			dt, _, _ := mongoValueToArrowType(val)
-			fieldTypes[key] = dt
+		for key, value := range doc {
+			values[key] = append(values[key], value)
+			present[key]++
 		}
 	}
-
-	// Second pass: for fields that were only ever null across all inspected documents, default to String
-	for _, doc := range docs {
-		for key := range doc {
-			if _, seen := fieldTypes[key]; !seen {
-				fieldTypes[key] = arrow.BinaryTypes.String
-			}
+	keys := mongoOrderedKeys(values, fieldOrder)
+	result := &MongoInferenceResult{Fields: make([]mongoFieldPlan, 0, len(keys))}
+	fields := make([]arrow.Field, 0, len(keys))
+	for _, key := range keys {
+		logical, warning := inferMongoField(values[key], present[key] != len(docs))
+		if warning != nil {
+			warning.Field = key
+			result.Warnings = append(result.Warnings, *warning)
 		}
-	}
-
-	keys := make([]string, 0, len(fieldTypes))
-	seen := make(map[string]struct{}, len(fieldTypes))
-	for _, key := range fieldOrder {
-		if _, exists := fieldTypes[key]; !exists {
-			continue
+		plan, mapping, err := PlanForLogicalType(key, logical)
+		if err != nil {
+			return nil, err
 		}
-		if _, duplicate := seen[key]; duplicate {
-			continue
-		}
-		keys = append(keys, key)
-		seen[key] = struct{}{}
+		result.Fields = append(result.Fields, mongoFieldPlan{Name: key, LogicalType: logical, ColumnPlan: plan, Mapping: mapping})
+		fields = append(fields, arrow.Field{Name: key, Type: plan.DataType, Nullable: logical.Nullable})
 	}
-	for k := range fieldTypes {
-		if _, exists := seen[k]; exists {
-			continue
-		}
-		keys = append(keys, k)
-	}
-	if len(keys) > len(seen) {
-		sort.Strings(keys[len(seen):])
-	}
-
-	fields := make([]arrow.Field, len(keys))
-	for i, k := range keys {
-		fields[i] = arrow.Field{Name: k, Type: fieldTypes[k], Nullable: true}
-	}
-
-	return arrow.NewSchema(fields, nil), nil
+	result.Schema = arrow.NewSchema(fields, nil)
+	return result, nil
 }
 
-func buildPlansFromSchema(schema *arrow.Schema) []mongoFieldPlan {
-	plans := make([]mongoFieldPlan, schema.NumFields())
-	for i := 0; i < schema.NumFields(); i++ {
-		f := schema.Field(i)
-		dt := f.Type
-		builderFn, appendFn := mongoBuilderFromArrowType(dt)
-		plans[i] = mongoFieldPlan{
-			Name:    f.Name,
-			Type:    dt,
-			Builder: builderFn,
-			Append:  appendFn,
+func mongoOrderedKeys(values map[string][]any, order []string) []string {
+	keys := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, k := range order {
+		if _, ok := values[k]; ok && !seen[k] {
+			keys = append(keys, k)
+			seen[k] = true
 		}
 	}
-	return plans
+	rest := make([]string, 0, len(values))
+	for k := range values {
+		if !seen[k] {
+			rest = append(rest, k)
+		}
+	}
+	sort.Strings(rest)
+	return append(keys, rest...)
+}
+
+func inferMongoField(values []any, missing bool) (typesystem.LogicalType, *MongoInferenceWarning) {
+	nullable := missing
+	nonnil := make([]any, 0, len(values))
+	var logical typesystem.LogicalType
+	var warning *MongoInferenceWarning
+	for _, v := range values {
+		if v == nil {
+			nullable = true
+			continue
+		}
+		nonnil = append(nonnil, v)
+		candidate, w := mongoCandidate(v)
+		if w != "" {
+			warning = &MongoInferenceWarning{Reason: w}
+		}
+		if len(nonnil) == 1 {
+			logical = candidate
+			continue
+		}
+		merged, ok := mergeMongoTypes(logical, candidate, nonnil)
+		if !ok {
+			logical = mongoUnknown("mixed")
+			warning = &MongoInferenceWarning{Reason: "incompatible sampled field types use lossless fallback"}
+		} else {
+			logical = merged
+		}
+	}
+	if len(nonnil) == 0 {
+		logical = mongoUnknown("all_null")
+		warning = &MongoInferenceWarning{Reason: "all-null field uses fallback"}
+	}
+	logical.Nullable = nullable
+	return logical, warning
+}
+
+func mongoCandidate(v any) (typesystem.LogicalType, string) {
+	switch x := v.(type) {
+	case string:
+		return mongoKind(typesystem.KindString), ""
+	case int, int32, int64:
+		return mongoKind(typesystem.KindInt64), ""
+	case float32, float64:
+		return mongoKind(typesystem.KindFloat64), ""
+	case bool:
+		return mongoKind(typesystem.KindBool), ""
+	case time.Time, primitive.DateTime:
+		return typesystem.LogicalType{Kind: typesystem.KindTimestampTZ, Timezone: "UTC"}, ""
+	case primitive.Timestamp:
+		return mongoUnknown("bson_timestamp"), "BSON timestamp preserves T/I through fallback"
+	case primitive.ObjectID:
+		return mongoUnknown("objectid"), "ObjectID is not UUID"
+	case primitive.Binary, []byte:
+		return mongoKind(typesystem.KindBinary), ""
+	case primitive.Decimal128:
+		p, s, ok := mongoDecimalShape(x.String())
+		if !ok {
+			return mongoUnknown("decimal128"), "decimal has no stable exact shape"
+		}
+		return typesystem.Decimal(p, s), ""
+	case bson.M, bson.D, map[string]any, primitive.Regex, primitive.JavaScript, primitive.CodeWithScope, primitive.MinKey, primitive.MaxKey, primitive.Undefined, primitive.Symbol:
+		return mongoUnknown("document"), "document/special BSON uses Extended JSON fallback"
+	}
+	if mongoSlice(v) != nil {
+		items := mongoSlice(v)
+		t, w := inferMongoField(items, false)
+		if w != nil {
+			return typesystem.ArrayOf(t), "array element fallback"
+		}
+		return typesystem.ArrayOf(t), ""
+	}
+	return mongoUnknown("bson_special"), "special BSON uses lossless fallback"
+}
+func mongoKind(k typesystem.Kind) typesystem.LogicalType { return typesystem.LogicalType{Kind: k} }
+func mongoUnknown(s string) typesystem.LogicalType {
+	return typesystem.LogicalType{Kind: typesystem.KindUnknown, SourceTypeName: s}
+}
+
+func mergeMongoTypes(a, b typesystem.LogicalType, values []any) (typesystem.LogicalType, bool) {
+	if a.Equal(b) {
+		return a, true
+	}
+	if a.Kind == typesystem.KindDecimal && b.Kind == typesystem.KindDecimal {
+		scale := max(*a.Scale, *b.Scale)
+		precision := max(*a.Precision+scale-*a.Scale, *b.Precision+scale-*b.Scale)
+		return typesystem.Decimal(precision, scale), true
+	}
+	if a.Kind == typesystem.KindInt64 && b.Kind == typesystem.KindFloat64 || a.Kind == typesystem.KindFloat64 && b.Kind == typesystem.KindInt64 {
+		for _, v := range values {
+			switch n := v.(type) {
+			case int:
+				if math.Abs(float64(n)) > 1<<53 {
+					return mongoUnknown("mixed_numeric"), false
+				}
+			case int32:
+			case int64:
+				if n > 1<<53 || n < -(1<<53) {
+					return mongoUnknown("mixed_numeric"), false
+				}
+			}
+		}
+		return mongoKind(typesystem.KindFloat64), true
+	}
+	if a.Kind == typesystem.KindArray && b.Kind == typesystem.KindArray {
+		e, ok := mergeMongoTypes(*a.Element, *b.Element, nil)
+		if ok {
+			return typesystem.ArrayOf(e), true
+		}
+	}
+	return mongoUnknown("mixed"), false
+}
+
+func mongoDecimalShape(text string) (int32, int32, bool) {
+	text = strings.TrimPrefix(strings.TrimSpace(text), "-")
+	if strings.ContainsAny(text, "Ee") {
+		return 0, 0, false
+	}
+	parts := strings.Split(text, ".")
+	if len(parts) > 2 || text == "" {
+		return 0, 0, false
+	}
+	digits := strings.TrimLeft(parts[0], "0")
+	scale := 0
+	if len(parts) == 2 {
+		scale = len(parts[1])
+		digits += parts[1]
+	}
+	digits = strings.TrimLeft(digits, "0")
+	if digits == "" {
+		digits = "0"
+	}
+	if len(digits) > math.MaxInt32 || scale > math.MaxInt32 {
+		return 0, 0, false
+	}
+	return int32(len(digits)), int32(scale), true
+}
+
+func mongoSlice(v any) []any {
+	switch x := v.(type) {
+	case primitive.A:
+		return []any(x)
+	case []any:
+		return x
+	}
+	rv := reflect.ValueOf(v)
+	if !rv.IsValid() || (rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array) || rv.Type().Elem().Kind() == reflect.Uint8 {
+		return nil
+	}
+	r := make([]any, rv.Len())
+	for i := range r {
+		r[i] = rv.Index(i).Interface()
+	}
+	return r
 }
 
 func MongoDocsToRecord(alloc memory.Allocator, schema *arrow.Schema, docs []map[string]any) (arrow.RecordBatch, error) {
 	if len(docs) == 0 {
 		return nil, nil
 	}
-
-	plans := buildPlansFromSchema(schema)
-	builders := make([]array.Builder, len(plans))
-	for i, p := range plans {
-		b := p.Builder(alloc)
-		b.Reserve(len(docs))
-		builders[i] = b
+	result, err := InferMongoSchemaResult(docs, fieldNames(schema))
+	if err != nil {
+		return nil, err
 	}
+	plans := map[string]mongoFieldPlan{}
+	for _, p := range result.Fields {
+		plans[p.Name] = p
+	}
+	builders := make([]array.Builder, schema.NumFields())
 	defer func() {
 		for _, b := range builders {
-			b.Release()
+			if b != nil {
+				b.Release()
+			}
 		}
 	}()
-
-	for _, doc := range docs {
-		for i, p := range plans {
-			val := doc[p.Name]
-			if val == nil {
+	for i := 0; i < schema.NumFields(); i++ {
+		f := schema.Field(i)
+		p, ok := plans[f.Name]
+		if !ok {
+			p = mongoFieldPlan{Name: f.Name, LogicalType: mongoLogicalFromArrow(f.Type)}
+			p.ColumnPlan, _, err = PlanForLogicalType(f.Name, p.LogicalType)
+			if err != nil {
+				return nil, err
+			}
+		}
+		builders[i] = p.ColumnPlan.Builder(alloc)
+		builders[i].Reserve(len(docs))
+		for _, doc := range docs {
+			v, exists := doc[p.Name]
+			if !exists || v == nil {
 				builders[i].AppendNull()
-			} else {
-				p.Append(builders[i], val)
+				continue
+			}
+			normalized, err := mongoNormalize(v, p.LogicalType)
+			if err != nil {
+				return nil, fmt.Errorf("Mongo field %s: %w", p.Name, err)
+			}
+			if err := p.ColumnPlan.Append(builders[i], normalized); err != nil {
+				return nil, fmt.Errorf("Mongo field %s: %w", p.Name, err)
 			}
 		}
 	}
-
 	arrays := make([]arrow.Array, len(builders))
 	for i, b := range builders {
 		arrays[i] = b.NewArray()
@@ -142,268 +305,89 @@ func MongoDocsToRecord(alloc memory.Allocator, schema *arrow.Schema, docs []map[
 			a.Release()
 		}
 	}()
-
 	return array.NewRecordBatch(schema, arrays, int64(len(docs))), nil
 }
-
-func mongoValueToArrowType(v any) (arrow.DataType, func(memory.Allocator) array.Builder, func(array.Builder, any)) {
-	switch v.(type) {
-	case string:
-		return arrow.BinaryTypes.String,
-			func(mem memory.Allocator) array.Builder { return array.NewStringBuilder(mem) },
-			func(b array.Builder, val any) {
-				if s, ok := val.(string); ok {
-					b.(*array.StringBuilder).Append(s)
-				} else {
-					b.(*array.StringBuilder).Append(fmt.Sprint(val))
-				}
-			}
-	case int32, int64, int:
-		return arrow.PrimitiveTypes.Int64,
-			func(mem memory.Allocator) array.Builder { return array.NewInt64Builder(mem) },
-			func(b array.Builder, val any) {
-				b.(*array.Int64Builder).Append(mongoToInt64(val))
-			}
-	case float64:
-		return arrow.PrimitiveTypes.Float64,
-			func(mem memory.Allocator) array.Builder { return array.NewFloat64Builder(mem) },
-			func(b array.Builder, val any) {
-				if f, ok := val.(float64); ok {
-					b.(*array.Float64Builder).Append(f)
-				} else {
-					b.(*array.Float64Builder).AppendNull()
-				}
-			}
-	case bool:
-		return arrow.FixedWidthTypes.Boolean,
-			func(mem memory.Allocator) array.Builder { return array.NewBooleanBuilder(mem) },
-			func(b array.Builder, val any) {
-				if bl, ok := val.(bool); ok {
-					b.(*array.BooleanBuilder).Append(bl)
-				} else {
-					b.(*array.BooleanBuilder).AppendNull()
-				}
-			}
-	case time.Time:
-		tsType := &arrow.TimestampType{Unit: arrow.Millisecond, TimeZone: "UTC"}
-		return tsType,
-			func(mem memory.Allocator) array.Builder { return array.NewTimestampBuilder(mem, tsType) },
-			func(b array.Builder, val any) {
-				if t, ok := val.(time.Time); ok {
-					b.(*array.TimestampBuilder).Append(arrow.Timestamp(t.UTC().UnixMilli()))
-				} else {
-					b.(*array.TimestampBuilder).AppendNull()
-				}
-			}
-	case primitive.ObjectID:
-		return arrow.BinaryTypes.String,
-			func(mem memory.Allocator) array.Builder { return array.NewStringBuilder(mem) },
-			func(b array.Builder, val any) {
-				if oid, ok := val.(primitive.ObjectID); ok {
-					b.(*array.StringBuilder).Append(oid.Hex())
-				} else {
-					b.(*array.StringBuilder).Append(fmt.Sprint(val))
-				}
-			}
-	case primitive.DateTime:
-		tsType := &arrow.TimestampType{Unit: arrow.Millisecond, TimeZone: "UTC"}
-		return tsType,
-			func(mem memory.Allocator) array.Builder { return array.NewTimestampBuilder(mem, tsType) },
-			func(b array.Builder, val any) {
-				if dt, ok := val.(primitive.DateTime); ok {
-					b.(*array.TimestampBuilder).Append(arrow.Timestamp(dt))
-				} else {
-					b.(*array.TimestampBuilder).AppendNull()
-				}
-			}
-	case primitive.Timestamp:
-		tsType := &arrow.TimestampType{Unit: arrow.Millisecond, TimeZone: "UTC"}
-		return tsType,
-			func(mem memory.Allocator) array.Builder { return array.NewTimestampBuilder(mem, tsType) },
-			func(b array.Builder, val any) {
-				if ts, ok := val.(primitive.Timestamp); ok {
-					b.(*array.TimestampBuilder).Append(arrow.Timestamp(int64(ts.T) * 1000))
-				} else {
-					b.(*array.TimestampBuilder).AppendNull()
-				}
-			}
-	case primitive.Decimal128:
-		decType := &arrow.Decimal128Type{Precision: 38, Scale: 18}
-		return decType,
-			func(mem memory.Allocator) array.Builder { return array.NewDecimal128Builder(mem, decType) },
-			func(b array.Builder, val any) {
-				if d, ok := val.(primitive.Decimal128); ok {
-					if num, ok := asDecimal128(d.String(), 38, 18); ok {
-						b.(*array.Decimal128Builder).Append(num)
-						return
-					}
-				}
-				b.(*array.Decimal128Builder).AppendNull()
-			}
-	case primitive.Binary:
-		return arrow.BinaryTypes.Binary,
-			func(mem memory.Allocator) array.Builder { return array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary) },
-			func(b array.Builder, val any) {
-				if bin, ok := val.(primitive.Binary); ok {
-					b.(*array.BinaryBuilder).Append(bin.Data)
-				} else {
-					b.(*array.BinaryBuilder).AppendNull()
-				}
-			}
-	case []byte:
-		return arrow.BinaryTypes.Binary,
-			func(mem memory.Allocator) array.Builder { return array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary) },
-			func(b array.Builder, val any) {
-				if data, ok := val.([]byte); ok {
-					b.(*array.BinaryBuilder).Append(data)
-				} else {
-					b.(*array.BinaryBuilder).AppendNull()
-				}
-			}
-	default:
-		return arrow.BinaryTypes.String,
-			func(mem memory.Allocator) array.Builder { return array.NewStringBuilder(mem) },
-			func(b array.Builder, val any) {
-				if val == nil {
-					b.(*array.StringBuilder).AppendNull()
-				} else {
-					b.(*array.StringBuilder).Append(mongoValueToString(val))
-				}
-			}
+func fieldNames(s *arrow.Schema) []string {
+	r := make([]string, s.NumFields())
+	for i := range r {
+		r[i] = s.Field(i).Name
 	}
+	return r
 }
-
-func mongoBuilderFromArrowType(dt arrow.DataType) (func(memory.Allocator) array.Builder, func(array.Builder, any)) {
+func mongoLogicalFromArrow(dt arrow.DataType) typesystem.LogicalType {
 	switch dt.ID() {
-	case arrow.STRING:
-		return func(mem memory.Allocator) array.Builder { return array.NewStringBuilder(mem) },
-			func(b array.Builder, val any) {
-				if val == nil {
-					b.(*array.StringBuilder).AppendNull()
-				} else if s, ok := val.(string); ok {
-					b.(*array.StringBuilder).Append(s)
-				} else {
-					b.(*array.StringBuilder).Append(mongoValueToString(val))
-				}
-			}
 	case arrow.INT64:
-		return func(mem memory.Allocator) array.Builder { return array.NewInt64Builder(mem) },
-			func(b array.Builder, val any) {
-				b.(*array.Int64Builder).Append(mongoToInt64(val))
-			}
+		return mongoKind(typesystem.KindInt64)
 	case arrow.FLOAT64:
-		return func(mem memory.Allocator) array.Builder { return array.NewFloat64Builder(mem) },
-			func(b array.Builder, val any) {
-				if f, ok := val.(float64); ok {
-					b.(*array.Float64Builder).Append(f)
-				} else {
-					b.(*array.Float64Builder).AppendNull()
-				}
-			}
-	case arrow.DECIMAL128:
-		decType := dt.(*arrow.Decimal128Type)
-		return func(mem memory.Allocator) array.Builder { return array.NewDecimal128Builder(mem, decType) },
-			func(b array.Builder, val any) {
-				if d, ok := val.(primitive.Decimal128); ok {
-					if num, ok := asDecimal128(d.String(), decType.Precision, decType.Scale); ok {
-						b.(*array.Decimal128Builder).Append(num)
-						return
-					}
-				}
-				b.(*array.Decimal128Builder).AppendNull()
-			}
+		return mongoKind(typesystem.KindFloat64)
 	case arrow.BOOL:
-		return func(mem memory.Allocator) array.Builder { return array.NewBooleanBuilder(mem) },
-			func(b array.Builder, val any) {
-				if bl, ok := val.(bool); ok {
-					b.(*array.BooleanBuilder).Append(bl)
-				} else {
-					b.(*array.BooleanBuilder).AppendNull()
-				}
-			}
-	case arrow.TIMESTAMP:
-		return func(mem memory.Allocator) array.Builder {
-				return array.NewTimestampBuilder(mem, dt.(*arrow.TimestampType))
-			},
-			func(b array.Builder, val any) {
-				switch v := val.(type) {
-				case time.Time:
-					b.(*array.TimestampBuilder).Append(arrow.Timestamp(v.UTC().UnixMilli()))
-				case primitive.DateTime:
-					b.(*array.TimestampBuilder).Append(arrow.Timestamp(v))
-				case primitive.Timestamp:
-					b.(*array.TimestampBuilder).Append(arrow.Timestamp(int64(v.T) * 1000))
-				case int64:
-					b.(*array.TimestampBuilder).Append(arrow.Timestamp(v))
-				default:
-					b.(*array.TimestampBuilder).AppendNull()
-				}
-			}
+		return mongoKind(typesystem.KindBool)
 	case arrow.BINARY:
-		return func(mem memory.Allocator) array.Builder { return array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary) },
-			func(b array.Builder, val any) {
-				switch v := val.(type) {
-				case []byte:
-					b.(*array.BinaryBuilder).Append(v)
-				case primitive.Binary:
-					b.(*array.BinaryBuilder).Append(v.Data)
-				default:
-					b.(*array.BinaryBuilder).AppendNull()
-				}
-			}
+		return mongoKind(typesystem.KindBinary)
+	case arrow.TIMESTAMP:
+		return typesystem.LogicalType{Kind: typesystem.KindTimestampTZ, Timezone: "UTC"}
 	default:
-		return func(mem memory.Allocator) array.Builder { return array.NewStringBuilder(mem) },
-			func(b array.Builder, val any) {
-				if val == nil {
-					b.(*array.StringBuilder).AppendNull()
-				} else {
-					b.(*array.StringBuilder).Append(mongoValueToString(val))
-				}
-			}
+		return mongoKind(typesystem.KindString)
 	}
 }
 
-func mongoToInt64(v any) int64 {
+func mongoNormalize(v any, t typesystem.LogicalType) (any, error) {
+	if t.Kind == typesystem.KindUnknown || t.Kind == typesystem.KindJSON {
+		return mongoLosslessString(v)
+	}
+	if t.Kind == typesystem.KindArray {
+		items := mongoSlice(v)
+		if items == nil {
+			return nil, fmt.Errorf("expected array, got %T", v)
+		}
+		out := make([]any, len(items))
+		for i, x := range items {
+			if x == nil {
+				continue
+			}
+			var err error
+			out[i], err = mongoNormalize(x, *t.Element)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
+	}
 	switch x := v.(type) {
-	case int32:
-		return int64(x)
-	case int64:
-		return x
-	case int:
-		return int64(x)
-	default:
-		return 0
+	case primitive.DateTime:
+		return x.Time(), nil
+	case primitive.Binary:
+		return x.Data, nil
+	case primitive.Decimal128:
+		return x.String(), nil
+	case primitive.ObjectID:
+		return x.Hex(), nil
+	case time.Time:
+		return x, nil
 	}
+	return v, nil
+}
+func mongoLosslessString(v any) (string, error) {
+	switch x := v.(type) {
+	case primitive.ObjectID:
+		return x.Hex(), nil
+	case primitive.Decimal128:
+		return x.String(), nil
+	case string, bool, int, int32, int64, float32, float64, []byte, time.Time:
+		return typesystem.ToLosslessString(x)
+	}
+	b, err := bson.MarshalExtJSON(bson.D{{Key: "value", Value: v}}, true, false)
+	if err == nil {
+		return string(b), nil
+	}
+	return "", fmt.Errorf("Mongo Extended JSON fallback: %w", err)
 }
 
-func mongoValueToString(val any) string {
-	switch v := val.(type) {
-	case primitive.M, primitive.D, primitive.A, map[string]any, []any:
-		b, err := bson.MarshalExtJSON(v, true, false)
-		if err == nil {
-			return string(b)
-		}
-		return fmt.Sprint(v)
-	case primitive.Regex:
-		return v.String()
-	case primitive.JavaScript:
-		return string(v)
-	case primitive.CodeWithScope:
-		scopeBytes, err := bson.MarshalExtJSON(v.Scope, true, false)
-		if err == nil {
-			return fmt.Sprintf(`{"$code":%q,"$scope":%s}`, v.Code, string(scopeBytes))
-		}
-		jsonScope, _ := json.Marshal(v.Scope)
-		return fmt.Sprintf(`{"$code":%q,"$scope":%s}`, v.Code, string(jsonScope))
-	case primitive.MinKey:
-		return "$MinKey"
-	case primitive.MaxKey:
-		return "$MaxKey"
-	case primitive.Undefined:
-		return "$Undefined"
-	case primitive.Symbol:
-		return string(v)
-	default:
-		return fmt.Sprint(v)
+// mongoValueToString is retained for package compatibility but is now strict.
+func mongoValueToString(v any) string {
+	text, err := mongoLosslessString(v)
+	if err != nil {
+		return ""
 	}
+	return text
 }

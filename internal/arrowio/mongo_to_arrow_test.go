@@ -158,39 +158,38 @@ func TestInferMongoSchemaSpecialTypes(t *testing.T) {
 	require.Equal(t, 4, schema.NumFields())
 }
 
-func TestCurrentMongoUnexpectedIntegerValueBecomesZero(t *testing.T) {
+func TestMongoIncompatibleIntegerValuesUseLosslessFallback(t *testing.T) {
 	docs := []map[string]any{
 		{"value": int64(7)},
 		{"value": "not-an-integer"},
 	}
 	schema, err := InferMongoSchema(docs)
 	require.NoError(t, err)
-	require.Equal(t, arrow.PrimitiveTypes.Int64, schema.Field(0).Type)
+	require.Equal(t, arrow.BinaryTypes.String, schema.Field(0).Type)
 
 	record, err := MongoDocsToRecord(memory.NewGoAllocator(), schema, docs)
 	require.NoError(t, err)
 	defer record.Release()
-	values := record.Column(0).(*array.Int64)
-	require.Equal(t, int64(7), values.Value(0))
-	require.False(t, values.IsNull(1))
-	require.Equal(t, int64(0), values.Value(1))
+	values := record.Column(0).(*array.String)
+	require.Equal(t, "7", values.Value(0))
+	require.Equal(t, "not-an-integer", values.Value(1))
 }
 
-func TestCurrentMongoIncompatibleValuesBecomeNull(t *testing.T) {
+func TestMongoIncompatibleFloatValuesUseLosslessFallback(t *testing.T) {
 	docs := []map[string]any{
 		{"value": float64(1.5)},
 		{"value": "not-a-float"},
 	}
 	schema, err := InferMongoSchema(docs)
 	require.NoError(t, err)
-	require.Equal(t, arrow.PrimitiveTypes.Float64, schema.Field(0).Type)
+	require.Equal(t, arrow.BinaryTypes.String, schema.Field(0).Type)
 
 	record, err := MongoDocsToRecord(memory.NewGoAllocator(), schema, docs)
 	require.NoError(t, err)
 	defer record.Release()
-	values := record.Column(0).(*array.Float64)
-	require.Equal(t, float64(1.5), values.Value(0))
-	require.True(t, values.IsNull(1))
+	values := record.Column(0).(*array.String)
+	require.Equal(t, "1.5", values.Value(0))
+	require.Equal(t, "not-a-float", values.Value(1))
 }
 
 func TestCurrentMongoInferenceFallsBackToString(t *testing.T) {
