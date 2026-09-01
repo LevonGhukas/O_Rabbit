@@ -18,7 +18,7 @@ func TestMySQLTypeMapping(t *testing.T) {
 		hasDecimal bool
 		wantType   arrow.DataType
 	}{
-		{"BIGINT UNSIGNED", 0, 0, false, arrow.PrimitiveTypes.Uint64},
+		{"BIGINT UNSIGNED", 0, 0, false, arrow.BinaryTypes.String},
 		{"BIGINT", 0, 0, false, arrow.PrimitiveTypes.Int64},
 		{"INT UNSIGNED", 0, 0, false, arrow.PrimitiveTypes.Uint32},
 		{"INT", 0, 0, false, arrow.PrimitiveTypes.Int32},
@@ -30,7 +30,7 @@ func TestMySQLTypeMapping(t *testing.T) {
 		{"TINYINT", 0, 0, false, arrow.PrimitiveTypes.Int8},
 		{"TINYINT(1)", 0, 0, false, arrow.FixedWidthTypes.Boolean},
 		{"BIT(1)", 0, 0, false, arrow.FixedWidthTypes.Boolean},
-		{"BIT(64)", 0, 0, false, arrow.PrimitiveTypes.Uint64},
+		{"BIT(64)", 0, 0, false, arrow.BinaryTypes.String},
 		{"FLOAT", 0, 0, false, arrow.PrimitiveTypes.Float32},
 		{"DOUBLE", 0, 0, false, arrow.PrimitiveTypes.Float64},
 		{"DECIMAL(38,10)", 38, 10, true, &arrow.Decimal128Type{Precision: 38, Scale: 10}},
@@ -38,13 +38,13 @@ func TestMySQLTypeMapping(t *testing.T) {
 		{"DATE", 0, 0, false, arrow.PrimitiveTypes.Date32},
 		{"DATETIME", 0, 0, false, &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: ""}},
 		{"TIMESTAMP", 0, 0, false, &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}},
-		{"TIME", 0, 0, false, arrow.FixedWidthTypes.Time64us},
+		{"TIME", 0, 0, false, arrow.BinaryTypes.String},
 		{"YEAR", 0, 0, false, arrow.PrimitiveTypes.Int16},
 		{"JSON", 0, 0, false, arrow.BinaryTypes.String},
 		{"VARCHAR(255)", 0, 0, false, arrow.BinaryTypes.String},
 		{"BLOB", 0, 0, false, arrow.BinaryTypes.Binary},
-		{"POINT", 0, 0, false, arrow.BinaryTypes.Binary},
-		{"MULTIPOINT", 0, 0, false, arrow.BinaryTypes.Binary},
+		{"POINT", 0, 0, false, arrow.BinaryTypes.String},
+		{"MULTIPOINT", 0, 0, false, arrow.BinaryTypes.String},
 	}
 
 	for _, tt := range tests {
@@ -67,15 +67,15 @@ func TestMySQLUint64MaxRoundtrip(t *testing.T) {
 	err = plan.Append(builder, "18446744073709551615")
 	require.NoError(t, err)
 
-	arr := builder.NewArray().(*array.Uint64)
+	arr := builder.NewArray().(*array.String)
 	defer arr.Release()
 
 	require.Equal(t, 2, arr.Len())
-	require.Equal(t, uint64(18446744073709551615), arr.Value(0))
-	require.Equal(t, uint64(18446744073709551615), arr.Value(1))
+	require.Equal(t, "18446744073709551615", arr.Value(0))
+	require.Equal(t, "18446744073709551615", arr.Value(1))
 }
 
-func TestMySQLTime64Durations(t *testing.T) {
+func TestMySQLTimeDurationsUseLosslessFallback(t *testing.T) {
 	plan := PlanForSQLColumn("mysql", "col", "TIME(6)", 0, 0, false)
 	builder := plan.Builder(memory.DefaultAllocator)
 	defer builder.Release()
@@ -86,13 +86,12 @@ func TestMySQLTime64Durations(t *testing.T) {
 	err = plan.Append(builder, "00:00:00.000000")
 	require.NoError(t, err)
 
-	arr := builder.NewArray().(*array.Time64)
+	arr := builder.NewArray().(*array.String)
 	defer arr.Release()
 
 	require.Equal(t, 2, arr.Len())
-	// 123h 45m 56s 123456us = 123*3600e6 + 45*60e6 + 56e6 + 123456 = 445556123456us
-	require.Equal(t, arrow.Time64(445556123456), arr.Value(0))
-	require.Equal(t, arrow.Time64(0), arr.Value(1))
+	require.Equal(t, "123:45:56.123456", arr.Value(0))
+	require.Equal(t, "00:00:00.000000", arr.Value(1))
 }
 
 func TestMySQLDate32Preservation(t *testing.T) {
@@ -113,5 +112,5 @@ func TestMySQLDate32Preservation(t *testing.T) {
 
 	require.Equal(t, 2, arr.Len())
 	require.Equal(t, "1960-02-29", arr.Value(0).FormattedString())
-	require.Equal(t, "2300-01-01", arr.Value(1).FormattedString())
+	require.Equal(t, "9999-12-31", arr.Value(1).FormattedString())
 }

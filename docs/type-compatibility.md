@@ -29,6 +29,8 @@ Planner: `internal/arrowio/postgres_to_arrow.go:planPostgresColumn`. It explicit
 
 ## MySQL / MariaDB
 
+Migration status: MySQL/MariaDB now use LogicalType and shared conversion. BIGINT UNSIGNED resolves to string storage; JSON is semantic fallback; ENUM/SET, spatial values, wide BIT, TIME durations, unconstrained decimal, and unknown types are explicit unknown fallback. Other engine sections remain legacy.
+
 Planner: `internal/arrowio/mysql_to_arrow.go:planMySQLColumn`; MariaDB is dispatched to this same planner by `PlanForSQLColumn`.
 
 | Source types / aliases recognized | Arrow type | Value conversion / classification | Fallback and notes |
@@ -43,7 +45,11 @@ Planner: `internal/arrowio/mysql_to_arrow.go:planMySQLColumn`; MariaDB is dispat
 
 ## MSSQL
 
+Migration status: MSSQL now uses `LogicalTypeForMSSQLColumn -> PlanForLogicalType -> typesystem.Convert`; the table below is retained as the legacy baseline. Its migrated path rejects overflow and invalid boolean/decimal/temporal values rather than wrapping, silently nulling, or clamping. Decimal precision above 38, `UNIQUEIDENTIFIER`, and semantic JSON use explicit storage fallback. MSSQL temporal values do not use ClickHouse range clamping.
+
 Planner: `internal/arrowio/mssql_to_arrow.go:planMSSQLColumn`.
+
+Current migrated mappings: `UNIQUEIDENTIFIER -> uuid -> Arrow/Iceberg string` (semantic fallback); `DATETIMEOFFSET -> timestamp_tz[UTC]`; SQL Server `TIMESTAMP`/`ROWVERSION -> binary`; XML, `SQL_VARIANT`, `HIERARCHYID`, `GEOMETRY`, `GEOGRAPHY`, and unknown types -> `unknown ->` lossless string (unsupported fallback). `JSON`, when reported as a driver type name, is a semantic interpretation and uses `json ->` string fallback.
 
 | Source types / aliases recognized | Arrow type | Value conversion / classification | Fallback and notes |
 | --- | --- | --- | --- |
@@ -57,7 +63,11 @@ Planner: `internal/arrowio/mssql_to_arrow.go:planMSSQLColumn`.
 
 ## Oracle
 
+Migration status: Oracle now uses `LogicalTypeForOracleColumn -> PlanForLogicalType -> typesystem.Convert`; the table below is retained as the legacy baseline. It preserves `NUMBER` metadata without inventing `decimal(38,10)`, rejects invalid/overflow values, and never applies ClickHouse temporal clamping.
+
 Planner: `internal/arrowio/oracle_to_arrow.go:planOracleColumn`. It removes `DB_TYPE_` before matching.
+
+Current migrated mappings: Oracle `DATE -> timestamp`; `TIMESTAMP WITH TIME ZONE` and `TIMESTAMP WITH LOCAL TIME ZONE -> timestamp_tz[UTC]`. LOCAL TIME ZONE values are normalized by Oracle/session semantics before driver materialization; ORabbit preserves the resulting instant in UTC and cannot reconstruct the inserted timezone. `RAW`/`LONG RAW`/`BLOB -> binary`. `BFILE`, `ROWID`, `UROWID`, `XMLTYPE`, intervals, and custom/unknown types -> `unknown ->` lossless string fallback.
 
 | Source types / aliases recognized | Arrow type | Value conversion / classification | Fallback and notes |
 | --- | --- | --- | --- |
@@ -69,7 +79,11 @@ Planner: `internal/arrowio/oracle_to_arrow.go:planOracleColumn`. It removes `DB_
 
 ## ClickHouse
 
+Migration status: ClickHouse now uses `LogicalTypeForClickHouseColumn -> PlanForLogicalType -> typesystem.Convert`; the table below is retained as the legacy baseline. Nested `Nullable` and `LowCardinality` wrappers are parsed semantically, arrays preserve nullable elements, and runtime conversion is strict. The migrated path removes ClickHouse's former 1900–2299 date/timestamp clamping.
+
 Planner: `internal/arrowio/clickhouse_to_arrow.go:planClickHouseColumn`. It unwraps outer `Nullable(...)` and `LowCardinality(...)` but schema nullability remains from source metadata rather than the type wrapper.
+
+Current migrated mappings: `UInt64` is logical `uint64` with string storage fallback; `Decimal256(s)` is logical `decimal(76,s)` with fallback. DateTime timezone arguments are preserved: UTC aliases resolve to native timestamptz, non-UTC zones resolve to string fallback. UUID/JSON are semantic fallbacks. ClickHouse `Time`/`Time64` are unknown fallback because they can be duration-like rather than canonical time-of-day. IPs, enums, tuples/maps/nested values, dynamic/variant/object values, wide integers, geo, aggregate/special, and unknown types are `unknown` lossless-string fallback.
 
 | Source types / aliases recognized | Arrow type | Value conversion / classification | Fallback and notes |
 | --- | --- | --- | --- |

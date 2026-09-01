@@ -2,6 +2,7 @@ package arrowio
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -15,7 +16,7 @@ import (
 // PlanForLogicalType builds a plan whose Append path is strictly raw-value ->
 // typesystem.Convert -> canonical Arrow append. PostgreSQL is its first user.
 func PlanForLogicalType(name string, t typesystem.LogicalType) (ColumnPlan, typesystem.MappingResult, error) {
-	dataType, mapping, err := ArrowTypeForLogicalType(t)
+	dataType, mapping, err := StorageArrowTypeForLogicalType(t)
 	if err != nil {
 		return ColumnPlan{}, typesystem.MappingResult{}, err
 	}
@@ -28,6 +29,37 @@ func PlanForLogicalType(name string, t typesystem.LogicalType) (ColumnPlan, type
 		return appendLogicalValue(builder, dataType, canonical)
 	}
 	return plan, mapping, nil
+}
+
+// StorageArrowTypeForLogicalType selects Arrow types compatible with current
+// Iceberg storage limits without importing icebergreg (which imports arrowio).
+func StorageArrowTypeForLogicalType(t typesystem.LogicalType) (arrow.DataType, typesystem.MappingResult, error) {
+	if t.Kind == typesystem.KindArray {
+		if err := t.Validate(); err != nil {
+			return nil, typesystem.MappingResult{}, err
+		}
+		element, mapping, err := StorageArrowTypeForLogicalType(*t.Element)
+		if err != nil {
+			return nil, typesystem.MappingResult{}, err
+		}
+		return arrow.ListOf(element), typesystem.MappingFor(t, arrow.ListOf(element).String(), mapping.Class, mapping.Reason), nil
+	}
+	if t.Kind == typesystem.KindUInt64 {
+		return arrow.BinaryTypes.String, typesystem.MappingFor(t, "string", typesystem.MappingSemanticFallback, "Iceberg long cannot represent full uint64 range"), nil
+	}
+	if t.Kind == typesystem.KindTimestampTZ && !storageUTCAlias(t.Timezone) {
+		return arrow.BinaryTypes.String, typesystem.MappingFor(t, "string", typesystem.MappingSemanticFallback, "current Arrow-to-Iceberg bridge accepts timezone-aware timestamps only for UTC aliases"), nil
+	}
+	return ArrowTypeForLogicalType(t)
+}
+
+func storageUTCAlias(zone string) bool {
+	switch strings.ToUpper(strings.TrimSpace(zone)) {
+	case "", "UTC", "ETC/UTC", "Z", "+00:00":
+		return true
+	default:
+		return false
+	}
 }
 
 func appendLogicalValue(builder array.Builder, dataType arrow.DataType, value any) error {
