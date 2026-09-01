@@ -99,7 +99,7 @@ func TestS3JSONIteratorRecordPath(t *testing.T) {
 		{"escaped tilde pointer key", `{"a~b":[{"id":1}]}`, "/a~0b", []float64{1}, ""},
 		{"escaped pointer key", `{"a/b":[{"id":1}]}`, "/a~1b", []float64{1}, ""},
 		{"object root requires path", `{"airports":[{"id":1}],"countries":[{"id":2}]}`, "", nil, "record_path is required"},
-		{"malformed path", `{"airports":[{"id":1}]}`, "airports", nil, "must start with /"},
+		{"path without leading slash", `{"airports":[{"id":1}]}`, "airports", []float64{1}, ""},
 		{"missing path", `{"airports":[{"id":1}]}`, "/missing", nil, `record_path "/missing" was not found`},
 		{"scalar path", `{"airports":42}`, "/airports", nil, "must resolve to an array"},
 		{"object path", `{"airports":{"id":1}}`, "/airports", nil, "must resolve to an array"},
