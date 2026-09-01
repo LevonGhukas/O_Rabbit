@@ -137,7 +137,9 @@ Planner: `internal/arrowio/sqlite_to_arrow.go:planSQLiteColumn`. SQLite’s dyna
 
 ## MongoDB
 
-Mongo has no declared-column planner. `internal/arrowio/mongo_to_arrow.go:InferMongoSchemaWithFieldOrder` assigns a field from its first non-null observed Go/BSON value; fields that are only null become `String`. `MongoDocsToRecord` then uses that fixed Arrow schema for every buffered document.
+Migration status: Mongo extraction now uses multi-value LogicalType inference and shared conversion, replacing first-non-null Arrow typing. Safe numeric promotion, nullable missing/null fields, recursive arrays, exact Decimal128 shape inference, semantic timestamp/binary handling, and lossless unknown fallback are applied before Arrow creation. Documents/special BSON use Extended JSON fallback; ObjectID is not UUID and BSON Timestamp preserves its `T`/`I` pair through fallback. Incompatible values are field-level string fallback with structured inference warnings, never zero/null coercion.
+
+Mongo has no declared-column planner. `internal/arrowio/mongo_to_arrow.go:InferMongoSchemaWithFieldOrder` is a compatibility wrapper over the multi-value logical inference result; `MongoDocsToRecord` uses the resulting logical plans and strict shared conversion.
 
 | BSON/Go value recognized | Arrow type | Runtime conversion / classification | Later incompatible value |
 | --- | --- | --- | --- |
