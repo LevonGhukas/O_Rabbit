@@ -35,6 +35,7 @@ var migrations = []migration{
 	{version: 20, sql: schemaV20},
 	{version: 21, sql: schemaV21},
 	{version: 22, sql: schemaV22},
+	{version: 23, sql: schemaV23},
 }
 
 const schemaV21 = `
@@ -43,6 +44,10 @@ ALTER TABLE iceberg_registrations ADD COLUMN retry_override_config_json TEXT NOT
 
 const schemaV22 = `
 ALTER TABLE iceberg_registrations ADD COLUMN manual_retry_budget INTEGER NOT NULL DEFAULT 0;
+`
+
+const schemaV23 = `
+ALTER TABLE runs ADD COLUMN type_warnings_json TEXT NOT NULL DEFAULT '[]';
 `
 
 const schemaV20 = `
