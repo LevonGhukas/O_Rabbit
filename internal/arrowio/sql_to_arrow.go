@@ -538,12 +538,16 @@ func PlansFromSQLEngineWithOverrides(engine string, cols []string, colTypes []*s
 			targetTypeStr, ok = targetTypesLower[strings.ToLower(strings.TrimSpace(f.Name))]
 		}
 		if ok && strings.TrimSpace(targetTypeStr) != "" {
-			tStr := strings.TrimSpace(targetTypeStr)
-			nullable := strings.HasPrefix(strings.ToLower(tStr), "nullable(")
-
-			newPlan := PlanForTargetType(f.Name, tStr)
+			logical, parseErr := typesystem.ParseType(strings.TrimSpace(targetTypeStr))
+			if parseErr != nil {
+				return nil, nil, fmt.Errorf("column %s target type: %w", f.Name, parseErr)
+			}
+			newPlan, _, planErr := PlanForLogicalType(f.Name, logical)
+			if planErr != nil {
+				return nil, nil, fmt.Errorf("column %s target plan: %w", f.Name, planErr)
+			}
 			plans[i] = newPlan
-			newFields[i] = arrow.Field{Name: f.Name, Type: newPlan.DataType, Nullable: nullable}
+			newFields[i] = arrow.Field{Name: f.Name, Type: newPlan.DataType, Nullable: logical.Nullable}
 		}
 	}
 

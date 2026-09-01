@@ -577,6 +577,15 @@ func (s *Store) CreateRun(ctx context.Context, r Run) error {
 	return err
 }
 
+func (s *Store) SetRunTypeWarnings(ctx context.Context, runID string, warnings []typesystem.TypeWarning) error {
+	raw, err := json.Marshal(warnings)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE runs SET type_warnings_json=? WHERE id=?`, string(raw), runID)
+	return err
+}
+
 func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json, commit_id, commit_intent_json, commit_phase FROM runs ORDER BY started_at DESC;`)
 	if err != nil {
