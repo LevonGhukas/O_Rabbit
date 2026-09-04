@@ -80,6 +80,43 @@ func TestValidateLocalParquetStableAndRejectsCorruption(t *testing.T) {
 	}
 }
 
+func TestValidateLocalParquetRoundTripsMigratedSchema(t *testing.T) {
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "date", Type: arrow.FixedWidthTypes.Date32, Nullable: true},
+		{Name: "timestamp", Type: arrow.FixedWidthTypes.Timestamp_us, Nullable: false},
+		{Name: "timestamp_tz", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}, Nullable: true},
+		{Name: "uint64_fallback", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "items", Type: arrow.ListOfField(arrow.Field{Name: "item", Type: arrow.PrimitiveTypes.Int64, Nullable: true}), Nullable: true},
+		{Name: "amount", Type: &arrow.Decimal128Type{Precision: 12, Scale: 2}, Nullable: true},
+	}, nil)
+	w, path, err := parquetio.NewTempFileWriter(schema, parquetio.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arrays := make([]arrow.Array, len(schema.Fields()))
+	for i, field := range schema.Fields() {
+		b := array.NewBuilder(memory.DefaultAllocator, field.Type)
+		b.AppendNull()
+		arrays[i] = b.NewArray()
+		b.Release()
+	}
+	rec := array.NewRecordBatch(schema, arrays, 1)
+	for _, a := range arrays {
+		a.Release()
+	}
+	if err := w.Write(rec); err != nil {
+		t.Fatal(err)
+	}
+	rec.Release()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
+	if _, err := artifact.ValidateLocalParquet(context.Background(), path, 1, schema); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSchemaFingerprintGoldenProperties(t *testing.T) {
 	nested := arrow.StructOf(arrow.Field{Name: "value", Type: arrow.PrimitiveTypes.Int64, Nullable: true})
 	base := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false}, {Name: "nested", Type: nested, Nullable: true}}, nil)

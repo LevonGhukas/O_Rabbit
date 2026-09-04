@@ -116,7 +116,7 @@ func ValidateLocalParquet(ctx context.Context, path string, expectedRows int64, 
 		return LocalInfo{}, err
 	}
 	if actualFP != expectedFP {
-		return LocalInfo{}, &Failure{Classification: FailureLocalSchemaMismatch, Err: fmt.Errorf("parquet schema fingerprint mismatch: actual=%s expected=%s", actualFP, expectedFP)}
+		return LocalInfo{}, &Failure{Classification: FailureLocalSchemaMismatch, Err: fmt.Errorf("parquet schema fingerprint mismatch: actual=%s expected=%s difference=actual %s expected %s", actualFP, expectedFP, actualSchema, expectedSchema)}
 	}
 	return LocalInfo{ByteSize: size, SHA256: digest, RowCount: rows, SchemaFingerprint: actualFP}, nil
 }
@@ -227,12 +227,18 @@ func canonicalizeType(dt arrow.DataType) canonicalType {
 		}
 	case *arrow.ListType:
 		f := canonicalizeField(t.ElemField())
+		// Parquet canonicalizes the synthetic list element name to "element";
+		// Arrow uses "item" (or an empty name) for the same list semantics.
+		// The element name is not a meaningful schema distinction.
+		f.Name = ""
 		out.Element = &f
 	case *arrow.LargeListType:
 		f := canonicalizeField(t.ElemField())
+		f.Name = ""
 		out.Element = &f
 	case *arrow.FixedSizeListType:
 		f := canonicalizeField(t.ElemField())
+		f.Name = ""
 		out.Element = &f
 		out.ByteWidth = t.Len()
 	case *arrow.MapType:

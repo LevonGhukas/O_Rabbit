@@ -43,7 +43,10 @@ func NewTempFileWriterInDir(schema *arrow.Schema, opts Options, dir string) (*Wr
 	path := f.Name()
 
 	props := parquet.NewWriterProperties(parquet.WithCompression(opts.Compression))
-	arrProps := pqarrow.DefaultWriterProps()
+	// Preserve Arrow-specific schema metadata (nullability, timestamp timezone,
+	// and nested field details) for exact footer reconstruction during integrity
+	// validation.
+	arrProps := pqarrow.NewArrowWriterProperties(pqarrow.WithStoreSchema())
 
 	pw, err := pqarrow.NewFileWriter(schema, f, props, arrProps)
 	if err != nil {
