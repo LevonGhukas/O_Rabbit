@@ -10,7 +10,11 @@ func convertDate(value any, target LogicalType) (time.Time, error) {
 	case time.Time:
 		return time.Date(v.Year(), v.Month(), v.Day(), 0, 0, 0, 0, time.UTC), nil
 	case string:
-		parsed, err := time.Parse("2006-01-02", strings.TrimSpace(v))
+		text := strings.TrimSpace(v)
+		if err := rejectTemporalSpecialValue(text, target, value); err != nil {
+			return time.Time{}, err
+		}
+		parsed, err := time.Parse("2006-01-02", text)
 		if err != nil {
 			return time.Time{}, conversionError(target, value, "invalid date %q", v)
 		}
@@ -57,7 +61,11 @@ func convertTimestamp(value any, target LogicalType) (time.Time, error) {
 	case time.Time:
 		result = v
 	case string:
-		parsed, ok := parseTimestamp(strings.TrimSpace(v))
+		text := strings.TrimSpace(v)
+		if err := rejectTemporalSpecialValue(text, target, value); err != nil {
+			return time.Time{}, err
+		}
+		parsed, ok := parseTimestamp(text)
 		if !ok {
 			return time.Time{}, conversionError(target, value, "invalid timestamp %q", v)
 		}
@@ -71,6 +79,13 @@ func convertTimestamp(value any, target LogicalType) (time.Time, error) {
 		return result.UTC(), nil
 	}
 	return result, nil
+}
+
+func rejectTemporalSpecialValue(text string, target LogicalType, value any) error {
+	if strings.EqualFold(text, "infinity") || strings.EqualFold(text, "-infinity") {
+		return conversionError(target, value, "PostgreSQL infinity value %q is not representable as a native %s; override this column to string to preserve it losslessly", text, target.String())
+	}
+	return nil
 }
 
 // parseTimestamp accepts RFC3339Nano and the database timestamp forms already

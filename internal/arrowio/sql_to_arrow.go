@@ -479,7 +479,7 @@ func RowsToRecordBatchesEngineWithOverrides(engine string, rows *sql.Rows, cols 
 			return rowsTotal, maxCursor, err
 		}
 		for i, p := range plans {
-			if err := p.Append(builders[i], vals[i]); err != nil {
+			if err := appendPlannedValue(p, builders[i], vals[i]); err != nil {
 				return rowsTotal, maxCursor, err
 			}
 		}
@@ -509,6 +509,13 @@ func RowsToRecordBatchesEngineWithOverrides(engine string, rows *sql.Rows, cols 
 		}
 	}
 	return rowsTotal, maxCursor, nil
+}
+
+func appendPlannedValue(plan ColumnPlan, builder array.Builder, value any) error {
+	if err := plan.Append(builder, value); err != nil {
+		return fmt.Errorf("column %q: %w", plan.Name, err)
+	}
+	return nil
 }
 
 // PlansFromSQLWithOverrides returns Arrow plans and schema updated with requested target types and nullability.
