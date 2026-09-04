@@ -1,12 +1,45 @@
 package arrowio
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 )
+
+func TestAppendPlannedValueAddsColumnContextAndPreservesConversionError(t *testing.T) {
+	plan, _, err := PlanForLogicalType("created_at", typesystem.LogicalType{Kind: typesystem.KindDate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := plan.Builder(memory.DefaultAllocator)
+	defer b.Release()
+
+	err = appendPlannedValue(plan, b, "-infinity")
+	if err == nil || !strings.Contains(err.Error(), `column "created_at"`) {
+		t.Fatalf("error=%v; want column context", err)
+	}
+	var conversionErr *typesystem.ConversionError
+	if !errors.As(err, &conversionErr) {
+		t.Fatalf("error=%v; want ConversionError to remain unwrap-able", err)
+	}
+}
+
+func TestAppendPlannedValueSuccessfulAppendUnchanged(t *testing.T) {
+	plan, _, err := PlanForLogicalType("created_at", typesystem.LogicalType{Kind: typesystem.KindDate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := plan.Builder(memory.DefaultAllocator)
+	defer b.Release()
+	if err := appendPlannedValue(plan, b, "2026-09-04"); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func buildFloat64Array(t *testing.T, vals ...any) (*array.Float64, []error) {
 	t.Helper()

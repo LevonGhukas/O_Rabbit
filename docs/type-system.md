@@ -28,6 +28,8 @@ Normal `string` conversion is intentionally separate from `ToLosslessString`. Th
 
 Destination-specific code remains responsible for warnings when it selects the fallback representation; the conversion core intentionally returns only the value or a conversion error.
 
+PostgreSQL `DATE`, `TIMESTAMP`, and `TIMESTAMPTZ` also support `infinity` and `-infinity`. ORabbit's canonical temporal types are finite, so native temporal conversion rejects these values with a `ConversionError`; it does not clamp or convert them to null. Override the column to canonical target type `string` when lossless preservation is required.
+
 ## Destination mapping
 
 `internal/arrowio.ArrowTypeForLogicalType` maps the canonical logical type to Arrow and returns dependency-neutral mapping metadata. `internal/icebergreg.IcebergMappingForLogicalType` records the expected Iceberg representation for the installed `github.com/apache/iceberg-go` bridge. `ResolveStorageMapping` combines them and verifies the selected Arrow type through `ArrowSchemaToIcebergWithFreshIDs`, so the Arrow schema cannot silently become a different Iceberg type.
