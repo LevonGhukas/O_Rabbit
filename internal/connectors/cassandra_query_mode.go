@@ -62,17 +62,15 @@ func (c *Cassandra) ValidateQueryCursorColumn(ctx context.Context, query, cursor
 		return CursorColumnValidation{}, fmt.Errorf("cassandra validate query cursor: %w", err)
 	}
 
-	leaf := identLeaf(cursorColumn)
-	for i, col := range cols {
-		if !cursorColumnMatches(col, leaf) {
-			continue
-		}
+	idx := queryResultColumnIndex(cols, cursorColumn)
+	if idx >= 0 && idx < len(cols) {
+		col := cols[idx]
 		out := CursorColumnValidation{
 			Found:        true,
 			ResolvedName: col,
 		}
-		if i < len(cts) && cts[i] != nil {
-			out.DataType = strings.TrimSpace(cts[i].DatabaseTypeName())
+		if idx < len(cts) && cts[idx] != nil {
+			out.DataType = strings.TrimSpace(cts[idx].DatabaseTypeName())
 			class := classifyCassandraCursorType(out.DataType)
 			out.Domain = class.Domain
 			out.Orderable = class.Orderable

@@ -26,9 +26,14 @@ func planMSSQLColumn(name, dbType string, precision, scale int64, hasDecimal boo
 
 	// 3. Floats
 	case "FLOAT":
+		if hasDecimal && precision > 0 && precision <= 24 {
+			return planFloat32(name)
+		}
 		return planFloat64(name)
-	case "REAL":
+	case "REAL", "FLOAT24":
 		return planFloat32(name)
+	case "FLOAT53", "DOUBLE", "DOUBLE PRECISION":
+		return planFloat64(name)
 
 	// 4. Exact Decimals & Money
 	case "DECIMAL", "NUMERIC", "NUMBER":
