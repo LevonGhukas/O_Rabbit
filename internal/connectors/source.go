@@ -437,7 +437,15 @@ func OpenIntRangeReader(ctx context.Context, engine, dsn string) (TableReader, e
 }
 
 func cursorColumnMatches(resultColumn, cursorColumn string) bool {
-	return strings.EqualFold(strings.TrimSpace(resultColumn), identLeaf(cursorColumn))
+	res := strings.TrimSpace(resultColumn)
+	cur := strings.TrimSpace(cursorColumn)
+	if strings.EqualFold(res, cur) {
+		return true
+	}
+	if unquoted := queryResultColumnName(cur); strings.EqualFold(res, unquoted) {
+		return true
+	}
+	return strings.EqualFold(res, identLeaf(cur))
 }
 
 func idColumnMatches(resultColumn, idColumn string) bool {
