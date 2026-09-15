@@ -349,23 +349,20 @@ func buildClickHouseQueryTypeProbeSQL(dataTypes []string) (string, error) {
 
 func validateClickHouseQueryCursorColumn(columns, dataTypes []string, cursorColumn string) CursorColumnValidation {
 	out := CursorColumnValidation{}
-	leaf := identLeaf(cursorColumn)
-	for i, column := range columns {
-		if !cursorColumnMatches(column, leaf) {
-			continue
-		}
-		out.Found = true
-		out.ResolvedName = column
-		if i < len(dataTypes) {
-			out.DataType = strings.TrimSpace(dataTypes[i])
-			class := ClassifySQLCursorType(out.DataType)
-			out.Domain = class.Domain
-			out.Orderable = class.Orderable
-			out.RangeCapable = class.RangeCapable
-			out.NullableKnown = true
-			out.Nullable = strings.HasPrefix(strings.ToUpper(out.DataType), "NULLABLE(")
-		}
-		break
+	idx := queryResultColumnIndex(columns, cursorColumn)
+	if idx < 0 || idx >= len(columns) {
+		return out
+	}
+	out.Found = true
+	out.ResolvedName = columns[idx]
+	if idx < len(dataTypes) {
+		out.DataType = strings.TrimSpace(dataTypes[idx])
+		class := ClassifySQLCursorType(out.DataType)
+		out.Domain = class.Domain
+		out.Orderable = class.Orderable
+		out.RangeCapable = class.RangeCapable
+		out.NullableKnown = true
+		out.Nullable = strings.HasPrefix(strings.ToUpper(out.DataType), "NULLABLE(")
 	}
 	return out
 }

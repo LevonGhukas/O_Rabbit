@@ -376,11 +376,12 @@ func (it *s3JSONIterator) initialize() error {
 }
 
 func parseJSONRecordPath(raw string) ([]string, error) {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, nil
 	}
 	if !strings.HasPrefix(raw, "/") {
-		return nil, fmt.Errorf("JSON record_path %q must start with /", raw)
+		raw = "/" + raw
 	}
 	parts := strings.Split(raw[1:], "/")
 	for i, part := range parts {
