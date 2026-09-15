@@ -47,7 +47,7 @@ func TestPlansFromSQLEngineWithOverrides(t *testing.T) {
 	plans, schema, err := PlansFromSQLEngineWithOverrides("mssql", cols, nil, targetTypes)
 	require.NoError(t, err)
 	require.Equal(t, 4, len(plans))
-	require.Equal(t, arrow.PrimitiveTypes.Uint64, schema.Field(0).Type)
+	require.Equal(t, arrow.BinaryTypes.String, schema.Field(0).Type)
 	require.False(t, schema.Field(0).Nullable)
 	require.Equal(t, &arrow.Decimal128Type{Precision: 18, Scale: 4}, schema.Field(1).Type)
 	require.False(t, schema.Field(1).Nullable)

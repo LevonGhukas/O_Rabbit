@@ -32,6 +32,7 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -1353,9 +1354,18 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 				if sourceQuery == "" {
 					sourceQuery = strings.TrimSpace(job.SourceSQL)
 				}
-				intent.IcebergSchema, err = icebergreg.InferDurableIcebergSchema(ctx, srcConn.Engine, sourceDSN, opts.NormalizedSourceMode(), strings.TrimSpace(opts.Table), sourceQuery, opts.RecordPath, opts.FileFormat)
+				var warnings []typesystem.TypeWarning
+				intent.IcebergSchema, warnings, err = icebergreg.InferDurableIcebergSchemaWithWarnings(ctx, srcConn.Engine, sourceDSN, opts.NormalizedSourceMode(), strings.TrimSpace(opts.Table), sourceQuery, opts.RecordPath, opts.FileFormat)
 				if err != nil {
 					return &classifiedCommitError{class: commitFailureValidation, component: "source_schema", err: fmt.Errorf("empty dataset source schema is unavailable: %w", err)}
+				}
+				if len(warnings) > 0 {
+					if err := s.st.SetRunTypeWarnings(ctx, runID, warnings); err != nil {
+						return fmt.Errorf("persist document type warnings: %w", err)
+					}
+					for _, warning := range warnings {
+						s.log.Warn("type mapping fallback", "run_id", runID, "source_engine", srcConn.Engine, "column", warning.Column, "logical_type", warning.LogicalType, "storage_type", warning.StorageType, "mapping_class", warning.Class, "reason", warning.Reason)
+					}
 				}
 			}
 		}

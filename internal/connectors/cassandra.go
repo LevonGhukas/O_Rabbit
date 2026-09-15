@@ -8,10 +8,13 @@ import (
 	"io"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gocql/gocql"
+
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
 
 // Cassandra connector using the gocql driver.
@@ -794,7 +797,11 @@ func newCassandraRows(iter *gocql.Iter, cols []string) (*sql.Rows, error) {
 		vals := make([]driver.Value, len(cols))
 		for i, col := range cols {
 			v := row[col]
-			vals[i] = cassandraToDriverValue(v)
+			value, err := cassandraToDriverValue(v)
+			if err != nil {
+				return nil, fmt.Errorf("cassandra row column %s: %w", col, err)
+			}
+			vals[i] = value
 		}
 		data = append(data, vals)
 	}
@@ -820,41 +827,42 @@ func newCassandraRows(iter *gocql.Iter, cols []string) (*sql.Rows, error) {
 }
 
 // cassandraToDriverValue converts a gocql scan value to a driver.Value.
-func cassandraToDriverValue(v any) driver.Value {
+func cassandraToDriverValue(v any) (driver.Value, error) {
 	if v == nil {
-		return nil
+		return nil, nil
 	}
 	switch x := v.(type) {
 	case int8:
-		return int64(x)
+		return int64(x), nil
 	case int16:
-		return int64(x)
+		return int64(x), nil
 	case int32:
-		return int64(x)
+		return int64(x), nil
 	case int:
-		return int64(x)
+		return int64(x), nil
 	case uint8:
-		return int64(x)
+		return int64(x), nil
 	case uint16:
-		return int64(x)
+		return int64(x), nil
 	case uint32:
-		return int64(x)
+		return int64(x), nil
 	case uint64:
-		return int64(x)
+		return strconv.FormatUint(x, 10), nil
 	case float32:
-		return float64(x)
+		return float64(x), nil
+	case int64, float64, string, bool:
+		return x, nil
 	case []byte:
-		// Return as string so it's compatible with driver.Value.
-		return string(x)
+		return x, nil
 	case gocql.UUID:
-		return x.String()
+		return x.String(), nil
 	case time.Time:
-		return x
+		return x, nil
 	default:
-		// For int64, float64, string, bool, time.Time: pass through.
-		if dv, ok := v.(driver.Value); ok {
-			return dv
+		text, err := typesystem.ToLosslessString(v)
+		if err != nil {
+			return nil, fmt.Errorf("lossless Cassandra driver conversion: %w", err)
 		}
-		return fmt.Sprintf("%v", v)
+		return text, nil
 	}
 }

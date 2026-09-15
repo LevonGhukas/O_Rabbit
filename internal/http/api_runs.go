@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/arrowio"
 	"github.com/LevonGhukas/O_Rabbit/internal/connectors"
 	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/dataset"
@@ -17,6 +19,7 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
 
 const (
@@ -26,6 +29,8 @@ const (
 	defaultFrontendTargetTable          = "Orders"
 	defaultFrontendWriteMode            = "append"
 )
+
+var openDocumentReader = connectors.OpenDocumentReader
 
 func resolveFrontendWriteMode(incremental bool) string {
 	if incremental {
@@ -360,7 +365,18 @@ func (s *Server) handleRunValidate(w http.ResponseWriter, r *http.Request) {
 		s.writeRunSubmitError(w, err)
 		return
 	}
+	for column, target := range spec.ColumnTypes {
+		if _, err := typesystem.ParseType(target); err != nil {
+			writeInvalidInput(w, "invalid column_types", map[string]any{"column": column, "error": err.Error()})
+			return
+		}
+	}
 	applyFrontendDestinationIdentity(&spec)
+	mappings, warnings, err := validationTypeMappings(r.Context(), spec)
+	if err != nil {
+		writeInvalidInput(w, "source schema validation failed", map[string]any{"error": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                        true,
 		"source_engine":             spec.SourceEngine,
@@ -369,14 +385,16 @@ func (s *Server) handleRunValidate(w http.ResponseWriter, r *http.Request) {
 		"query_supported":           spec.QuerySupported,
 		"frontend_submit_supported": spec.FrontendSubmitSupported,
 		"available_workers":         s.activeWorkerCount(r.Context()),
+		"type_mappings":             mappings,
+		"type_warnings":             warnings,
 		"derived": map[string]any{
 			"job_name":               spec.JobName,
 			"source_connection_name": spec.SourceConnectionName,
 			"source_name":            spec.SourceName,
 			"query_hash":             spec.QueryHash,
-		"where_clause":           spec.WhereClause,
-		"select_columns":         spec.SelectColumns,
-		"column_types":           spec.ColumnTypes,
+			"where_clause":           spec.WhereClause,
+			"select_columns":         spec.SelectColumns,
+			"column_types":           spec.ColumnTypes,
 			"target_connection_name": spec.TargetConnectionName,
 			"target_prefix":          spec.TargetPrefix,
 			"iceberg_table":          spec.IcebergTable,
@@ -388,6 +406,83 @@ func (s *Server) handleRunValidate(w http.ResponseWriter, r *http.Request) {
 			"s3_force_path_style":    spec.TargetForcePathStyle,
 		},
 	})
+}
+
+func validationTypeMappings(ctx context.Context, spec validatedRunSubmitSpec) ([]map[string]any, []typesystem.TypeWarning, error) {
+	out := []map[string]any{}
+	warnings := []typesystem.TypeWarning{}
+	if connectors.SupportsDocumentReader(spec.SourceEngine) {
+		reader, err := openDocumentReader(ctx, spec.SourceEngine, spec.SourceDSN)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open document source: %w", err)
+		}
+		defer reader.Close()
+		inference, err := arrowio.InferMongoSchemaFromReader(ctx, reader, spec.SourceTable, nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("infer document schema: %w", err)
+		}
+		for _, field := range inference.Fields {
+			out = append(out, map[string]any{"column": field.Name, "logical_type": field.LogicalType.String(), "storage_type": field.Mapping.Destination, "class": field.Mapping.Class, "fallback": field.Mapping.Fallback, "reason": field.Mapping.Reason})
+		}
+		return out, arrowio.MongoTypeWarnings(inference), nil
+	}
+	reader, err := connectors.OpenIntRangeReader(ctx, spec.SourceEngine, spec.SourceDSN)
+	if err != nil {
+		return out, warnings, nil
+	}
+	defer reader.Close()
+	var cols []string
+	var types []*sql.ColumnType
+	if spec.SourceMode == "query" {
+		q, ok := reader.(connectors.SourceQueryReader)
+		if !ok {
+			return out, warnings, nil
+		}
+		cols, types, err = q.DescribeQuery(ctx, spec.SourceQuery)
+	} else {
+		cols, types, err = reader.DescribeTable(ctx, spec.SourceTable)
+	}
+	if err != nil {
+		return out, warnings, nil
+	}
+	out, warnings = validationTypeMappingsFromDescription(spec, cols, types)
+	return out, warnings, nil
+}
+
+func validationTypeMappingsFromDescription(spec validatedRunSubmitSpec, cols []string, types []*sql.ColumnType) ([]map[string]any, []typesystem.TypeWarning) {
+	out := []map[string]any{}
+	warnings := []typesystem.TypeWarning{}
+	result, err := arrowio.PlansFromSQLEngineResult(spec.SourceEngine, cols, types, spec.ColumnTypes)
+	if err != nil {
+		return out, warnings
+	}
+	for i, col := range cols {
+		var dbType string
+		var p, s int64
+		var dec bool
+		if types[i] != nil {
+			dbType = types[i].DatabaseTypeName()
+			if pp, ss, ok := types[i].DecimalSize(); ok {
+				p = int64(pp)
+				s = int64(ss)
+				dec = true
+			}
+		}
+		logical, e := arrowio.LogicalTypeForSQLColumn(spec.SourceEngine, dbType, p, s, dec)
+		if e != nil {
+			continue
+		}
+		if raw, ok := spec.ColumnTypes[col]; ok {
+			if parsed, e := typesystem.ParseType(raw); e == nil {
+				logical = parsed
+			}
+		}
+		_, mapping, e := arrowio.PlanForLogicalType(col, logical)
+		if e == nil {
+			out = append(out, map[string]any{"column": col, "logical_type": logical.String(), "storage_type": mapping.Destination, "class": mapping.Class, "fallback": mapping.Fallback, "reason": mapping.Reason})
+		}
+	}
+	return out, result.Warnings
 }
 
 func (s *Server) handleRunSubmit(w http.ResponseWriter, r *http.Request) {
