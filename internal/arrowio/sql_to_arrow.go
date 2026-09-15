@@ -12,6 +12,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/connectors"
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
 
 type ColumnPlan struct {
@@ -19,6 +20,72 @@ type ColumnPlan struct {
 	DataType arrow.DataType
 	Builder  func(mem memory.Allocator) array.Builder
 	Append   func(b array.Builder, v any) error
+}
+
+type SQLPlanResult struct {
+	Plans    []ColumnPlan
+	Schema   *arrow.Schema
+	Warnings []typesystem.TypeWarning
+}
+
+func LogicalTypeForSQLColumn(engine, dbType string, precision, scale int64, hasDecimal bool) (typesystem.LogicalType, error) {
+	switch strings.ToLower(strings.TrimSpace(engine)) {
+	case "postgres", "postgresql", "pg":
+		return LogicalTypeForPostgresColumn(dbType, precision, scale, hasDecimal)
+	case "mysql", "mariadb":
+		return LogicalTypeForMySQLColumn(dbType, precision, scale, hasDecimal)
+	case "mssql", "sqlserver", "ms-sql", "ms_sql":
+		return LogicalTypeForMSSQLColumn(dbType, precision, scale, hasDecimal)
+	case "oracle", "ora":
+		return LogicalTypeForOracleColumn(dbType, precision, scale, hasDecimal)
+	case "clickhouse", "ch":
+		return LogicalTypeForClickHouseColumn(dbType, precision, scale, hasDecimal)
+	case "trino":
+		return LogicalTypeForTrinoColumn(dbType, precision, scale, hasDecimal)
+	case "cassandra", "cql":
+		return LogicalTypeForCassandraColumn(dbType, precision, scale, hasDecimal)
+	case "sqlite", "sqlite3":
+		return LogicalTypeForSQLiteColumn(dbType, precision, scale, hasDecimal)
+	default:
+		return typesystem.LogicalType{Kind: typesystem.KindUnknown, SourceTypeName: strings.ToUpper(strings.TrimSpace(dbType))}, nil
+	}
+}
+
+func PlansFromSQLEngineResult(engine string, cols []string, colTypes []*sql.ColumnType, targetTypes map[string]string) (SQLPlanResult, error) {
+	plans, schema, err := PlansFromSQLEngineWithOverrides(engine, cols, colTypes, targetTypes)
+	if err != nil {
+		return SQLPlanResult{}, err
+	}
+	warnings := make([]typesystem.TypeWarning, 0)
+	for i, col := range cols {
+		var dbType string
+		var p, s int64
+		var dec bool
+		if colTypes != nil && i < len(colTypes) && colTypes[i] != nil {
+			dbType = colTypes[i].DatabaseTypeName()
+			if pp, ss, ok := colTypes[i].DecimalSize(); ok {
+				p = int64(pp)
+				s = int64(ss)
+				dec = true
+			}
+		}
+		logical, err := LogicalTypeForSQLColumn(engine, dbType, p, s, dec)
+		if err != nil {
+			continue
+		}
+		if raw, ok := targetTypes[col]; ok && strings.TrimSpace(raw) != "" {
+			if parsed, parseErr := typesystem.ParseType(raw); parseErr == nil {
+				logical = parsed
+			}
+		}
+		_, mapping, mapErr := PlanForLogicalType(col, logical)
+		if mapErr == nil {
+			if warning, ok := typesystem.WarningForMapping(col, mapping); ok {
+				warnings = append(warnings, warning)
+			}
+		}
+	}
+	return SQLPlanResult{Plans: plans, Schema: schema, Warnings: typesystem.DeduplicateTypeWarnings(warnings)}, nil
 }
 
 // schemaFromPlans handles schema from plans behavior.
@@ -73,8 +140,6 @@ func PlansFromSQLEngine(engine string, cols []string, colTypes []*sql.ColumnType
 
 	return plans, arrow.NewSchema(fields, nil), nil
 }
-
-
 
 func parseTimestampValue(raw string) (time.Time, bool) {
 	raw = strings.TrimSpace(raw)
@@ -414,7 +479,7 @@ func RowsToRecordBatchesEngineWithOverrides(engine string, rows *sql.Rows, cols 
 			return rowsTotal, maxCursor, err
 		}
 		for i, p := range plans {
-			if err := p.Append(builders[i], vals[i]); err != nil {
+			if err := appendPlannedValue(p, builders[i], vals[i]); err != nil {
 				return rowsTotal, maxCursor, err
 			}
 		}
@@ -446,6 +511,13 @@ func RowsToRecordBatchesEngineWithOverrides(engine string, rows *sql.Rows, cols 
 	return rowsTotal, maxCursor, nil
 }
 
+func appendPlannedValue(plan ColumnPlan, builder array.Builder, value any) error {
+	if err := plan.Append(builder, value); err != nil {
+		return fmt.Errorf("column %q: %w", plan.Name, err)
+	}
+	return nil
+}
+
 // PlansFromSQLWithOverrides returns Arrow plans and schema updated with requested target types and nullability.
 func PlansFromSQLWithOverrides(cols []string, colTypes []*sql.ColumnType, targetTypes map[string]string) ([]ColumnPlan, *arrow.Schema, error) {
 	return PlansFromSQLEngineWithOverrides("", cols, colTypes, targetTypes)
@@ -473,12 +545,16 @@ func PlansFromSQLEngineWithOverrides(engine string, cols []string, colTypes []*s
 			targetTypeStr, ok = targetTypesLower[strings.ToLower(strings.TrimSpace(f.Name))]
 		}
 		if ok && strings.TrimSpace(targetTypeStr) != "" {
-			tStr := strings.TrimSpace(targetTypeStr)
-			nullable := strings.HasPrefix(strings.ToLower(tStr), "nullable(")
-
-			newPlan := PlanForTargetType(f.Name, tStr)
+			logical, parseErr := typesystem.ParseType(strings.TrimSpace(targetTypeStr))
+			if parseErr != nil {
+				return nil, nil, fmt.Errorf("column %s target type: %w", f.Name, parseErr)
+			}
+			newPlan, _, planErr := PlanForLogicalType(f.Name, logical)
+			if planErr != nil {
+				return nil, nil, fmt.Errorf("column %s target plan: %w", f.Name, planErr)
+			}
 			plans[i] = newPlan
-			newFields[i] = arrow.Field{Name: f.Name, Type: newPlan.DataType, Nullable: nullable}
+			newFields[i] = arrow.Field{Name: f.Name, Type: newPlan.DataType, Nullable: logical.Nullable}
 		}
 	}
 
