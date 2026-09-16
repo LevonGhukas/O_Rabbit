@@ -15,6 +15,23 @@ func writeAPIError(w http.ResponseWriter, status int, code httperr.Code, message
 	httperr.Write(w, status, code, message, details)
 }
 
+func writePayloadTooLarge(w http.ResponseWriter, message string) {
+	msg := strings.TrimSpace(message)
+	if msg == "" {
+		msg = "request payload exceeds maximum allowed size"
+	}
+	writeAPIError(w, http.StatusRequestEntityTooLarge, httperr.CodePayloadTooLarge, msg, nil)
+}
+
+func handleJSONReadError(w http.ResponseWriter, err error) {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		writePayloadTooLarge(w, fmt.Sprintf("request payload exceeds maximum allowed size of %d bytes", maxBytesErr.Limit))
+		return
+	}
+	writeInvalidInput(w, "invalid JSON body", invalidJSONDetails(err))
+}
+
 func writeInvalidInput(w http.ResponseWriter, message string, details any) {
 	writeAPIError(w, http.StatusBadRequest, httperr.CodeInvalidInput, message, details)
 }

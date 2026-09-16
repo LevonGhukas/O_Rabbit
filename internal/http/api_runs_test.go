@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,13 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 	_ "modernc.org/sqlite"
 )
+
+func TestMain(m *testing.M) {
+	if err := os.Setenv("ORABBIT_MASTER_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="); err != nil {
+		panic(err)
+	}
+	os.Exit(m.Run())
+}
 
 func TestAPIRunSubmitPlannerFailureIncludesDetails(t *testing.T) {
 	st := openTestStore(t)
@@ -65,7 +73,7 @@ func TestAPIRunSubmitPlannerFailureIncludesDetails(t *testing.T) {
 
 func TestTargetConnectionsReuseOnlyMatchingDestinationIdentity(t *testing.T) {
 	st := openTestStore(t)
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, encryptionTestKey(t), StatusInfo{}, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/runs/submit", nil)
 	makeRequest := func(prefix, accessKey string) connectionCreateRequest {
 		spec := validatedRunSubmitSpec{TargetEndpoint: "HTTP://MINIO:9000/", TargetRegion: "us-east-1", TargetBucket: "bucket1", TargetPrefixOverride: prefix, TargetForcePathStyle: true}
@@ -1578,7 +1586,11 @@ type submitTestServer struct {
 }
 
 func newSubmitTestServer(st *db.Store) *submitTestServer {
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	k, err := crypto.LoadMasterKeyFromEnv()
+	if err != nil {
+		panic(err)
+	}
+	srv := NewServer(nil, st, nil, k, StatusInfo{}, "")
 	ts := &submitTestServer{Server: srv}
 	srv.runPlanner = func(ctx context.Context, st *db.Store, k crypto.Key, job db.Job, registrationConfig json.RawMessage, audit *db.AuditRecord) (db.Run, []db.TaskInsert, error) {
 		ts.registrationConfig = append(json.RawMessage(nil), registrationConfig...)

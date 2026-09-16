@@ -159,7 +159,7 @@ func (m *MSSQL) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []st
 		args = append(args, upperArg)
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM %s WITH (NOLOCK)", buildMSSQLSelectClause(q.SelectColumns), qt)
+	query := fmt.Sprintf("SELECT %s FROM %s", buildMSSQLSelectClause(q.SelectColumns), qt)
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -248,7 +248,7 @@ func (m *MSSQL) DiscoverCursorStats(ctx context.Context, table, cursorColumn str
 		if err := m.db.QueryRowContext(qctx, qRowCount, schemaName, tableName).Scan(&rc); err == nil && rc > 0 {
 			out.RowCount = rc
 		} else {
-			qCountFallback := fmt.Sprintf("SELECT COUNT_BIG(1) FROM %s WITH (NOLOCK);", qt)
+			qCountFallback := fmt.Sprintf("SELECT COUNT_BIG(1) FROM %s;", qt)
 			_ = m.db.QueryRowContext(qctx, qCountFallback).Scan(&out.RowCount)
 		}
 
@@ -334,7 +334,7 @@ func (m *MSSQL) ValidateCursorColumn(ctx context.Context, table, cursorColumn st
 }
 
 func (m *MSSQL) discoverBounds(ctx context.Context, quotedTable, quotedCol string) (any, any, error) {
-	qBounds := fmt.Sprintf("SELECT MIN(%s), MAX(%s) FROM %s WITH (NOLOCK);", quotedCol, quotedCol, quotedTable)
+	qBounds := fmt.Sprintf("SELECT MIN(%s), MAX(%s) FROM %s;", quotedCol, quotedCol, quotedTable)
 	var minv, maxv any
 	if err := m.db.QueryRowContext(ctx, qBounds).Scan(&minv, &maxv); err != nil {
 		return nil, nil, err

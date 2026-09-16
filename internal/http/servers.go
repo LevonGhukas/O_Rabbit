@@ -49,7 +49,7 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var req serverCreateRequest
 		if err := readJSON(r, &req); err != nil {
-			writeInvalidInput(w, "invalid JSON body", invalidJSONDetails(err))
+			handleJSONReadError(w, err)
 			return
 		}
 		server, err := s.st.CreateServer(r.Context(), db.Server{
@@ -148,7 +148,7 @@ func (s *Server) handleServerResource(w http.ResponseWriter, r *http.Request, se
 		}
 		var req serverPatchRequest
 		if err := readJSON(r, &req); err != nil {
-			writeInvalidInput(w, "invalid JSON body", invalidJSONDetails(err))
+			handleJSONReadError(w, err)
 			return
 		}
 		updated := current

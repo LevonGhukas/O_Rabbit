@@ -5,10 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	secretcrypto "github.com/LevonGhukas/O_Rabbit/internal/crypto"
 )
+
+const validTestHostFingerprint = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 func testMasterKey(t *testing.T) secretcrypto.Key {
 	t.Helper()
@@ -121,6 +124,44 @@ func TestServerCredentialEncryptionRequiresMasterKey(t *testing.T) {
 	}
 }
 
+func TestServerCredentialRequiresValidHostFingerprint(t *testing.T) {
+	k := testMasterKey(t)
+	_, err := EncryptServerCredential(k, "server-1", ServerCredentialSecret{
+		AuthType: serverAuthTypePassword,
+		Username: "deploy",
+		Password: "secret",
+	})
+	if err == nil || !strings.Contains(err.Error(), "host key fingerprint") {
+		t.Fatalf("blank fingerprint err=%v", err)
+	}
+	_, err = EncryptServerCredential(k, "server-1", ServerCredentialSecret{
+		AuthType:           serverAuthTypePassword,
+		Username:           "deploy",
+		Password:           "secret",
+		HostKeyFingerprint: "SHA256:bad",
+	})
+	if err == nil || !strings.Contains(err.Error(), "host key fingerprint") {
+		t.Fatalf("invalid fingerprint err=%v", err)
+	}
+}
+
+func TestDecryptServerCredentialRejectsLegacyUnpinnedHost(t *testing.T) {
+	k := testMasterKey(t)
+	password, err := secretcrypto.Encrypt(k, []byte("secret"), serverCredentialAAD("server-1", "password"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = DecryptServerCredential(k, ServerCredential{
+		ServerID:    "server-1",
+		AuthType:    serverAuthTypePassword,
+		Username:    "deploy",
+		PasswordEnc: password,
+	})
+	if err == nil || !strings.Contains(err.Error(), "insecure stored SSH credential") {
+		t.Fatalf("legacy unpinned credential err=%v", err)
+	}
+}
+
 func TestServerCredentialRoundTripAndCRUD(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
@@ -140,7 +181,7 @@ func TestServerCredentialRoundTripAndCRUD(t *testing.T) {
 		AuthType:           serverAuthTypePassword,
 		Username:           "deploy",
 		Password:           "pw-123",
-		HostKeyFingerprint: "SHA256:abc",
+		HostKeyFingerprint: validTestHostFingerprint,
 	})
 	if err != nil {
 		t.Fatalf("encrypt credential: %v", err)
@@ -167,7 +208,7 @@ func TestServerCredentialRoundTripAndCRUD(t *testing.T) {
 		Username:           "deploy",
 		PrivateKey:         "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
 		Passphrase:         "passphrase",
-		HostKeyFingerprint: "SHA256:def",
+		HostKeyFingerprint: validTestHostFingerprint,
 	})
 	if err != nil {
 		t.Fatalf("encrypt replacement credential: %v", err)

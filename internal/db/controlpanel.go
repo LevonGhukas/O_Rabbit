@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,19 @@ var (
 	ErrInvalidDeploymentStatus    = errors.New("invalid deployment status")
 	ErrInvalidDeploymentComponent = errors.New("invalid deployment component")
 )
+
+func validateHostKeyFingerprint(value string) error {
+	const prefix = "SHA256:"
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, prefix) {
+		return errors.New("SSH host key fingerprint must use SHA256:<base64> format")
+	}
+	digest, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(value, prefix))
+	if err != nil || len(digest) != 32 {
+		return errors.New("SSH host key fingerprint must contain a SHA-256 digest")
+	}
+	return nil
+}
 
 type Server struct {
 	ID            string          `json:"id"`
@@ -159,6 +173,9 @@ func DecryptServerCredential(k secretcrypto.Key, cred ServerCredential) (ServerC
 	out.AuthType = normalizeServerCredentialAuthType(cred.AuthType)
 	out.Username = strings.TrimSpace(cred.Username)
 	out.HostKeyFingerprint = strings.TrimSpace(cred.HostKeyFingerprint)
+	if err := validateHostKeyFingerprint(out.HostKeyFingerprint); err != nil {
+		return ServerCredentialSecret{}, fmt.Errorf("insecure stored SSH credential: %w; update credential with the server SHA-256 fingerprint", err)
+	}
 
 	var err error
 	if out.PrivateKey, err = decryptOptionalSecret(k, cred.PrivateKeyEnc, serverCredentialAAD(cred.ServerID, "private_key")); err != nil {
@@ -683,6 +700,9 @@ func prepareServerCredentialForCreate(cred ServerCredential) (ServerCredential, 
 	}
 	if cred.Username == "" {
 		return ServerCredential{}, fmt.Errorf("missing username")
+	}
+	if err := validateHostKeyFingerprint(cred.HostKeyFingerprint); err != nil {
+		return ServerCredential{}, err
 	}
 	if err := validateServerCredentialBlobs(cred); err != nil {
 		return ServerCredential{}, err

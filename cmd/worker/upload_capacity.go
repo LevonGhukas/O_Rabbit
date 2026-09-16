@@ -10,11 +10,11 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func acquireUploadCapacity(ctx context.Context, cp grpcpb.ControlPlaneClient, workerID string, task *grpcpb.TaskAssignment) (*grpcpb.AcquireUploadCapacityResponse, error) {
+func acquireUploadCapacity(ctx context.Context, cp grpcpb.ControlPlaneClient, workerID, bootID string, task *grpcpb.TaskAssignment) (*grpcpb.AcquireUploadCapacityResponse, error) {
 	for {
 		callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		resp, err := cp.AcquireUploadCapacity(callCtx, &grpcpb.AcquireUploadCapacityRequest{
-			WorkerId: workerID, TaskId: task.TaskId, AttemptId: task.AttemptId, FencingToken: task.FencingToken,
+			WorkerId: workerID, BootId: bootID, TaskId: task.TaskId, AttemptId: task.AttemptId, FencingToken: task.FencingToken,
 		})
 		cancel()
 		if err == nil && resp.GetAcquired() {
@@ -40,8 +40,8 @@ func acquireUploadCapacity(ctx context.Context, cp grpcpb.ControlPlaneClient, wo
 
 // holdUploadCapacity waits without failing the task, then keeps the
 // master-issued global capacity lease alive until closeGuard is called.
-func holdUploadCapacity(ctx context.Context, cp grpcpb.ControlPlaneClient, workerID string, task *grpcpb.TaskAssignment) (context.Context, func() error, error) {
-	grant, err := acquireUploadCapacity(ctx, cp, workerID, task)
+func holdUploadCapacity(ctx context.Context, cp grpcpb.ControlPlaneClient, workerID, bootID string, task *grpcpb.TaskAssignment) (context.Context, func() error, error) {
+	grant, err := acquireUploadCapacity(ctx, cp, workerID, bootID, task)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -77,7 +77,7 @@ func holdUploadCapacity(ctx context.Context, cp grpcpb.ControlPlaneClient, worke
 			}
 			callCtx, cancel := context.WithTimeout(uploadCtx, 3*time.Second)
 			resp, renewErr := cp.AcquireUploadCapacity(callCtx, &grpcpb.AcquireUploadCapacityRequest{
-				WorkerId: workerID, TaskId: task.TaskId, AttemptId: task.AttemptId, FencingToken: task.FencingToken,
+				WorkerId: workerID, BootId: bootID, TaskId: task.TaskId, AttemptId: task.AttemptId, FencingToken: task.FencingToken,
 			})
 			cancel()
 			if renewErr == nil && resp.GetAcquired() && resp.LeaseId == grant.LeaseId && resp.LeaseToken == grant.LeaseToken {
@@ -104,7 +104,7 @@ func holdUploadCapacity(ctx context.Context, cp grpcpb.ControlPlaneClient, worke
 		<-renewDone
 		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		_, _ = cp.ReleaseUploadCapacity(releaseCtx, &grpcpb.ReleaseUploadCapacityRequest{
-			WorkerId: workerID, TaskId: task.TaskId, AttemptId: task.AttemptId, LeaseId: grant.LeaseId, LeaseToken: grant.LeaseToken,
+			WorkerId: workerID, BootId: bootID, TaskId: task.TaskId, AttemptId: task.AttemptId, LeaseId: grant.LeaseId, LeaseToken: grant.LeaseToken,
 		})
 		releaseCancel()
 		select {

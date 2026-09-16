@@ -87,11 +87,15 @@ func (p *Postgres) ExportSnapshot(ctx context.Context) (string, error) {
 	}
 
 	// Keep the transaction open in the background so workers can use the snapshot ID.
+	// Bounded to 4 hours or until the run context is done.
 	go func() {
 		defer detachedDB.Close()
 		defer conn.Close()
 		defer tx.Rollback()
-		time.Sleep(24 * time.Hour)
+		select {
+		case <-ctx.Done():
+		case <-time.After(4 * time.Hour):
+		}
 	}()
 
 	return snapID, nil
@@ -227,12 +231,12 @@ func (p *Postgres) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, [
 			tx.Rollback()
 			conn.Close()
 		} else {
-			// We can't trivially rollback the tx here because rows are still being read.
-			// The caller must ensure they don't leak it, but sql.Rows will release the connection
-			// which typically rolls back the transaction.
-			// In Go, closing the rows will close the transaction if we don't explicitly hold it.
-			// Actually, if we use tx.QueryContext, closing Rows does NOT rollback tx automatically.
-			// For simplicity and since worker process exits or closes DB, this is acceptable.
+			// Cleanly close tx and connection when query context ends or is cancelled
+			go func() {
+				<-ctx.Done()
+				_ = tx.Rollback()
+				_ = conn.Close()
+			}()
 		}
 	} else {
 		rows, qerr = p.db.QueryContext(ctx, query, args...)

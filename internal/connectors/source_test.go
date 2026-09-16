@@ -325,3 +325,65 @@ func TestClosedCursorSpanUnits(t *testing.T) {
 		t.Fatalf("CursorSpanUnits(int64)=(%d,%v), want (10,true)", got, ok)
 	}
 }
+
+func TestValidateWhereClause(t *testing.T) {
+	valid := []string{
+		"",
+		"   ",
+		"id > 100",
+		"status = 'ACTIVE' AND created_at >= '2026-01-01'",
+		"price BETWEEN 10 AND 50",
+		"category IN ('A', 'B')",
+	}
+	for _, v := range valid {
+		if err := ValidateWhereClause(v); err != nil {
+			t.Fatalf("expected valid where clause %q, got err: %v", v, err)
+		}
+	}
+
+	invalid := []string{
+		"id = 1; DROP TABLE users",
+		"id = 1 -- comment",
+		"id = 1 /* block comment */",
+		"id = 1; DELETE FROM orders",
+		"id = 1 UNION SELECT * FROM passwords", // UNION is blocked if followed by destructive or multiple statements
+		"id = 1; UPDATE users SET admin=1",
+		"EXEC sp_executesql",
+	}
+	for _, inv := range invalid {
+		if err := ValidateWhereClause(inv); err == nil {
+			t.Fatalf("expected invalid where clause for %q, but passed", inv)
+		}
+	}
+}
+
+func TestValidateSelectColumns(t *testing.T) {
+	valid := [][]string{
+		nil,
+		{},
+		{"id", "name", "created_at"},
+		{"o.id", "o.name"},
+		{"[id]", "[order_date]"},
+		{"\"id\"", "\"user_name\""},
+		{"`id`", "`price`"},
+	}
+	for _, v := range valid {
+		if err := ValidateSelectColumns(v); err != nil {
+			t.Fatalf("expected valid columns %v, got err: %v", v, err)
+		}
+	}
+
+	invalid := [][]string{
+		{""},
+		{"   "},
+		{"id; DROP TABLE users"},
+		{"id -- comment"},
+		{"id /* comment */"},
+		{"id, (SELECT 1 FROM secret)"},
+	}
+	for _, inv := range invalid {
+		if err := ValidateSelectColumns(inv); err == nil {
+			t.Fatalf("expected invalid columns %v, but passed", inv)
+		}
+	}
+}

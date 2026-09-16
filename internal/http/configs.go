@@ -84,8 +84,8 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request, se
 		return
 	}
 	var req configContentRequest
-	if err := readJSON(r, &req); err != nil {
-		writeInvalidInput(w, "invalid JSON body", invalidJSONDetails(err))
+	if err := readBoundedJSON(r, configMaxBodyBytes, &req); err != nil {
+		handleJSONReadError(w, err)
 		return
 	}
 	validation := opsconfigs.ValidateConfig(configID, req.Content)
@@ -108,8 +108,8 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request, serv
 	}
 
 	var req configContentRequest
-	if err := readJSON(r, &req); err != nil {
-		writeInvalidInput(w, "invalid JSON body", invalidJSONDetails(err))
+	if err := readBoundedJSON(r, configMaxBodyBytes, &req); err != nil {
+		handleJSONReadError(w, err)
 		return
 	}
 	validation := opsconfigs.ValidateConfig(configID, req.Content)

@@ -19,6 +19,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -123,14 +124,18 @@ func (s *Server) Handler() http.Handler {
 			writeMethodNotAllowed(w, r.Method, http.MethodGet)
 			return
 		}
+		statusInfo := s.status
+		if statusInfo.DBPath != "" {
+			statusInfo.DBPath = filepath.Base(statusInfo.DBPath)
+		}
 		if s.leadership == nil {
-			writeJSON(w, http.StatusOK, s.status)
+			writeJSON(w, http.StatusOK, statusInfo)
 			return
 		}
 		writeJSON(w, http.StatusOK, struct {
 			StatusInfo
 			Leadership db.Leadership `json:"leadership"`
-		}{s.status, s.leadership.Status()})
+		}{statusInfo, s.leadership.Status()})
 	})
 
 	mux.HandleFunc("/workers", s.handleWorkers)
@@ -205,12 +210,12 @@ func (s *Server) Serve(ctx context.Context, addr string) error {
 
 func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Health probes stay unauthenticated.
-		if r.URL.Path == "/healthz" || r.URL.Path == "/ready" || !isKnownAPIPath(r.URL.Path) {
+		// Liveness probe /healthz stays unconditionally unauthenticated.
+		if r.URL.Path == "/healthz" || !isKnownAPIPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if !constantTimeBearerMatch(r.Header.Get("Authorization"), s.authToken) {
+		if s.authToken != "" && !constantTimeBearerMatch(r.Header.Get("Authorization"), s.authToken) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="orabbit"`)
 			writeUnauthorized(w)
 			return
@@ -314,29 +319,70 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = enc.Encode(v)
 }
 
-// readJSON reads the JSON request body and unmarshals it into the provided output variable.
+const (
+	defaultMaxBodyBytes = 1 << 20 // 1 MB
+	configMaxBodyBytes  = 5 << 20 // 5 MB
+)
+
+// readJSON reads the JSON request body with a bounded 1MB limit and unmarshals it into the provided output variable.
 func readJSON(r *http.Request, out any) error {
-	b, err := io.ReadAll(r.Body)
+	return readBoundedJSON(r, defaultMaxBodyBytes, out)
+}
+
+func readBoundedJSON(r *http.Request, maxBytes int64, out any) error {
+	if r.Body == nil {
+		return errors.New("request body is required")
+	}
+	defer r.Body.Close()
+
+	reader := io.LimitReader(r.Body, maxBytes+1)
+	b, err := io.ReadAll(reader)
 	if err != nil {
 		return err
 	}
-	defer r.Body.Close()
-	return json.Unmarshal(b, out)
+	if int64(len(b)) > maxBytes {
+		return &http.MaxBytesError{Limit: maxBytes}
+	}
+	if len(bytes.TrimSpace(b)) == 0 {
+		return errors.New("request body is empty")
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if err := dec.Decode(out); err != nil {
+		return err
+	}
+	if dec.More() {
+		return errors.New("trailing data after JSON object")
+	}
+	return nil
 }
 
 func readOptionalJSON(r *http.Request, out any) error {
 	if r.Body == nil {
 		return nil
 	}
-	b, err := io.ReadAll(r.Body)
+	defer r.Body.Close()
+
+	reader := io.LimitReader(r.Body, defaultMaxBodyBytes+1)
+	b, err := io.ReadAll(reader)
 	if err != nil {
 		return err
 	}
-	defer r.Body.Close()
+	if int64(len(b)) > defaultMaxBodyBytes {
+		return &http.MaxBytesError{Limit: defaultMaxBodyBytes}
+	}
 	if len(bytes.TrimSpace(b)) == 0 {
 		return nil
 	}
-	return json.Unmarshal(b, out)
+
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if err := dec.Decode(out); err != nil {
+		return err
+	}
+	if dec.More() {
+		return errors.New("trailing data after JSON object")
+	}
+	return nil
 }
 
 // newID generates a new random ID as a hex string. It uses 16 random bytes, which results in a 32-character hex string.
@@ -370,11 +416,15 @@ func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var req connectionCreateRequest
 		if err := readJSON(r, &req); err != nil {
-			writeInvalidInput(w, "invalid JSON body", invalidJSONDetails(err))
+			handleJSONReadError(w, err)
 			return
 		}
 		if len(req.Secret) == 0 {
 			writeInvalidInput(w, "missing secret", map[string]any{"field": "secret"})
+			return
+		}
+		if s.k.IsZero() {
+			writeMasterKeyRequired(w, "connection secrets")
 			return
 		}
 
@@ -442,7 +492,11 @@ func (s *Server) handleConnectionByID(w http.ResponseWriter, r *http.Request) {
 
 		var req connectionCreateRequest
 		if err := readJSON(r, &req); err != nil {
-			writeInvalidInput(w, "invalid JSON body", invalidJSONDetails(err))
+			handleJSONReadError(w, err)
+			return
+		}
+		if len(req.Secret) != 0 && s.k.IsZero() {
+			writeMasterKeyRequired(w, "connection secrets")
 			return
 		}
 
@@ -543,7 +597,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var req jobCreateRequest
 		if err := readJSON(r, &req); err != nil {
-			writeInvalidInput(w, "invalid JSON body", invalidJSONDetails(err))
+			handleJSONReadError(w, err)
 			return
 		}
 		j := db.Job{
@@ -635,7 +689,7 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		}
 		var req jobCreateRequest
 		if err := readJSON(r, &req); err != nil {
-			writeInvalidInput(w, "invalid JSON body", invalidJSONDetails(err))
+			handleJSONReadError(w, err)
 			return
 		}
 		upd := db.Job{

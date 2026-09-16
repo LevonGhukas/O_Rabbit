@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -236,20 +237,27 @@ func parseSigner(privateKey string, passphrase string) (gossh.Signer, error) {
 func matchesFingerprint(expected string, key gossh.PublicKey) bool {
 	expected = strings.TrimSpace(expected)
 	if expected == "" {
-		return true
+		return false
 	}
 	sha256fp := gossh.FingerprintSHA256(key)
-	if expected == sha256fp {
+	if constantTimeStringEqual(expected, sha256fp) {
 		return true
 	}
 	legacy := gossh.FingerprintLegacyMD5(key)
-	if strings.EqualFold(expected, legacy) {
+	if constantTimeStringEqual(strings.ToLower(expected), strings.ToLower(legacy)) {
 		return true
 	}
 	if strings.HasPrefix(strings.ToUpper(expected), "MD5:") {
-		return strings.EqualFold(strings.TrimPrefix(expected, "MD5:"), legacy)
+		return constantTimeStringEqual(strings.ToLower(strings.TrimPrefix(expected, "MD5:")), strings.ToLower(legacy))
 	}
 	return false
+}
+
+func constantTimeStringEqual(left, right string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1
 }
 
 type tailWriter struct {
