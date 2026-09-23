@@ -205,8 +205,7 @@ func (s *Server) Serve(ctx context.Context, addr string) error {
 
 func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Health probes stay unauthenticated.
-		if r.URL.Path == "/healthz" || r.URL.Path == "/ready" || !isKnownAPIPath(r.URL.Path) {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/ready" {
 			next.ServeHTTP(w, r)
 			return
 		}
