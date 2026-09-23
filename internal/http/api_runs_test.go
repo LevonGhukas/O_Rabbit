@@ -963,7 +963,7 @@ func TestValidationTypeMappingsReportsFallbacksAndOverrides(t *testing.T) {
 
 	spec.ColumnTypes = map[string]string{"id": "uint64"}
 	mappings, warnings = validationTypeMappingsFromDescription(spec, []string{"id"}, columnTypes[:1])
-	if len(mappings) != 1 || mappings[0]["storage_type"] != "string" || mappings[0]["class"] != typesystem.MappingSemanticFallback || len(warnings) != 1 || warnings[0].Class != "semantic_fallback" {
+	if len(mappings) != 1 || mappings[0]["storage_type"] != "decimal(20, 0)" || mappings[0]["class"] != typesystem.MappingSafePromotion || len(warnings) != 0 {
 		t.Fatalf("uint64 override mappings=%v warnings=%v", mappings, warnings)
 	}
 }
