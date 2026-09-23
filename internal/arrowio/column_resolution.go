@@ -59,16 +59,23 @@ func PlanColumnResolutions(engine string, cols []string, colTypes []*sql.ColumnT
 				return nil, fmt.Errorf("column %s: invalid type %q: %w", col, raw, err)
 			}
 			r.RequestedRaw = strings.TrimSpace(raw)
-			r.Requested = &requested
-			r.Probe.Range, r.Probe.Fraction = typeProbeNeeds(source, requested)
-			if requested.Kind == typesystem.KindDecimal {
-				r.Probe.Scale = *requested.Scale
-			}
-			r.Probe.Nulls = !requested.Nullable && r.sourceMayBeNull()
+			r.setRequested(requested)
 		}
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+// setRequested records an override and plans the data checks that verify it.
+func (r *ColumnResolution) setRequested(requested typesystem.LogicalType) {
+	r.Requested = &requested
+	r.Probe.Range, r.Probe.Fraction = typeProbeNeeds(r.Source, requested)
+	// uint64 is stored as int64 when values fit, which needs the range.
+	r.Probe.Range = r.Probe.Range || requested.Kind == typesystem.KindUInt64
+	if requested.Kind == typesystem.KindDecimal {
+		r.Probe.Scale = *requested.Scale
+	}
+	r.Probe.Nulls = !requested.Nullable && r.sourceMayBeNull()
 }
 
 func (r ColumnResolution) sourceMayBeNull() bool {
@@ -100,6 +107,11 @@ func FinalizeColumnResolutions(resolutions []ColumnResolution, stats map[string]
 		}
 
 		final, useSource, typeReason := resolveOverrideType(r, st, hasStats, probeErr)
+		if !useSource && final.Kind == typesystem.KindUInt64 && hasStats && (st.Min == nil || fitsLogical(typesystem.LogicalType{Kind: typesystem.KindInt64}, st.Min, st.Max)) {
+			// Same storage rule as the default path: uint64 values that fit
+			// int64 are stored as int64 rather than decimal(20,0).
+			final = typesystem.LogicalType{Kind: typesystem.KindInt64}
+		}
 		nullable, nullReason := resolveOverrideNullability(r, st, hasStats, probeErr)
 
 		var rendered string

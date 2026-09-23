@@ -21,12 +21,8 @@ func resolutionFor(t *testing.T, source typesystem.LogicalType, nullableKnown bo
 	if err != nil {
 		t.Fatalf("resolve %q: %v", raw, err)
 	}
-	r := ColumnResolution{Column: "c", Source: source, SourceNullableKnown: nullableKnown, RequestedRaw: raw, Requested: &requested, Probe: connectors.ColumnProbe{Column: "c"}}
-	r.Probe.Range, r.Probe.Fraction = typeProbeNeeds(source, requested)
-	if requested.Kind == typesystem.KindDecimal {
-		r.Probe.Scale = *requested.Scale
-	}
-	r.Probe.Nulls = !requested.Nullable && r.sourceMayBeNull()
+	r := ColumnResolution{Column: "c", Source: source, SourceNullableKnown: nullableKnown, RequestedRaw: raw, Probe: connectors.ColumnProbe{Column: "c"}}
+	r.setRequested(requested)
 	return r
 }
 
@@ -199,5 +195,20 @@ func TestDefaultUInt64NarrowsToInt64WhenValuesFit(t *testing.T) {
 	effective, _ = FinalizeColumnResolutions([]ColumnResolution{r}, nil, errors.New("down"))
 	if _, ok := effective["id"]; ok {
 		t.Fatalf("unverified uint64 must keep decimal(20,0): %+v", effective)
+	}
+}
+
+func TestRequestedUInt64StoredAsInt64WhenValuesFit(t *testing.T) {
+	r := resolutionFor(t, typesystem.LogicalType{Kind: typesystem.KindUInt64}, true, "nullable<uint64>")
+	if !r.Probe.Range {
+		t.Fatalf("uint64 request must probe range: %+v", r.Probe)
+	}
+	got, warnings := finalize(r, &connectors.ColumnProbeResult{Min: rat(1), Max: rat(99)}, nil)
+	if got != "nullable<int64>" || len(warnings) != 0 {
+		t.Fatalf("effective = %q warnings = %+v", got, warnings)
+	}
+	got, _ = finalize(r, &connectors.ColumnProbeResult{Min: rat(0), Max: new(big.Rat).SetUint64(math.MaxUint64)}, nil)
+	if got != "nullable<uint64>" {
+		t.Fatalf("values beyond int64 keep uint64 (decimal storage): %q", got)
 	}
 }
