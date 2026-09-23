@@ -1683,3 +1683,48 @@ func seedExistingJobRunFixture(t *testing.T, st *db.Store, jobID string, increme
 		t.Fatalf("create job: %v", err)
 	}
 }
+
+// Regression: the Iceberg-enabled submit path used to drop source.column_types.
+func TestAPIRunSubmitPersistsColumnTypes(t *testing.T) {
+	st := openTestStore(t)
+	srv := newSubmitTestServer(st)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/submit", strings.NewReader(`{
+		"source": {
+			"engine": "postgres",
+			"dsn": "postgresql://user:pass@db:5432/app?sslmode=disable",
+			"mode": "query",
+			"query": "SELECT id, user_id FROM public.orders",
+			"cursor_column": "id",
+			"incremental": true,
+			"column_types": {"id": "int32", "user_id": "nullable<source>"}
+		},
+		"target": {
+			"s3_endpoint": "http://minio:9000",
+			"s3_bucket": "bucket1",
+			"s3_access_key_id": "minioadmin",
+			"s3_secret_access_key": "miniosecret"
+		},
+		"iceberg": {"enabled": true, "engine": "rest-go", "table": "ice.orders", "config_yaml": "uri: http://ice-rest:5000"}
+	}`))
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		JobID string `json:"job_id"`
+	}
+	decodeJSONBody(t, rec, &resp)
+	job, err := st.GetJob(context.Background(), resp.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts, err := jobopts.Parse(job.OptionsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.ColumnTypes["id"] != "int32" || opts.ColumnTypes["user_id"] != "nullable<source>" {
+		t.Fatalf("column_types not persisted: %s", job.OptionsJSON)
+	}
+}
