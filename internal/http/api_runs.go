@@ -366,7 +366,7 @@ func (s *Server) handleRunValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for column, target := range spec.ColumnTypes {
-		if _, err := typesystem.ParseType(target); err != nil {
+		if err := typesystem.ValidateOverride(target); err != nil {
 			writeInvalidInput(w, "invalid column_types", map[string]any{"column": column, "error": err.Error()})
 			return
 		}
@@ -457,23 +457,12 @@ func validationTypeMappingsFromDescription(spec validatedRunSubmitSpec, cols []s
 		return out, warnings
 	}
 	for i, col := range cols {
-		var dbType string
-		var p, s int64
-		var dec bool
-		if types[i] != nil {
-			dbType = types[i].DatabaseTypeName()
-			if pp, ss, ok := types[i].DecimalSize(); ok {
-				p = int64(pp)
-				s = int64(ss)
-				dec = true
-			}
-		}
-		logical, e := arrowio.LogicalTypeForSQLColumn(spec.SourceEngine, dbType, p, s, dec)
+		logical, _, e := arrowio.SourceLogicalTypeForSQLColumn(spec.SourceEngine, types[i])
 		if e != nil {
 			continue
 		}
 		if raw, ok := spec.ColumnTypes[col]; ok {
-			if parsed, e := typesystem.ParseType(raw); e == nil {
+			if parsed, e := typesystem.ResolveOverride(raw, logical); e == nil {
 				logical = parsed
 			}
 		}

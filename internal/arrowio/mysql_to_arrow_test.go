@@ -18,7 +18,7 @@ func TestMySQLTypeMapping(t *testing.T) {
 		hasDecimal bool
 		wantType   arrow.DataType
 	}{
-		{"BIGINT UNSIGNED", 0, 0, false, arrow.BinaryTypes.String},
+		{"BIGINT UNSIGNED", 0, 0, false, &arrow.Decimal128Type{Precision: 20, Scale: 0}},
 		{"BIGINT", 0, 0, false, arrow.PrimitiveTypes.Int64},
 		{"INT UNSIGNED", 0, 0, false, arrow.PrimitiveTypes.Uint32},
 		{"INT", 0, 0, false, arrow.PrimitiveTypes.Int32},
@@ -67,12 +67,12 @@ func TestMySQLUint64MaxRoundtrip(t *testing.T) {
 	err = plan.Append(builder, "18446744073709551615")
 	require.NoError(t, err)
 
-	arr := builder.NewArray().(*array.String)
+	arr := builder.NewArray().(*array.Decimal128)
 	defer arr.Release()
 
 	require.Equal(t, 2, arr.Len())
-	require.Equal(t, "18446744073709551615", arr.Value(0))
-	require.Equal(t, "18446744073709551615", arr.Value(1))
+	require.Equal(t, "18446744073709551615", arr.Value(0).ToString(0))
+	require.Equal(t, "18446744073709551615", arr.Value(1).ToString(0))
 }
 
 func TestMySQLTimeDurationsUseLosslessFallback(t *testing.T) {

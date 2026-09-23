@@ -45,7 +45,7 @@ func TestClickHouseTypeMapping(t *testing.T) {
 		hasDecimal bool
 		wantType   arrow.DataType
 	}{
-		{"UInt64", 0, 0, false, arrow.BinaryTypes.String},
+		{"UInt64", 0, 0, false, &arrow.Decimal128Type{Precision: 20, Scale: 0}},
 		{"UInt32", 0, 0, false, arrow.PrimitiveTypes.Uint32},
 		{"UInt16", 0, 0, false, arrow.PrimitiveTypes.Uint16},
 		{"UInt8", 0, 0, false, arrow.PrimitiveTypes.Uint8},
@@ -65,7 +65,7 @@ func TestClickHouseTypeMapping(t *testing.T) {
 		{"DateTime64(6)", 0, 0, false, &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: ""}},
 		{"DateTime64(6, 'UTC')", 0, 0, false, &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}},
 		{"UUID", 0, 0, false, arrow.BinaryTypes.String},
-		{"Nullable(UInt64)", 0, 0, false, arrow.BinaryTypes.String},
+		{"Nullable(UInt64)", 0, 0, false, &arrow.Decimal128Type{Precision: 20, Scale: 0}},
 		{"LowCardinality(String)", 0, 0, false, arrow.BinaryTypes.String},
 		{"Array(Int32)", 0, 0, false, arrow.ListOf(arrow.PrimitiveTypes.Int32)},
 	}
@@ -117,11 +117,11 @@ func TestClickHouseSharedSafetyAndStorage(t *testing.T) {
 	b := uintPlan.Builder(memory.DefaultAllocator)
 	defer b.Release()
 	require.NoError(t, uintPlan.Append(b, "18446744073709551615"))
-	values := b.NewArray().(*array.String)
+	values := b.NewArray().(*array.Decimal128)
 	defer values.Release()
-	require.Equal(t, "18446744073709551615", values.Value(0))
+	require.Equal(t, "18446744073709551615", values.Value(0).ToString(0))
 	arrayPlan := PlanForSQLColumn("clickhouse", "v", "Array(Nullable(UInt64))", 0, 0, false)
-	require.Equal(t, arrow.ListOf(arrow.BinaryTypes.String), arrayPlan.DataType)
+	require.Equal(t, arrow.ListOf(&arrow.Decimal128Type{Precision: 20, Scale: 0}), arrayPlan.DataType)
 	invalidArray := PlanForSQLColumn("clickhouse", "v", "Array(Int8)", 0, 0, false)
 	invalidArrayBuilder := invalidArray.Builder(memory.DefaultAllocator)
 	defer invalidArrayBuilder.Release()
@@ -169,5 +169,5 @@ func TestClickHouseSharedSafetyAndStorage(t *testing.T) {
 	require.Equal(t, typesystem.MappingSemanticFallback, mapping.Class)
 	schema, err := icetable.ArrowSchemaToIcebergWithFreshIDs(arrow.NewSchema([]arrow.Field{{Name: "v", Type: uintPlan.DataType}}, nil), false)
 	require.NoError(t, err)
-	require.Equal(t, "string", schema.Fields()[0].Type.String())
+	require.Equal(t, "decimal(20, 0)", schema.Fields()[0].Type.String())
 }
