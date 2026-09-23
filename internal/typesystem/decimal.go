@@ -1,7 +1,9 @@
 package typesystem
 
 import (
+	"math"
 	"math/big"
+	"strconv"
 	"strings"
 )
 
@@ -102,8 +104,12 @@ func decimalFromValue(value any, target LogicalType) (DecimalValue, error) {
 		return DecimalValue{Unscaled: new(big.Int).SetUint64(uint64(v))}, nil
 	case uint64:
 		return DecimalValue{Unscaled: new(big.Int).SetUint64(v)}, nil
+	case float32:
+		return decimalFromFloat(float64(v), 32, value, target)
+	case float64:
+		return decimalFromFloat(v, 64, value, target)
 	default:
-		return DecimalValue{}, conversionError(target, value, "decimal source must be integer, string, []byte, or DecimalValue")
+		return DecimalValue{}, conversionError(target, value, "decimal source must be number, string, []byte, or DecimalValue")
 	}
 }
 
@@ -155,4 +161,18 @@ func decimalPrecision(value *big.Int) int {
 	}
 	absolute := new(big.Int).Abs(value)
 	return len(absolute.String())
+}
+
+// decimalFromFloat rounds an approximate float to the target scale. Floats have
+// no exact decimal digits to preserve, so rounding is the requested conversion.
+func decimalFromFloat(v float64, bits int, original any, target LogicalType) (DecimalValue, error) {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return DecimalValue{}, conversionError(target, original, "non-finite float %v cannot be stored as decimal", v)
+	}
+	text := strconv.FormatFloat(v, 'f', int(*target.Scale), bits)
+	unscaled, scale, ok := parseDecimal(text)
+	if !ok {
+		return DecimalValue{}, conversionError(target, original, "invalid decimal %q", text)
+	}
+	return DecimalValue{Unscaled: unscaled, Scale: scale}, nil
 }

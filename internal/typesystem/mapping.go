@@ -10,6 +10,9 @@ const (
 	MappingSafePromotion       MappingClass = "safe_promotion"
 	MappingSemanticFallback    MappingClass = "semantic_fallback"
 	MappingUnsupportedFallback MappingClass = "unsupported_fallback"
+	// MappingOverrideFallback marks a user-selected type or nullability that
+	// was replaced because honoring it would have lost data.
+	MappingOverrideFallback MappingClass = "user_override_fallback"
 )
 
 // MappingResult records a destination mapping decision for later diagnostics.

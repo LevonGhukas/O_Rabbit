@@ -20,9 +20,10 @@ func PlanForLogicalType(name string, t typesystem.LogicalType) (ColumnPlan, type
 	if err != nil {
 		return ColumnPlan{}, typesystem.MappingResult{}, err
 	}
+	convertTarget := storageConversionTarget(t)
 	plan := ColumnPlan{Name: name, DataType: dataType, Builder: func(mem memory.Allocator) array.Builder { return array.NewBuilder(mem, dataType) }}
 	plan.Append = func(builder array.Builder, raw any) error {
-		canonical, err := typesystem.Convert(raw, t)
+		canonical, err := typesystem.Convert(raw, convertTarget)
 		if err != nil {
 			return err
 		}
@@ -45,12 +46,34 @@ func StorageArrowTypeForLogicalType(t typesystem.LogicalType) (arrow.DataType, t
 		return arrow.ListOf(element), typesystem.MappingFor(t, arrow.ListOf(element).String(), mapping.Class, mapping.Reason), nil
 	}
 	if t.Kind == typesystem.KindUInt64 {
-		return arrow.BinaryTypes.String, typesystem.MappingFor(t, "string", typesystem.MappingSemanticFallback, "Iceberg long cannot represent full uint64 range"), nil
+		dec := &arrow.Decimal128Type{Precision: uint64DecimalPrecision, Scale: 0}
+		return dec, typesystem.MappingFor(t, dec.String(), typesystem.MappingSafePromotion, "Iceberg has no unsigned 64-bit integer; stored losslessly as decimal(20,0)"), nil
 	}
 	if t.Kind == typesystem.KindTimestampTZ && !storageUTCAlias(t.Timezone) {
 		return arrow.BinaryTypes.String, typesystem.MappingFor(t, "string", typesystem.MappingSemanticFallback, "current Arrow-to-Iceberg bridge accepts timezone-aware timestamps only for UTC aliases"), nil
 	}
 	return ArrowTypeForLogicalType(t)
+}
+
+// uint64DecimalPrecision holds every uint64 value (max 18446744073709551615).
+const uint64DecimalPrecision = 20
+
+// storageConversionTarget returns the logical type raw values must be converted
+// to so they match the storage Arrow type chosen by StorageArrowTypeForLogicalType.
+func storageConversionTarget(t typesystem.LogicalType) typesystem.LogicalType {
+	switch t.Kind {
+	case typesystem.KindUInt64:
+		d := typesystem.Decimal(uint64DecimalPrecision, 0)
+		d.Nullable = t.Nullable
+		d.SourceTypeName = t.SourceTypeName
+		return d
+	case typesystem.KindArray:
+		if t.Element != nil {
+			element := storageConversionTarget(*t.Element)
+			t.Element = &element
+		}
+	}
+	return t
 }
 
 func storageUTCAlias(zone string) bool {
