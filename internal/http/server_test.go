@@ -220,7 +220,7 @@ func TestUnknownRouteReturnsJSONNotFound(t *testing.T) {
 	}
 }
 
-func TestUnknownRouteWithAuthReturnsJSONNotFound(t *testing.T) {
+func TestUnknownRouteWithoutAuthReturnsUnauthorized(t *testing.T) {
 	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "topsecret")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/does-not-exist", nil)
@@ -228,9 +228,30 @@ func TestUnknownRouteWithAuthReturnsJSONNotFound(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 
 	resp := decodeErrorResponse(t, rec)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d want=%d", rec.Code, http.StatusUnauthorized)
+	}
+
+	if resp.Error.Code != httperr.CodeUnauthorized {
+		t.Fatalf("error code=%q want=%q", resp.Error.Code, httperr.CodeUnauthorized)
+	}
+}
+
+func TestUnknownRouteWithValidAuthReturnsJSONNotFound(t *testing.T) {
+	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "topsecret")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/does-not-exist", nil)
+	req.Header.Set("Authorization", "Bearer topsecret")
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	resp := decodeErrorResponse(t, rec)
+
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status=%d want=%d", rec.Code, http.StatusNotFound)
 	}
+
 	if resp.Error.Code != httperr.CodeNotFound {
 		t.Fatalf("error code=%q want=%q", resp.Error.Code, httperr.CodeNotFound)
 	}

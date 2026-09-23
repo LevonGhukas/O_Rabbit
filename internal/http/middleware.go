@@ -54,38 +54,6 @@ func (s *Server) withRecoverer(next http.Handler) http.Handler {
 	})
 }
 
-func isKnownAPIPath(path string) bool {
-	switch path {
-	case "/healthz", "/ready", "/status", "/metrics", "/workers", "/connections", "/jobs", "/runs", "/sse", "/servers", "/deployments",
-		"/api/workers", "/api/runs", "/api/runs/submit", "/api/runs/validate", "/api/source-engines":
-		return true
-	}
-	if strings.HasPrefix(path, "/api/runs/") {
-		return true
-	}
-	if strings.HasPrefix(path, "/api/jobs/") {
-		_, isRunCreate, ok := parseJobRoute(strings.TrimPrefix(path, "/api"))
-		return ok && isRunCreate
-	}
-	if path == "/executions" || strings.HasPrefix(path, "/executions/") {
-		return true
-	}
-	if path == "/deployments" || strings.HasPrefix(path, "/deployments/") {
-		return true
-	}
-	if path == "/servers" || strings.HasPrefix(path, "/servers/") {
-		return true
-	}
-	if id := strings.Trim(strings.TrimPrefix(path, "/connections/"), "/"); id != "" && strings.HasPrefix(path, "/connections/") {
-		return true
-	}
-	if id := strings.Trim(strings.TrimPrefix(path, "/runs/"), "/"); id != "" && strings.HasPrefix(path, "/runs/") {
-		return true
-	}
-	_, _, ok := parseJobRoute(path)
-	return ok
-}
-
 func parseJobRoute(path string) (jobID string, isRunCreate bool, ok bool) {
 	if !strings.HasPrefix(path, "/jobs/") {
 		return "", false, false
