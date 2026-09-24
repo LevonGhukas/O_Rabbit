@@ -1,3 +1,5 @@
+// cmd/master/config.go
+
 package main
 
 import (
@@ -47,12 +49,38 @@ func (c masterConfig) validateLeasePolicy() error {
 }
 
 func (c masterConfig) validateAuthentication() error {
-	if !isLoopbackListenAddress(c.GRPCAddr) && strings.TrimSpace(c.WorkerAuthToken) == "" {
-		return fmt.Errorf("remote gRPC listen address %q requires ORABBIT_WORKER_AUTH_TOKEN", c.GRPCAddr)
+	grpcRemote := !isLoopbackListenAddress(c.GRPCAddr)
+
+	if grpcRemote && strings.TrimSpace(c.WorkerAuthToken) == "" {
+		return fmt.Errorf(
+			"remote gRPC listen address %q requires ORABBIT_WORKER_AUTH_TOKEN",
+			c.GRPCAddr,
+		)
 	}
+
+	if grpcRemote && c.Insecure {
+		return fmt.Errorf(
+			"remote gRPC listen address %q cannot use insecure gRPC; configure TLS",
+			c.GRPCAddr,
+		)
+	}
+
+	if !c.Insecure {
+		if strings.TrimSpace(c.TLSCert) == "" {
+			return fmt.Errorf("gRPC TLS requires ORABBIT_TLS_CERT_FILE")
+		}
+		if strings.TrimSpace(c.TLSKey) == "" {
+			return fmt.Errorf("gRPC TLS requires ORABBIT_TLS_KEY_FILE")
+		}
+	}
+
 	if !isLoopbackListenAddress(c.HTTPAddr) && strings.TrimSpace(c.HTTPAuthToken) == "" {
-		return fmt.Errorf("remote HTTP listen address %q requires ORABBIT_HTTP_AUTH_TOKEN", c.HTTPAddr)
+		return fmt.Errorf(
+			"remote HTTP listen address %q requires ORABBIT_HTTP_AUTH_TOKEN",
+			c.HTTPAddr,
+		)
 	}
+
 	return nil
 }
 
@@ -112,7 +140,7 @@ func loadMasterConfigFromEnv() masterConfig {
 		HTTPAuthToken:                     strings.TrimSpace(os.Getenv("ORABBIT_HTTP_AUTH_TOKEN")),
 		WorkerAuthToken:                   strings.TrimSpace(os.Getenv("ORABBIT_WORKER_AUTH_TOKEN")),
 		IceBin:                            envutil.EnvOrDefault("ORABBIT_ICE_BIN", "ice"),
-		Insecure:                          envBoolDefault("ORABBIT_GRPC_INSECURE", true),
+		Insecure:                          envBoolDefault("ORABBIT_GRPC_INSECURE", false),
 		TLSCert:                           strings.TrimSpace(os.Getenv("ORABBIT_TLS_CERT_FILE")),
 		TLSKey:                            strings.TrimSpace(os.Getenv("ORABBIT_TLS_KEY_FILE")),
 		LogLevel:                          envutil.EnvOrDefault("ORABBIT_LOG_LEVEL", "INFO"),
