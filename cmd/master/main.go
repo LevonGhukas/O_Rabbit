@@ -1,3 +1,4 @@
+// cmd/master/main.go
 package main
 
 import (
@@ -38,6 +39,10 @@ func main() {
 		log.Error("load master key", slog.String("err", err.Error()))
 		os.Exit(1)
 	}
+	if k.IsZero() {
+		log.Error("ORABBIT_MASTER_KEY is required")
+		os.Exit(1)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -61,6 +66,8 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
+
+	st.SetMasterKey(k)
 	st.SetMaxActiveRuns(cfg.MaxActiveRuns)
 	lease, err := st.AcquireLeadership(ctx, instanceID, cfg.LeadershipLeaseDuration, map[string]any{"pid": os.Getpid(), "database_identity": processLock.Identity})
 	if err != nil {

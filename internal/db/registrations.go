@@ -806,21 +806,52 @@ func (s *Store) ReconcileHistoricalRegistrations(ctx context.Context, now time.T
 			} else if err != sql.ErrNoRows {
 				return err
 			} else {
-				var cfg registrationConfigIdentity
 				if strings.TrimSpace(v.cfg) == "" {
 					c.Classification = "NOT_CONFIGURED"
-				} else if json.Unmarshal([]byte(v.cfg), &cfg) != nil || !cfg.Enabled {
-					c.Classification = "CONFIGURATION_UNAVAILABLE"
 				} else {
-					var intent registrationCommitIntent
-					var manifest registrationManifest
-					if v.phase != "COMPLETE" || len(v.commit) != 64 || json.Unmarshal([]byte(v.intent), &intent) != nil || json.Unmarshal(intent.Manifest, &manifest) != nil || manifest.SchemaVersion != 2 || manifest.RunID != v.id || len(manifest.Artifacts) == 0 {
-						c.Classification = "UNSUPPORTED_LEGACY_COMMIT"
-					} else if err := ensureRegistrationTx(ctx, tx, v.id, v.dataset, v.commit, v.cfg, v.intent, ns); err != nil {
+					configBytes, err := s.decryptRunRegistrationConfig(v.id, v.cfg)
+					if err != nil {
+						return err
+					}
+
+					var cfg registrationConfigIdentity
+					if json.Unmarshal(configBytes, &cfg) != nil || !cfg.Enabled {
 						c.Classification = "CONFIGURATION_UNAVAILABLE"
 					} else {
-						c.Classification = "SAFE_TO_ENQUEUE"
-						_ = tx.QueryRowContext(ctx, `SELECT id FROM iceberg_registrations WHERE run_id=?`, v.id).Scan(&c.RegistrationID)
+						var intent registrationCommitIntent
+						var manifest registrationManifest
+
+						if v.phase != "COMPLETE" ||
+							len(v.commit) != 64 ||
+							json.Unmarshal([]byte(v.intent), &intent) != nil ||
+							json.Unmarshal(intent.Manifest, &manifest) != nil ||
+							manifest.SchemaVersion != 2 ||
+							manifest.RunID != v.id ||
+							len(manifest.Artifacts) == 0 {
+
+							c.Classification = "UNSUPPORTED_LEGACY_COMMIT"
+
+						} else if err := ensureRegistrationTx(
+							ctx,
+							tx,
+							v.id,
+							v.dataset,
+							v.commit,
+							string(configBytes),
+							v.intent,
+							ns,
+						); err != nil {
+
+							c.Classification = "CONFIGURATION_UNAVAILABLE"
+
+						} else {
+							c.Classification = "SAFE_TO_ENQUEUE"
+							_ = tx.QueryRowContext(
+								ctx,
+								`SELECT id FROM iceberg_registrations WHERE run_id=?`,
+								v.id,
+							).Scan(&c.RegistrationID)
+						}
 					}
 				}
 			}

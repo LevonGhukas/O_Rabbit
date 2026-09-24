@@ -731,14 +731,29 @@ func mustJSONRaw(t *testing.T, v any) json.RawMessage {
 
 func openGRPCTestStore(t *testing.T) *db.Store {
 	t.Helper()
+
 	path := filepath.Join(t.TempDir(), "grpc-test.sqlite")
 	st, err := db.Open(context.Background(), db.Config{Path: path}, nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
+
+	t.Setenv(
+		"ORABBIT_MASTER_KEY",
+		"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+	)
+
+	k, err := crypto.LoadMasterKeyFromEnv()
+	if err != nil {
+		t.Fatalf("load test master key: %v", err)
+	}
+
+	st.SetMasterKey(k)
+
 	t.Cleanup(func() {
 		_ = st.Close()
 	})
+
 	return st
 }
 

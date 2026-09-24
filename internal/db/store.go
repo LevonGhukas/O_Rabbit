@@ -1,3 +1,5 @@
+// internal/db/store.go
+
 package db
 
 import (
@@ -11,21 +13,89 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"encoding/base64"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
-
+    secretcrypto "github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	_ "modernc.org/sqlite"
 )
+
+const encryptedRegistrationConfigPrefix = "enc:v1:"
+
+func runRegistrationConfigAAD(runID string) []byte {
+	return []byte("run-registration-config:" + runID)
+}
+
+func (s *Store) encryptRunRegistrationConfig(runID string, plaintext []byte) (string, error) {
+	if len(plaintext) == 0 {
+		return "", nil
+	}
+	if s.masterKey.IsZero() {
+		return "", ErrMasterKeyRequired
+	}
+
+	encrypted, err := secretcrypto.Encrypt(
+		s.masterKey,
+		plaintext,
+		runRegistrationConfigAAD(runID),
+	)
+	if err != nil {
+		return "", fmt.Errorf("encrypt run registration config: %w", err)
+	}
+
+	return encryptedRegistrationConfigPrefix +
+		base64.StdEncoding.EncodeToString(encrypted), nil
+}
+
+func (s *Store) decryptRunRegistrationConfig(runID, stored string) ([]byte, error) {
+	if strings.TrimSpace(stored) == "" {
+		return nil, nil
+	}
+
+	if !strings.HasPrefix(stored, encryptedRegistrationConfigPrefix) {
+		// Legacy plaintext row.
+		return []byte(stored), nil
+	}
+
+	if s.masterKey.IsZero() {
+		return nil, ErrMasterKeyRequired
+	}
+
+	encoded := strings.TrimPrefix(stored, encryptedRegistrationConfigPrefix)
+
+	blob, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("decode encrypted run registration config: %w", err)
+	}
+
+	plaintext, err := secretcrypto.Decrypt(
+		s.masterKey,
+		blob,
+		runRegistrationConfigAAD(runID),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt run registration config: %w", err)
+	}
+
+	return plaintext, nil
+}
+
+
 
 type Store struct {
 	db                      *sql.DB
 	log                     *slog.Logger
+	masterKey               secretcrypto.Key
 	canceledObjectRetention time.Duration
 	maxActiveRuns           int
 }
 
 type Config struct {
 	Path string
+}
+
+func (s *Store) SetMasterKey(k secretcrypto.Key) {
+	s.masterKey = k
 }
 
 func Open(ctx context.Context, cfg Config, log *slog.Logger) (*Store, error) {
@@ -558,7 +628,13 @@ func (s *Store) FindActiveRunByDatasetKey(ctx context.Context, datasetKey string
 
 func (s *Store) CreateRun(ctx context.Context, r Run) error {
 	var err error
-	registrationConfig := string(r.RegistrationConfigJSON)
+	registrationConfig, err := s.encryptRunRegistrationConfig(
+		r.ID,
+		r.RegistrationConfigJSON,
+	)
+	if err != nil {
+		return err
+	}
 	warnings, err := json.Marshal(r.TypeWarnings)
 	if err != nil {
 		return err
@@ -599,7 +675,11 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 			return nil, err
 		}
 		if strings.TrimSpace(registrationConfig) != "" {
-			r.RegistrationConfigJSON = []byte(registrationConfig)
+			decrypted, err := s.decryptRunRegistrationConfig(r.ID, registrationConfig)
+			if err != nil {
+				return nil, err
+			}
+			r.RegistrationConfigJSON = decrypted
 		}
 		if strings.TrimSpace(commitIntent) != "" {
 			r.CommitIntentJSON = []byte(commitIntent)
@@ -634,7 +714,11 @@ func (s *Store) GetRun(ctx context.Context, id string) (Run, error) {
 		return Run{}, err
 	}
 	if strings.TrimSpace(registrationConfig) != "" {
-		r.RegistrationConfigJSON = []byte(registrationConfig)
+		decrypted, err := s.decryptRunRegistrationConfig(r.ID, registrationConfig)
+		if err != nil {
+			return Run{}, err
+		}
+		r.RegistrationConfigJSON = decrypted
 	}
 	if strings.TrimSpace(commitIntent) != "" {
 		r.CommitIntentJSON = []byte(commitIntent)
@@ -662,7 +746,11 @@ func (s *Store) ListSucceededRunsForJob(ctx context.Context, jobID string) ([]Ru
 			return nil, err
 		}
 		if strings.TrimSpace(registrationConfig) != "" {
-			r.RegistrationConfigJSON = []byte(registrationConfig)
+			decrypted, err := s.decryptRunRegistrationConfig(r.ID, registrationConfig)
+			if err != nil {
+				return nil, err
+			}
+			r.RegistrationConfigJSON = decrypted
 		}
 		out = append(out, r)
 	}
@@ -1370,7 +1458,22 @@ func (s *Store) CompleteRunCommit(ctx context.Context, runID string) error {
 			return err
 		}
 		now := nowUTC()
-		if err := ensureRegistrationTx(ctx, tx, runID, datasetID, commitID, configJSON, intentJSON, now); err != nil {
+
+		configBytes, err := s.decryptRunRegistrationConfig(runID, configJSON)
+		if err != nil {
+			return err
+		}
+
+		if err := ensureRegistrationTx(
+			ctx,
+			tx,
+			runID,
+			datasetID,
+			commitID,
+			string(configBytes),
+			intentJSON,
+			now,
+		); err != nil {
 			return err
 		}
 		res, err := tx.ExecContext(ctx, `UPDATE runs SET status='SUCCEEDED', finished_at=?, error_summary=NULL, failure_class='', commit_phase='COMPLETE', commit_reconciliation_status='COMPLETE', commit_reconciliation_next_eligible_at=NULL, operator_action_required=0 WHERE id=? AND status='COMMITTING' AND commit_id=? AND commit_phase='VERIFIED';`, now, runID, commitID)
