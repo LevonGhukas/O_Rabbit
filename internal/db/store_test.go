@@ -2,11 +2,14 @@ package db
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"strings"
+	"testing"
 	"log/slog"
 	"path/filepath"
-	"testing"
+	"encoding/json"
+
+	secretcrypto "github.com/LevonGhukas/O_Rabbit/internal/crypto"
 )
 
 func openTestStore(t *testing.T) *Store {
@@ -142,27 +145,67 @@ func TestStartRunWithTasksAuditedTransitionsRunAndPersistsAudit(t *testing.T) {
 
 func TestCreateRunPersistsRegistrationConfigSnapshot(t *testing.T) {
 	st := openTestStore(t)
+
+	t.Setenv(
+		"ORABBIT_MASTER_KEY",
+		"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+	)
+
+	k, err := secretcrypto.LoadMasterKeyFromEnv()
+	if err != nil {
+		t.Fatalf("load test master key: %v", err)
+	}
+	st.SetMasterKey(k)
+
 	ctx := context.Background()
 
 	run := Run{
-		ID:                     "run-reg-config",
-		JobID:                  "job-reg-config",
-		DatasetKey:             "dataset-key",
-		Status:                 "PLANNING",
-		CorrelationID:          "corr-reg-config",
-		StartedAt:              nowUTC(),
-		RegistrationConfigJSON: json.RawMessage(`{"enabled":true,"engine":"rest-go","table":"mssql.orders","uri":"http://catalog:8181","bearer_token":"token"}`),
+		ID:            "run-reg-config",
+		JobID:         "job-reg-config",
+		DatasetKey:    "dataset-key",
+		Status:        "PLANNING",
+		CorrelationID: "corr-reg-config",
+		StartedAt:     nowUTC(),
+		RegistrationConfigJSON: json.RawMessage(
+			`{"enabled":true,"engine":"rest-go","table":"mssql.orders","uri":"http://catalog:8181","bearer_token":"token"}`,
+		),
 	}
+
 	if err := st.CreateRun(ctx, run); err != nil {
 		t.Fatalf("create run: %v", err)
 	}
 
+	// Verify the database does NOT contain the plaintext config.
+	var stored string
+	if err := st.db.QueryRowContext(
+		ctx,
+		`SELECT registration_config_json FROM runs WHERE id=?`,
+		run.ID,
+	).Scan(&stored); err != nil {
+		t.Fatalf("read raw registration config: %v", err)
+	}
+
+	if !strings.HasPrefix(stored, encryptedRegistrationConfigPrefix) {
+		t.Fatalf("registration config not encrypted: %q", stored)
+	}
+
+	if strings.Contains(stored, "bearer_token") ||
+		strings.Contains(stored, "token") {
+		t.Fatalf("registration config contains plaintext secret: %q", stored)
+	}
+
+	// Verify normal application reads still get the original JSON.
 	got, err := st.GetRun(ctx, run.ID)
 	if err != nil {
 		t.Fatalf("get run: %v", err)
 	}
+
 	if string(got.RegistrationConfigJSON) != string(run.RegistrationConfigJSON) {
-		t.Fatalf("registration_config_json=%s want %s", got.RegistrationConfigJSON, run.RegistrationConfigJSON)
+		t.Fatalf(
+			"registration_config_json=%s want %s",
+			got.RegistrationConfigJSON,
+			run.RegistrationConfigJSON,
+		)
 	}
 }
 
