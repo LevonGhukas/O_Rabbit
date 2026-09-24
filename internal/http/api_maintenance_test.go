@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -50,7 +49,7 @@ func TestHandleMaintenanceSubmitInvalidOperation(t *testing.T) {
 	}
 }
 
-func TestHandleMaintenanceSubmitCompact(t *testing.T) {
+func TestHandleMaintenanceSubmitCompactNotImplemented(t *testing.T) {
 	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, "")
 
 	body := `{
@@ -63,27 +62,12 @@ func TestHandleMaintenanceSubmitCompact(t *testing.T) {
 
 	srv.handleMaintenanceSubmit(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d want=%d", rec.Code, http.StatusOK)
-	}
-
-	var resp map[string]string
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatal(err)
-	}
-
-	if resp["status"] != "submitted" {
-		t.Fatalf("status=%q", resp["status"])
-	}
-	if resp["operation"] != "compact" {
-		t.Fatalf("operation=%q", resp["operation"])
-	}
-	if resp["table"] != "orders.events" {
-		t.Fatalf("table=%q", resp["table"])
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status=%d want=%d", rec.Code, http.StatusNotImplemented)
 	}
 }
 
-func TestHandleMaintenanceSubmitVacuum(t *testing.T) {
+func TestHandleMaintenanceSubmitVacuumNotImplemented(t *testing.T) {
 	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, "")
 
 	body := `{
@@ -96,7 +80,7 @@ func TestHandleMaintenanceSubmitVacuum(t *testing.T) {
 
 	srv.handleMaintenanceSubmit(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d want=%d", rec.Code, http.StatusOK)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status=%d want=%d", rec.Code, http.StatusNotImplemented)
 	}
 }

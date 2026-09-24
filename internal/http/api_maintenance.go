@@ -37,12 +37,7 @@ func (s *Server) handleMaintenanceSubmit(w http.ResponseWriter, r *http.Request)
 		"iceberg_table", req.Iceberg.Table,
 	)
 
-	// Here we simulate the successful parsing and acceptance of the command.
-	// In the future, this will dispatch to a background worker or an Iceberg-Go routine.
-	res := map[string]string{
-		"status":    "submitted",
-		"operation": req.Operation,
-		"table":     req.Iceberg.Table,
-	}
-	writeJSON(w, http.StatusOK, res)
+	writeJSON(w, http.StatusNotImplemented, map[string]string{
+	"error": "maintenance operations are not implemented",
+	})
 }
