@@ -345,6 +345,7 @@ type Connection struct {
 	CreatedAt     string          `json:"created_at"`
 	UpdatedAt     string          `json:"updated_at"`
 }
+
 type WorkerInstance struct {
 	BootID        string `json:"boot_id"`
 	WorkerID      string `json:"worker_id"`
