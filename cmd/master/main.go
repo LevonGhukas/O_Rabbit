@@ -68,6 +68,10 @@ func main() {
 	defer st.Close()
 
 	st.SetMasterKey(k)
+	if err := st.MigrateLegacySecrets(ctx, k); err != nil {
+		log.Error("migrate legacy secrets", slog.String("err", err.Error()))
+		os.Exit(1)
+	}
 	st.SetMaxActiveRuns(cfg.MaxActiveRuns)
 	lease, err := st.AcquireLeadership(ctx, instanceID, cfg.LeadershipLeaseDuration, map[string]any{"pid": os.Getpid(), "database_identity": processLock.Identity})
 	if err != nil {

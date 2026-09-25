@@ -1,3 +1,5 @@
+// internal/crypto/plain.go
+
 package crypto
 
 import (
@@ -146,4 +148,39 @@ func newAEAD(k Key) (cipher.AEAD, error) {
 		return nil, err
 	}
 	return cipher.NewGCM(block)
+}
+
+func ReencryptLegacy(k Key, blob, aad []byte) ([]byte, bool, error) {
+	if len(blob) == 0 {
+		return blob, false, nil
+	}
+
+	switch blob[0] {
+	case blobVersion1AESGCM:
+		// Already encrypted with AES-GCM.
+		return blob, false, nil
+
+	case blobVersion0Plain:
+		if k.IsZero() {
+			return nil, false, errors.New("ORABBIT_MASTER_KEY is required to migrate plaintext secret")
+		}
+
+		encrypted, err := Encrypt(k, blob[1:], aad)
+		if err != nil {
+			return nil, false, err
+		}
+		return encrypted, true, nil
+
+	default:
+		// Historical unversioned plaintext.
+		if k.IsZero() {
+			return nil, false, errors.New("ORABBIT_MASTER_KEY is required to migrate plaintext secret")
+		}
+
+		encrypted, err := Encrypt(k, blob, aad)
+		if err != nil {
+			return nil, false, err
+		}
+		return encrypted, true, nil
+	}
 }
