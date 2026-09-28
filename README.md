@@ -200,7 +200,7 @@ split-worker Compose file translates its other connection settings into flags.
 | `ORABBIT_GRPC_ALLOW_INSECURE_REMOTE` | `false` | Permit plaintext gRPC on a non-loopback listener; isolated private networks only |
 | `ORABBIT_TLS_CERT_FILE` | empty | Master gRPC certificate |
 | `ORABBIT_TLS_KEY_FILE` | empty | Master gRPC private key |
-| `ORABBIT_TLS_CLIENT_CA_FILE` | empty | CA that signs worker client certificates; enables mutual TLS and is required for a non-loopback gRPC listener |
+| `ORABBIT_WORKER_CERT_TTL` | `24h` | Lifetime of master-issued worker certificates (1h-720h); workers renew at two thirds of it |
 | `ORABBIT_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARN`, or `ERROR` |
 | `ORABBIT_LOG_FORMAT` | `json` | `json` or `text` |
 | `ORABBIT_TASK_LEASE_DURATION` | `30s` | Attempt lease duration |
@@ -278,15 +278,15 @@ These values configure logging and managed temporary storage directly:
 | `ORABBIT_TEMP_DRY_RUN` | `false` |
 
 The worker flags `-master`, `-worker-id`, `-worker-addr`, `-insecure`,
-`-tls-ca`, `-tls-server-name`, `-tls-cert`, `-tls-key`, `-worker-auth-token`,
-and `-poll` configure
+`-tls-ca`, `-tls-server-name`, `-identity-dir`, `-enrollment-token`,
+`-worker-auth-token`, and `-poll` configure
 control-plane access. Prefer the environment variable over the token flag so
 the credential is not exposed in process arguments. In
 `docker-compose.worker.yml`, `ORABBIT_MASTER_GRPC_ADDR`,
 `ORABBIT_GRPC_INSECURE`, `ORABBIT_TLS_CA_FILE`,
 `ORABBIT_TLS_SERVER_NAME`, and `ORABBIT_WORKER_POLL` are translated to those
-flags. The worker reads its mutual-TLS client certificate and key from
-`ORABBIT_TLS_CERT_FILE` and `ORABBIT_TLS_KEY_FILE` (or `-tls-cert`/`-tls-key`).
+flags. The worker reads `ORABBIT_WORKER_IDENTITY_DIR` and
+`ORABBIT_WORKER_ENROLLMENT_TOKEN` directly; see Worker identity below.
 
 ### Connector and CLI environment
 
@@ -603,11 +603,10 @@ The default HTTP and gRPC listeners bind to `127.0.0.1`. A non-loopback HTTP
 listener is accepted only when `ORABBIT_HTTP_AUTH_TOKEN` is set and must sit
 behind a trusted TLS-terminating proxy or tunnel; the built-in HTTP listener
 does not terminate TLS. A non-loopback gRPC listener is accepted only when
-`ORABBIT_WORKER_AUTH_TOKEN` is set and mutual TLS is configured: the server
-certificate (`ORABBIT_TLS_CERT_FILE`/`ORABBIT_TLS_KEY_FILE`) plus
-`ORABBIT_TLS_CLIENT_CA_FILE`, the CA that must have signed every worker's
-client certificate. Workers present that certificate with
-`ORABBIT_TLS_CERT_FILE`/`ORABBIT_TLS_KEY_FILE`. The master validates the
+`ORABBIT_WORKER_AUTH_TOKEN` is set and gRPC TLS is configured
+(`ORABBIT_TLS_CERT_FILE`/`ORABBIT_TLS_KEY_FILE`). With TLS, every worker RPC
+also requires a master-issued worker certificate; see Worker identity below.
+The master validates the
 bearer credential on every worker-facing RPC; health checks remain
 unauthenticated. gRPC TLS is on by default; `ORABBIT_GRPC_INSECURE=true`
 disables encryption (not worker authentication) and is accepted only on a
@@ -621,6 +620,63 @@ plaintext connection secrets, SSH credentials, saved config versions, run
 registration configs, and registration retry overrides, and it refuses to read
 plaintext secrets afterwards.
 
+### Worker identity
+
+With gRPC TLS enabled, each worker has an immutable identity issued by the
+master:
+
+1. An operator creates an enrollment token:
+   `POST /workers/enrollment-tokens` with an optional body
+   `{"pool": "default", "ttl_seconds": 3600, "max_uses": 1}`. The token is
+   returned once; the master stores only its SHA-256 digest.
+2. The worker starts with `ORABBIT_WORKER_ENROLLMENT_TOKEN`, generates its own
+   private key, and exchanges the token and a CSR for a certificate. The
+   master chooses the worker ID (a UUID) and places it in the certificate's
+   only SAN, `spiffe://orabbit/worker/<uuid>`. The certificate and key are
+   stored together in `ORABBIT_WORKER_IDENTITY_DIR` (mode 0600).
+3. The worker renews the certificate at two thirds of its lifetime
+   (`ORABBIT_WORKER_CERT_TTL`, default 24h). The master closes connections
+   after an hour, so the renewed certificate is picked up on reconnect.
+
+The master signs worker certificates with its own CA, which it creates on
+first start and stores with its key encrypted by `ORABBIT_MASTER_KEY`.
+Every worker RPC except enrollment must present such a certificate. The
+master takes the worker ID from the verified certificate: a request
+`worker_id` naming another worker is rejected, so registration, heartbeats,
+leases, assignments, and attempt audit events always carry the authenticated
+identity. `POST /workers/identities/{id}/revoke` blocks an identity on its
+next RPC; `GET /workers/identities` lists identities with their pool and
+status.
+
+With `ORABBIT_GRPC_INSECURE=true` there are no certificates: the request
+`worker_id` is trusted and pools are not enforced. Use it only for loopback
+development.
+
+### Task credentials and worker pools
+
+Task assignments carry no secrets. After a worker leases a task it calls
+`GetTaskCredentials`, which returns the source DSN and S3 credentials only to
+the authenticated worker holding that attempt's live lease.
+
+Jobs run in the worker pool named by `options_json.worker_pool` (or
+`worker_pool` on `/api/runs/submit`), default `default`. A worker only
+receives tasks, and so credentials, of jobs in the pool of the enrollment
+token it enrolled with. Use separate pools to keep workers of one trust zone
+away from another zone's source databases and buckets.
+
+S3 targets can avoid giving workers long-lived keys by setting target
+connection metadata `"credential_mode": "sts"` and `"sts_role_arn"`. The
+master then calls STS `AssumeRole` with the stored keys and a session policy
+that allows only `PutObject`, `GetObject`, `AbortMultipartUpload`, and
+`ListMultipartUploadParts` under `<dataset prefix>/_runs/run-<run id>/`.
+Workers receive the temporary credentials (default one hour,
+`sts_duration_seconds` 900-43200) and fetch fresh ones from the master before
+they expire. STS is called at `sts_endpoint`, else the target `endpoint` for
+S3-compatible stores such as MinIO, else AWS. Without `credential_mode`, the
+stored keys are delivered to the leaseholder as before. Source databases have
+no portable temporary-credential mechanism; give each source connection a
+read-only database user.
+
 ### Core routes
 
 | Method | Route | Purpose |
@@ -628,6 +684,9 @@ plaintext secrets afterwards.
 | `GET` | `/healthz`, `/ready`, `/status` | Liveness, durable-leader readiness, and master/leadership status |
 | `GET` | `/metrics` | Bounded-label Prometheus lifecycle metrics |
 | `GET` | `/workers` or `/api/workers` | Active workers; use `?all=true` for all |
+| `POST` | `/workers/enrollment-tokens` | Create a one-time worker enrollment token |
+| `GET` | `/workers/identities` | List master-issued worker identities |
+| `POST` | `/workers/identities/{id}/revoke` | Revoke a worker identity |
 | `GET`, `POST` | `/connections` | List or create connections |
 | `GET`, `PUT`, `DELETE` | `/connections/{id}` | Read, replace, or delete a connection |
 | `GET`, `POST` | `/jobs` | List or create jobs |
@@ -843,13 +902,13 @@ key cannot decrypt existing AES-GCM blobs.
 
 ### TLS startup or worker connection fails
 
-When master `-insecure=false`, both `-tls-cert` and `-tls-key` are required,
-and a non-loopback `-grpc-addr` also requires `-tls-client-ca`. Workers must use
-`-insecure=false`, a trusted `-tls-ca`, a client certificate signed by the
-master's client CA (`-tls-cert`/`-tls-key`), and, when needed,
-`-tls-server-name`. A handshake error such as "certificate required" or "bad
-certificate" means the worker's client certificate is missing or not signed by
-`ORABBIT_TLS_CLIENT_CA_FILE`.
+When master `-insecure=false`, both `-tls-cert` and `-tls-key` are required.
+Workers must use `-insecure=false`, a trusted `-tls-ca`, and, when needed,
+`-tls-server-name`. "worker certificate required; enroll the worker first"
+means the worker has no identity: start it once with
+`ORABBIT_WORKER_ENROLLMENT_TOKEN`. "worker identity is unknown or revoked"
+means the identity was revoked or the master database was replaced; enroll
+again with a new token and a fresh `ORABBIT_WORKER_IDENTITY_DIR`.
 
 ### A canceled run leaves objects temporarily
 

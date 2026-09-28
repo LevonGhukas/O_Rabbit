@@ -89,6 +89,17 @@ func (p LeasePolicy) normalized() LeasePolicy {
 }
 
 func (s *Store) AssignNextPendingTaskWithLease(ctx context.Context, bootID, workerID string, now time.Time, policy LeasePolicy, idFn, tokenFn func() (string, error)) (Task, bool, error) {
+	return s.AssignNextPendingTaskInPool(ctx, bootID, workerID, "", now, policy, idFn, tokenFn)
+}
+
+// DefaultWorkerPool is the pool of jobs that do not set options_json.worker_pool
+// and of workers enrolled with a token that names no pool.
+const DefaultWorkerPool = "default"
+
+// AssignNextPendingTaskInPool leases the next eligible task whose job runs in
+// workerPool. An empty workerPool disables the pool filter; it is used only
+// for unauthenticated (plaintext, development) workers.
+func (s *Store) AssignNextPendingTaskInPool(ctx context.Context, bootID, workerID, workerPool string, now time.Time, policy LeasePolicy, idFn, tokenFn func() (string, error)) (Task, bool, error) {
 	policy = policy.normalized()
 	if idFn == nil {
 		idFn = func() (string, error) { return secureAttemptValue("attempt-") }
@@ -124,7 +135,8 @@ func (s *Store) AssignNextPendingTaskWithLease(ctx context.Context, bootID, work
 				WHERE t.status='PENDING' AND r.status='RUNNING' AND (t.next_eligible_at IS NULL OR julianday(t.next_eligible_at)<=julianday(?))
 				AND t.attempt_count<? AND (COALESCE(CAST(json_extract(j.options_json,'$.max_in_flight_tasks') AS INTEGER),0)<=0 OR COALESCE(rn.cnt,0)<COALESCE(CAST(json_extract(j.options_json,'$.max_in_flight_tasks') AS INTEGER),0))
 				AND (?<=0 OR (SELECT COUNT(*) FROM tasks WHERE status='RUNNING')<?)
-				ORDER BY COALESCE(rn.cnt,0),r.started_at,t.run_id,t.task_index LIMIT 1`, nowS, policy.MaxAttempts, policy.MaxActiveTasks, policy.MaxActiveTasks)
+				AND (?='' OR COALESCE(NULLIF(json_extract(j.options_json,'$.worker_pool'),''),'`+DefaultWorkerPool+`')=?)
+				ORDER BY COALESCE(rn.cnt,0),r.started_at,t.run_id,t.task_index LIMIT 1`, nowS, policy.MaxAttempts, policy.MaxActiveTasks, policy.MaxActiveTasks, workerPool, workerPool)
 		var part string
 		var count int
 		var previousAttemptID, previousWorkerID string

@@ -2,6 +2,8 @@ package jobopts
 
 import (
 	"encoding/json"
+	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -17,6 +19,10 @@ const (
 type Options struct {
 	PartitionStrategy string `json:"partition_strategy"` // "single" (default) or "ordered_cursor"; legacy alias: int_range
 
+	// WorkerPool restricts the job's tasks, and therefore its credentials, to
+	// workers enrolled into this pool. Empty means "default".
+	WorkerPool string `json:"worker_pool,omitempty"`
+
 	// Auto-tuning (master-side). When enabled, the master may fill in missing (0)
 	// values for partitioning, fetch batch size, and effective concurrency.
 	AutoTune               bool   `json:"auto_tune"`
@@ -29,20 +35,20 @@ type Options struct {
 	MinTasksMultiplier int `json:"min_tasks_multiplier"`
 
 	// Ordered-cursor SQL extraction.
-	SourceMode   string `json:"source_mode,omitempty"` // "table" (default) or "query"
-	SourceName   string `json:"source_name,omitempty"`
-	Table        string `json:"table"`
-	Query        string `json:"query,omitempty"`
-	QueryHash    string `json:"query_hash,omitempty"`
-	WhereClause  string `json:"where_clause,omitempty"`
-	SelectColumns []string          `json:"select_columns,omitempty"` 
-	ColumnTypes   map[string]string `json:"column_types,omitempty"` 
-	RecordPath    string            `json:"record_path,omitempty"`
-	FileFormat    string            `json:"format,omitempty"`
-	CursorColumn string `json:"cursor_column,omitempty"`
-	CursorDomain string `json:"cursor_domain,omitempty"`
-	PlannedTasks int    `json:"planned_tasks,omitempty"`
-	PlannedTasksSource string `json:"planned_tasks_source,omitempty"`
+	SourceMode         string            `json:"source_mode,omitempty"` // "table" (default) or "query"
+	SourceName         string            `json:"source_name,omitempty"`
+	Table              string            `json:"table"`
+	Query              string            `json:"query,omitempty"`
+	QueryHash          string            `json:"query_hash,omitempty"`
+	WhereClause        string            `json:"where_clause,omitempty"`
+	SelectColumns      []string          `json:"select_columns,omitempty"`
+	ColumnTypes        map[string]string `json:"column_types,omitempty"`
+	RecordPath         string            `json:"record_path,omitempty"`
+	FileFormat         string            `json:"format,omitempty"`
+	CursorColumn       string            `json:"cursor_column,omitempty"`
+	CursorDomain       string            `json:"cursor_domain,omitempty"`
+	PlannedTasks       int               `json:"planned_tasks,omitempty"`
+	PlannedTasksSource string            `json:"planned_tasks_source,omitempty"`
 
 	// Legacy alias kept for older jobs/clients.
 	IDColumn string `json:"id_column,omitempty"`
@@ -112,6 +118,9 @@ func Parse(raw json.RawMessage) (Options, error) {
 	}
 	o.PartitionStrategy = o.NormalizedPartitionStrategy()
 	o.SourceMode = o.NormalizedSourceMode()
+	if o.WorkerPool = strings.TrimSpace(o.WorkerPool); o.WorkerPool != "" && !ValidWorkerPool(o.WorkerPool) {
+		return Options{}, fmt.Errorf("worker_pool %q is invalid: use 1-63 lowercase letters, digits, '-' or '_', starting with a letter or digit", o.WorkerPool)
+	}
 	if strings.TrimSpace(o.CursorColumn) == "" {
 		o.CursorColumn = strings.TrimSpace(o.IDColumn)
 	}
@@ -199,4 +208,11 @@ func (o Options) MergeInto(existing map[string]any) map[string]any {
 		delete(m, "consistency_mode")
 	}
 	return m
+}
+
+var workerPoolPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
+
+// ValidWorkerPool reports whether name is an acceptable worker pool name.
+func ValidWorkerPool(name string) bool {
+	return workerPoolPattern.MatchString(name)
 }

@@ -20,8 +20,29 @@ The system is ~75k lines, so I went deep on the control plane: master bootstrap,
 - `runs.registration_config_json` stores the Iceberg `RunConfig` as plain JSON. That includes the S3 `secret_access_key` and the catalog `bearer_token` ([icebergreg.go:78](internal/icebergreg/icebergreg.go:78)), and it bypasses the encryption entirely.
 - Every task assignment sends the source DSN and S3 keys to the worker ([server.go:958](internal/grpc/server.go:958)). `ORABBIT_GRPC_INSECURE` defaults to `true`, and every `.env.*.example` binds `0.0.0.0` with insecure gRPC. So in the documented deployment, credentials cross the network in cleartext.
 - Fix: default to TLS, and require it (ideally mTLS) whenever the listener is not loopback.
+**Status:** DONE
 
-**4. One shared worker token grants every credential.** Worker IDs are chosen by the client, and any holder of `ORABBIT_WORKER_AUTH_TOKEN` can call `RequestTask` and receive every source and target secret. At minimum, use per-worker identity (mTLS certs). Better: short-lived, scoped credentials (STS, presigned uploads) instead of long-lived keys.
+**4. Worker identity and task authorization are not strongly bound.**
+Workers currently present a caller-chosen worker_id, while authentication is based on shared credentials and generic mTLS trust. That means identity, authorization, and task ownership are not cleanly separated, and a compromised worker may impersonate another worker or receive credentials outside its intended scope.
+Fix:
+Introduce a durable, server-issued worker identity and bind it to the worker’s mTLS certificate. The master must derive the authenticated worker identity from the certificate and must not trust a request-provided worker ID for authorization. Use that identity for worker registration, heartbeats, leases, task ownership, and audit logs.
+Then add a second part:
+Reduce credential blast radius.
+Do not treat all workers as equally trusted for all credentials. Prefer task-scoped, short-lived credentials where supported:
+- S3: STS credentials scoped to the assigned bucket/prefix, or presigned operations
+- Databases: read-only or temporary credentials where supported
+- Fallback: long-lived credentials may be delivered only to the authenticated worker assigned that task, over mTLS
+So the task becomes two concrete phases:
+1. Worker identity redesign
+   - server-issued immutable UUID
+   - UUID embedded in certificate SAN
+   - master extracts identity from TLS context
+   - request worker_id is ignored or validated only as metadata
+   - leases / heartbeats / assignments use authenticated identity
+2. Task-scoped authorization
+   - only the assigned worker receives that task’s secrets
+   - S3 credentials should be scoped and temporary where possible
+   - no worker should receive credentials unrelated to its task
 
 **5. A panic in any gRPC handler crashes the master.** [server.go:1673](internal/grpc/server.go:1673) installs only the auth interceptor, and grpc-go does not recover panics. Add a recovery interceptor like the HTTP one, and set keepalive and max-message-size options.
 

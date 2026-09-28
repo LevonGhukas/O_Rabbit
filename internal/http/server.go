@@ -134,6 +134,7 @@ func (s *Server) Handler() http.Handler {
 	})
 
 	mux.HandleFunc("/workers", s.handleWorkers)
+	mux.HandleFunc("/workers/", s.handleWorkerRoutes)
 	mux.HandleFunc("/api/workers", s.handleWorkers)
 
 	mux.HandleFunc("/servers", s.handleServers)

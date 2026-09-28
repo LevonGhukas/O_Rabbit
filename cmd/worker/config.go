@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -21,8 +22,8 @@ type workerConfig struct {
 	InsecureGRPC         bool
 	TLSCAFile            string
 	TLSServerName        string
-	TLSCertFile          string
-	TLSKeyFile           string
+	IdentityDir          string
+	EnrollmentToken      string
 	WorkerAuthToken      string
 	Poll                 time.Duration
 	LogLevel             string
@@ -46,8 +47,8 @@ func loadWorkerConfigFromEnv() workerConfig {
 		InsecureGRPC:         false,
 		TLSCAFile:            "",
 		TLSServerName:        "",
-		TLSCertFile:          strings.TrimSpace(os.Getenv("ORABBIT_TLS_CERT_FILE")),
-		TLSKeyFile:           strings.TrimSpace(os.Getenv("ORABBIT_TLS_KEY_FILE")),
+		IdentityDir:          envutil.EnvOrDefault("ORABBIT_WORKER_IDENTITY_DIR", defaultIdentityDir()),
+		EnrollmentToken:      strings.TrimSpace(os.Getenv("ORABBIT_WORKER_ENROLLMENT_TOKEN")),
 		WorkerAuthToken:      strings.TrimSpace(os.Getenv("ORABBIT_WORKER_AUTH_TOKEN")),
 		Poll:                 2 * time.Second,
 		LogLevel:             envutil.EnvOrDefault("ORABBIT_LOG_LEVEL", "INFO"),
@@ -67,13 +68,13 @@ func loadWorkerConfigFromEnv() workerConfig {
 func newWorkerFlagSet(cfg *workerConfig) *flag.FlagSet {
 	fs := flag.NewFlagSet("worker", flag.ExitOnError)
 	fs.StringVar(&cfg.MasterAddr, "master", cfg.MasterAddr, "Master gRPC address")
-	fs.StringVar(&cfg.WorkerID, "worker-id", cfg.WorkerID, "Worker ID (optional; master can assign)")
+	fs.StringVar(&cfg.WorkerID, "worker-id", cfg.WorkerID, "Worker name (with TLS, a label recorded at enrollment; the master issues the worker ID)")
 	fs.StringVar(&cfg.WorkerAddr, "worker-addr", cfg.WorkerAddr, "Address advertised to master (for observability)")
 	fs.BoolVar(&cfg.InsecureGRPC, "insecure", cfg.InsecureGRPC, "Disable gRPC TLS (dev)")
 	fs.StringVar(&cfg.TLSCAFile, "tls-ca", cfg.TLSCAFile, "CA certificate file for master gRPC TLS")
 	fs.StringVar(&cfg.TLSServerName, "tls-server-name", cfg.TLSServerName, "Expected TLS server name (optional)")
-	fs.StringVar(&cfg.TLSCertFile, "tls-cert", cfg.TLSCertFile, "Worker client certificate for mutual TLS (or ORABBIT_TLS_CERT_FILE)")
-	fs.StringVar(&cfg.TLSKeyFile, "tls-key", cfg.TLSKeyFile, "Worker client private key for mutual TLS (or ORABBIT_TLS_KEY_FILE)")
+	fs.StringVar(&cfg.IdentityDir, "identity-dir", cfg.IdentityDir, "Directory holding the master-issued worker identity (or ORABBIT_WORKER_IDENTITY_DIR); keep it on persistent storage")
+	fs.StringVar(&cfg.EnrollmentToken, "enrollment-token", cfg.EnrollmentToken, "One-time enrollment token for the first start (prefer ORABBIT_WORKER_ENROLLMENT_TOKEN)")
 	fs.StringVar(&cfg.WorkerAuthToken, "worker-auth-token", cfg.WorkerAuthToken, "Bearer token for worker gRPC calls (or ORABBIT_WORKER_AUTH_TOKEN)")
 	fs.DurationVar(&cfg.Poll, "poll", cfg.Poll, "Poll interval when no tasks")
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level: DEBUG, INFO, WARN, ERROR (or ORABBIT_LOG_LEVEL)")
@@ -167,4 +168,13 @@ func parseWorkerLogFormat(raw string) (string, error) {
 	default:
 		return "", fmt.Errorf("invalid worker log format %q: use json or text", strings.TrimSpace(raw))
 	}
+}
+
+// defaultIdentityDir keeps the identity in the user's config directory so it
+// survives restarts and is not removed by workspace scavenging.
+func defaultIdentityDir() string {
+	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+		return filepath.Join(dir, "orabbit-worker")
+	}
+	return "worker-identity"
 }
