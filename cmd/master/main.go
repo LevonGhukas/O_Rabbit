@@ -145,6 +145,13 @@ func run() int {
 		log.Info("reconciled expired task leases", slog.Int("count", n))
 	}
 	reconcileCancel()
+	if abandoned, err := st.FailAbandonedPlanningRuns(leaderCtx, time.Now()); err != nil {
+		log.Error("fail abandoned planning runs", slog.String("err", err.Error()))
+		st.RecordLeadershipEvent(context.Background(), instanceID, lease.Epoch, "MASTER_RECOVERY_FAILED", map[string]any{"phase": "abandoned_planning_runs"})
+		return recoveryExitCode(ctx)
+	} else if len(abandoned) > 0 {
+		log.Warn("failed runs abandoned during planning", slog.Int("count", len(abandoned)), slog.Any("run_ids", abandoned))
+	}
 	registrationPolicy := db.RegistrationPolicy{LeaseDuration: 30 * time.Second, MaxAttempts: 5, BackoffBase: time.Second, BackoffMax: time.Minute}
 	if classified, err := st.ReconcileHistoricalRegistrations(leaderCtx, time.Now()); err != nil {
 		log.Error("classify historical registrations", slog.String("err", err.Error()))

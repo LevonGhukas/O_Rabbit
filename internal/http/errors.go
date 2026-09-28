@@ -95,7 +95,7 @@ func writeUnknownRoute(w http.ResponseWriter, path string) {
 func writePlannerFailure(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, planner.ErrDatasetBusy):
-		writeConflict(w, httperr.CodeDatasetBusy, "dataset is busy", nil)
+		writeConflict(w, httperr.CodeDatasetBusy, "dataset is busy", datasetBusyDetails(err))
 	case err != nil:
 		details := err.Error()
 		if cause := errors.Unwrap(err); cause != nil {
@@ -105,4 +105,21 @@ func writePlannerFailure(w http.ResponseWriter, err error) {
 	default:
 		writeInternalError(w, "internal server error")
 	}
+}
+
+// datasetBusyDetails tells the caller which run holds the dataset, so it can
+// wait for that run or cancel it explicitly before retrying.
+func datasetBusyDetails(err error) map[string]any {
+	var busy *planner.DatasetBusyError
+	if !errors.As(err, &busy) {
+		return nil
+	}
+	details := map[string]any{"dataset_prefix": busy.BasePrefix}
+	if busy.ActiveRunID != "" {
+		details["active_run_id"] = busy.ActiveRunID
+		details["active_job_id"] = busy.ActiveJobID
+		details["active_run_status"] = busy.ActiveStatus
+		details["hint"] = "wait for the active run to finish or cancel it with POST /runs/" + busy.ActiveRunID + "/cancel, then retry"
+	}
+	return details
 }

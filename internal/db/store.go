@@ -224,109 +224,47 @@ func wrapRunRegistrationConfigColumnErr(err error) error {
 	return err
 }
 
-func normalizeRunFailureReason(reason string) string {
-	if strings.TrimSpace(reason) == "" {
-		return "superseded"
-	}
-	return reason
-}
-
-func (s *Store) failRunIDs(ctx context.Context, runIDs []string, reason string) error {
-	if len(runIDs) == 0 {
-		return nil
-	}
-	now := nowUTC()
-	return withBusyRetry(ctx, func() error {
-		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+// FailAbandonedPlanningRuns fails runs left in PLANNING without any tasks.
+// Planning creates the run and inserts its tasks in one request, so such a
+// run was interrupted (for example by a master crash) and would otherwise hold
+// its dataset forever. Call it only during startup recovery, before the HTTP
+// API accepts new runs; a PLANNING run with tasks is a queued run and is kept.
+func (s *Store) FailAbandonedPlanningRuns(ctx context.Context, now time.Time) ([]string, error) {
+	var failed []string
+	err := s.withTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable}, func(tx *sql.Tx) error {
+		failed = failed[:0]
+		rows, err := tx.QueryContext(ctx, `SELECT id FROM runs r WHERE r.status='PLANNING' AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.run_id=r.id)`)
 		if err != nil {
 			return err
 		}
-		defer func() { _ = tx.Rollback() }()
-		for _, rid := range runIDs {
-			_, err = tx.ExecContext(ctx, `UPDATE tasks SET status='FAILED', error_message=?, finished_at=? WHERE run_id=? AND status IN ('PENDING','RUNNING');`, reason, now, rid)
-			if err != nil {
-				return err
-			}
-			_, err = tx.ExecContext(ctx, `UPDATE runs SET status='FAILED', finished_at=?, error_summary=? WHERE id=? AND status IN ('RUNNING','PLANNING');`, now, reason, rid)
-			if err != nil {
-				return err
-			}
-		}
-		return tx.Commit()
-	})
-}
-
-func (s *Store) FailAllRunningRuns(ctx context.Context, reason string) (int, error) {
-	reason = normalizeRunFailureReason(reason)
-	var runIDs []string
-	err := withBusyRetry(ctx, func() error {
-		ids := make([]string, 0)
-		rows, err := s.db.QueryContext(ctx, `SELECT id FROM runs WHERE status IN ('RUNNING','PLANNING');`)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
+				rows.Close()
 				return err
 			}
-			ids = append(ids, id)
+			failed = append(failed, id)
+		}
+		if err := rows.Close(); err != nil {
+			return err
 		}
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		runIDs = ids
-		return nil
-	})
-	if err != nil {
-		return 0, err
-	}
-	if len(runIDs) == 0 {
-		return 0, nil
-	}
-	if err := s.failRunIDs(ctx, runIDs, reason); err != nil {
-		return 0, err
-	}
-	return len(runIDs), nil
-}
-
-func (s *Store) FailRunningRunsForJob(ctx context.Context, jobID string, reason string) (int, error) {
-	if strings.TrimSpace(jobID) == "" {
-		return 0, nil
-	}
-	reason = normalizeRunFailureReason(reason)
-	var runIDs []string
-	err := withBusyRetry(ctx, func() error {
-		ids := make([]string, 0)
-		rows, err := s.db.QueryContext(ctx, `SELECT id FROM runs WHERE status IN ('RUNNING','PLANNING') AND job_id=?;`, jobID)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
+		const reason = "run planning was interrupted before tasks were created"
+		ts := now.UTC().Format(time.RFC3339Nano)
+		for _, id := range failed {
+			if _, err := tx.ExecContext(ctx, `UPDATE runs SET status='FAILED', finished_at=?, error_summary=? WHERE id=? AND status='PLANNING'`, ts, reason, id); err != nil {
 				return err
 			}
-			ids = append(ids, id)
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO events(id,run_id,ts,level,message,fields_json) VALUES(?,?,?,'ERROR',?,?)`,
+				"planning-abandoned-"+id, id, ts, "run FAILED", `{"event_type":"RUN_PLANNING_ABANDONED"}`); err != nil {
+				return err
+			}
 		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		runIDs = ids
 		return nil
 	})
-	if err != nil {
-		return 0, err
-	}
-	if len(runIDs) == 0 {
-		return 0, nil
-	}
-	if err := s.failRunIDs(ctx, runIDs, reason); err != nil {
-		return 0, err
-	}
-	return len(runIDs), nil
+	return failed, err
 }
 
 // --- Models

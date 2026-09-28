@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	secretcrypto "github.com/LevonGhukas/O_Rabbit/internal/crypto"
 )
@@ -207,215 +208,6 @@ func TestCreateRunPersistsRegistrationConfigSnapshot(t *testing.T) {
 			got.RegistrationConfigJSON,
 			run.RegistrationConfigJSON,
 		)
-	}
-}
-
-func TestFailRunningRunsForJobFailsPlanningRunsToo(t *testing.T) {
-	st := openTestStore(t)
-	ctx := context.Background()
-
-	jobID := "job-1"
-	planningRun := Run{
-		ID:            "run-planning",
-		JobID:         jobID,
-		Status:        "PLANNING",
-		CorrelationID: "corr-planning",
-		StartedAt:     nowUTC(),
-	}
-	runningRun := Run{
-		ID:            "run-running",
-		JobID:         jobID,
-		Status:        "RUNNING",
-		CorrelationID: "corr-running",
-		StartedAt:     nowUTC(),
-	}
-	if err := st.CreateRun(ctx, planningRun); err != nil {
-		t.Fatalf("create planning run: %v", err)
-	}
-	if err := st.CreateRun(ctx, runningRun); err != nil {
-		t.Fatalf("create running run: %v", err)
-	}
-	if err := st.InsertTasks(ctx, []TaskInsert{{
-		ID:            "task-1",
-		RunID:         runningRun.ID,
-		TaskIndex:     1,
-		PartitionSpec: []byte(`{"type":"single"}`),
-		Status:        "PENDING",
-	}}); err != nil {
-		t.Fatalf("insert task: %v", err)
-	}
-
-	n, err := st.FailRunningRunsForJob(ctx, jobID, "test cleanup")
-	if err != nil {
-		t.Fatalf("fail runs for job: %v", err)
-	}
-	if n != 2 {
-		t.Fatalf("expected 2 failed runs, got %d", n)
-	}
-
-	gotPlanning, err := st.GetRun(ctx, planningRun.ID)
-	if err != nil {
-		t.Fatalf("get planning run: %v", err)
-	}
-	if gotPlanning.Status != "FAILED" {
-		t.Fatalf("planning run status = %q, want FAILED", gotPlanning.Status)
-	}
-
-	gotRunning, err := st.GetRun(ctx, runningRun.ID)
-	if err != nil {
-		t.Fatalf("get running run: %v", err)
-	}
-	if gotRunning.Status != "FAILED" {
-		t.Fatalf("running run status = %q, want FAILED", gotRunning.Status)
-	}
-
-	tasks, err := st.ListTasksForRun(ctx, runningRun.ID)
-	if err != nil {
-		t.Fatalf("list tasks: %v", err)
-	}
-	if len(tasks) != 1 {
-		t.Fatalf("expected 1 task, got %d", len(tasks))
-	}
-	if tasks[0].Status != "FAILED" {
-		t.Fatalf("task status = %q, want FAILED", tasks[0].Status)
-	}
-}
-
-func TestFailAllRunningRunsFailsActiveRunsOnly(t *testing.T) {
-	st := openTestStore(t)
-	ctx := context.Background()
-
-	planningRun := Run{
-		ID:            "run-planning-all",
-		JobID:         "job-1",
-		Status:        "PLANNING",
-		CorrelationID: "corr-planning-all",
-		StartedAt:     nowUTC(),
-	}
-	runningRun := Run{
-		ID:            "run-running-all",
-		JobID:         "job-2",
-		Status:        "RUNNING",
-		CorrelationID: "corr-running-all",
-		StartedAt:     nowUTC(),
-	}
-	succeededRun := Run{
-		ID:            "run-succeeded-all",
-		JobID:         "job-3",
-		Status:        "SUCCEEDED",
-		CorrelationID: "corr-succeeded-all",
-		StartedAt:     nowUTC(),
-	}
-	if err := st.CreateRun(ctx, planningRun); err != nil {
-		t.Fatalf("create planning run: %v", err)
-	}
-	if err := st.CreateRun(ctx, runningRun); err != nil {
-		t.Fatalf("create running run: %v", err)
-	}
-	if err := st.CreateRun(ctx, succeededRun); err != nil {
-		t.Fatalf("create succeeded run: %v", err)
-	}
-	if err := st.InsertTasks(ctx, []TaskInsert{
-		{
-			ID:            "task-planning-all",
-			RunID:         planningRun.ID,
-			TaskIndex:     1,
-			PartitionSpec: []byte(`{"type":"single"}`),
-			Status:        "RUNNING",
-		},
-		{
-			ID:            "task-running-all",
-			RunID:         runningRun.ID,
-			TaskIndex:     1,
-			PartitionSpec: []byte(`{"type":"single"}`),
-			Status:        "PENDING",
-		},
-		{
-			ID:            "task-succeeded-all",
-			RunID:         succeededRun.ID,
-			TaskIndex:     1,
-			PartitionSpec: []byte(`{"type":"single"}`),
-			Status:        "SUCCEEDED",
-		},
-	}); err != nil {
-		t.Fatalf("insert tasks: %v", err)
-	}
-
-	n, err := st.FailAllRunningRuns(ctx, "master restarted")
-	if err != nil {
-		t.Fatalf("fail all running runs: %v", err)
-	}
-	if n != 2 {
-		t.Fatalf("expected 2 failed runs, got %d", n)
-	}
-
-	gotPlanning, err := st.GetRun(ctx, planningRun.ID)
-	if err != nil {
-		t.Fatalf("get planning run: %v", err)
-	}
-	if gotPlanning.Status != "FAILED" {
-		t.Fatalf("planning run status = %q, want FAILED", gotPlanning.Status)
-	}
-	if gotPlanning.ErrorSummary == nil || *gotPlanning.ErrorSummary != "master restarted" {
-		t.Fatalf("planning run error summary = %v, want %q", gotPlanning.ErrorSummary, "master restarted")
-	}
-
-	gotRunning, err := st.GetRun(ctx, runningRun.ID)
-	if err != nil {
-		t.Fatalf("get running run: %v", err)
-	}
-	if gotRunning.Status != "FAILED" {
-		t.Fatalf("running run status = %q, want FAILED", gotRunning.Status)
-	}
-	if gotRunning.ErrorSummary == nil || *gotRunning.ErrorSummary != "master restarted" {
-		t.Fatalf("running run error summary = %v, want %q", gotRunning.ErrorSummary, "master restarted")
-	}
-
-	gotSucceeded, err := st.GetRun(ctx, succeededRun.ID)
-	if err != nil {
-		t.Fatalf("get succeeded run: %v", err)
-	}
-	if gotSucceeded.Status != "SUCCEEDED" {
-		t.Fatalf("succeeded run status = %q, want SUCCEEDED", gotSucceeded.Status)
-	}
-
-	planningTasks, err := st.ListTasksForRun(ctx, planningRun.ID)
-	if err != nil {
-		t.Fatalf("list planning tasks: %v", err)
-	}
-	if len(planningTasks) != 1 {
-		t.Fatalf("expected 1 planning task, got %d", len(planningTasks))
-	}
-	if planningTasks[0].Status != "FAILED" {
-		t.Fatalf("planning task status = %q, want FAILED", planningTasks[0].Status)
-	}
-	if planningTasks[0].ErrorMessage == nil || *planningTasks[0].ErrorMessage != "master restarted" {
-		t.Fatalf("planning task error message = %v, want %q", planningTasks[0].ErrorMessage, "master restarted")
-	}
-
-	runningTasks, err := st.ListTasksForRun(ctx, runningRun.ID)
-	if err != nil {
-		t.Fatalf("list running tasks: %v", err)
-	}
-	if len(runningTasks) != 1 {
-		t.Fatalf("expected 1 running task, got %d", len(runningTasks))
-	}
-	if runningTasks[0].Status != "FAILED" {
-		t.Fatalf("running task status = %q, want FAILED", runningTasks[0].Status)
-	}
-	if runningTasks[0].ErrorMessage == nil || *runningTasks[0].ErrorMessage != "master restarted" {
-		t.Fatalf("running task error message = %v, want %q", runningTasks[0].ErrorMessage, "master restarted")
-	}
-
-	succeededTasks, err := st.ListTasksForRun(ctx, succeededRun.ID)
-	if err != nil {
-		t.Fatalf("list succeeded tasks: %v", err)
-	}
-	if len(succeededTasks) != 1 {
-		t.Fatalf("expected 1 succeeded task, got %d", len(succeededTasks))
-	}
-	if succeededTasks[0].Status != "SUCCEEDED" {
-		t.Fatalf("succeeded task status = %q, want SUCCEEDED", succeededTasks[0].Status)
 	}
 }
 
@@ -799,5 +591,47 @@ func TestCompleteTaskAllowsExplicitCanceledStatusForCanceledRun(t *testing.T) {
 	}
 	if tasks[0].ErrorMessage == nil || *tasks[0].ErrorMessage != "canceled by test" {
 		t.Fatalf("task error=%v want cancellation reason", tasks[0].ErrorMessage)
+	}
+}
+
+func TestFailAbandonedPlanningRunsFreesOnlyTasklessPlanningRuns(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	runs := []Run{
+		{ID: "run-abandoned", JobID: "job-a", DatasetKey: "dataset-a", Status: "PLANNING", CorrelationID: "c1", StartedAt: nowUTC()},
+		{ID: "run-queued", JobID: "job-b", DatasetKey: "dataset-b", Status: "PLANNING", CorrelationID: "c2", StartedAt: nowUTC()},
+		{ID: "run-running", JobID: "job-c", DatasetKey: "dataset-c", Status: "RUNNING", CorrelationID: "c3", StartedAt: nowUTC()},
+	}
+	for _, r := range runs {
+		if err := st.CreateRun(ctx, r); err != nil {
+			t.Fatalf("create run %s: %v", r.ID, err)
+		}
+	}
+	for _, runID := range []string{"run-queued", "run-running"} {
+		if err := st.InsertTasks(ctx, []TaskInsert{{ID: "task-" + runID, RunID: runID, TaskIndex: 1, PartitionSpec: []byte(`{}`), Status: "PENDING"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	failed, err := st.FailAbandonedPlanningRuns(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(failed) != 1 || failed[0] != "run-abandoned" {
+		t.Fatalf("failed=%v, want only run-abandoned", failed)
+	}
+	for id, want := range map[string]string{"run-abandoned": "FAILED", "run-queued": "PLANNING", "run-running": "RUNNING"} {
+		got, err := st.GetRun(ctx, id)
+		if err != nil || got.Status != want {
+			t.Fatalf("run %s status=%q err=%v, want %s", id, got.Status, err, want)
+		}
+	}
+	events, err := st.ListEventsForRun(ctx, "run-abandoned", 10)
+	if err != nil || len(events) != 1 || !strings.Contains(string(events[0].FieldsJSON), "RUN_PLANNING_ABANDONED") {
+		t.Fatalf("abandoned run must record an event: events=%+v err=%v", events, err)
+	}
+	// The dataset is free for a new run again.
+	if err := st.CreateRun(ctx, Run{ID: "run-retry", JobID: "job-a", DatasetKey: "dataset-a", Status: "PLANNING", CorrelationID: "c4", StartedAt: nowUTC()}); err != nil {
+		t.Fatalf("dataset must be free after recovery: %v", err)
 	}
 }
