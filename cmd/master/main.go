@@ -18,7 +18,22 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 )
 
+// Process exit codes. A supervisor restarts the master on any non-zero code.
+const (
+	exitOK      = 0 // requested shutdown (SIGINT/SIGTERM)
+	exitFailure = 1 // runtime or recovery failure, lost leadership, server error
+	exitConfig  = 2 // invalid configuration
+)
+
 func main() {
+	os.Exit(run())
+}
+
+// run starts the master and returns its exit code. Returning, rather than
+// calling os.Exit, lets deferred cleanup run on every path: the durable
+// leadership lease is released (so a restarted master can take over
+// immediately), the database is closed, and the singleton lock is released.
+func run() int {
 	cfg := loadMasterConfigFromEnv()
 	bindMasterFlags(&cfg)
 	flag.Parse()
@@ -27,11 +42,11 @@ func main() {
 	slog.SetDefault(log)
 	if err := cfg.validateLeasePolicy(); err != nil {
 		log.Error("invalid task lease configuration", slog.String("err", err.Error()))
-		os.Exit(2)
+		return exitConfig
 	}
 	if err := cfg.validateAuthentication(); err != nil {
 		log.Error("invalid control-plane authentication configuration", slog.String("err", err.Error()))
-		os.Exit(2)
+		return exitConfig
 	}
 
 	if cfg.Insecure && cfg.AllowInsecureRemoteGRPC && !isLoopbackListenAddress(cfg.GRPCAddr) {
@@ -42,11 +57,11 @@ func main() {
 	k, err := crypto.LoadMasterKeyFromEnv()
 	if err != nil {
 		log.Error("load master key", slog.String("err", err.Error()))
-		os.Exit(1)
+		return exitConfig
 	}
 	if k.IsZero() {
 		log.Error("ORABBIT_MASTER_KEY is required")
-		os.Exit(1)
+		return exitConfig
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -55,12 +70,12 @@ func main() {
 	instanceID, err := db.NewMasterInstanceID()
 	if err != nil {
 		log.Error("create master instance identity", slog.String("err", err.Error()))
-		os.Exit(1)
+		return exitFailure
 	}
 	processLock, err := db.AcquireMasterProcessLock(cfg.DBPath, instanceID)
 	if err != nil {
 		log.Error("acquire local master singleton lock", slog.String("err", err.Error()))
-		os.Exit(1)
+		return exitFailure
 	}
 	defer processLock.Close()
 	cfg.DBPath = processLock.DatabasePath
@@ -68,29 +83,29 @@ func main() {
 	st, err := db.Open(ctx, db.Config{Path: cfg.DBPath}, log)
 	if err != nil {
 		log.Error("open db", slog.String("err", err.Error()))
-		os.Exit(1)
+		return exitFailure
 	}
 	defer st.Close()
 
 	st.SetMasterKey(k)
 	if err := st.MigrateLegacySecrets(ctx, k); err != nil {
 		log.Error("migrate legacy secrets", slog.String("err", err.Error()))
-		os.Exit(1)
+		return exitFailure
 	}
 	st.SetMaxActiveRuns(cfg.MaxActiveRuns)
 	lease, err := st.AcquireLeadership(ctx, instanceID, cfg.LeadershipLeaseDuration, map[string]any{"pid": os.Getpid(), "database_identity": processLock.Identity})
 	if err != nil {
 		log.Error("acquire durable master leadership", slog.String("err", err.Error()))
-		os.Exit(1)
+		return exitFailure
 	}
 	if err := st.ActivateLeadershipFence(ctx, instanceID, lease.Epoch); err != nil {
 		log.Error("activate master mutation fence", slog.String("err", err.Error()))
-		os.Exit(1)
+		return exitFailure
 	}
 	leadership, err := db.NewLeadershipController(st, lease, cfg.LeadershipLeaseDuration, cfg.LeadershipRenewInterval, processLock.Identity)
 	if err != nil {
 		log.Error("configure master leadership", slog.String("err", err.Error()))
-		os.Exit(1)
+		return exitFailure
 	}
 	leaderCtx := leadership.Start(ctx)
 	defer leadership.Stop(context.Background())
@@ -103,7 +118,7 @@ func main() {
 		workerCA, err := grpcapi.LoadWorkerCA(ctx, st, k, time.Now())
 		if err != nil {
 			log.Error("load worker identity CA", slog.String("err", err.Error()))
-			os.Exit(1)
+			return exitFailure
 		}
 		grpcSrv.SetWorkerIdentity(workerCA, cfg.WorkerCertTTL)
 	}
@@ -119,13 +134,13 @@ func main() {
 		log.Error("reconcile committing runs", slog.String("err", err.Error()))
 		st.RecordLeadershipEvent(context.Background(), instanceID, lease.Epoch, "MASTER_RECOVERY_FAILED", map[string]any{"phase": "committing_runs"})
 		reconcileCancel()
-		return
+		return recoveryExitCode(ctx)
 	}
 	if n, err := grpcSrv.ExpireLeases(reconcileCtx); err != nil {
 		log.Error("reconcile expired task leases", slog.String("err", err.Error()))
 		st.RecordLeadershipEvent(context.Background(), instanceID, lease.Epoch, "MASTER_RECOVERY_FAILED", map[string]any{"phase": "task_leases"})
 		reconcileCancel()
-		return
+		return recoveryExitCode(ctx)
 	} else if n > 0 {
 		log.Info("reconciled expired task leases", slog.Int("count", n))
 	}
@@ -134,21 +149,21 @@ func main() {
 	if classified, err := st.ReconcileHistoricalRegistrations(leaderCtx, time.Now()); err != nil {
 		log.Error("classify historical registrations", slog.String("err", err.Error()))
 		st.RecordLeadershipEvent(context.Background(), instanceID, lease.Epoch, "MASTER_RECOVERY_FAILED", map[string]any{"phase": "historical_registrations"})
-		return
+		return recoveryExitCode(ctx)
 	} else if len(classified) > 0 {
 		log.Info("classified historical registrations", slog.Int("count", len(classified)))
 	}
 	if n, err := st.ExpireRegistrationAttempts(leaderCtx, time.Now(), registrationPolicy); err != nil {
 		log.Error("reconcile expired registration leases", slog.String("err", err.Error()))
 		st.RecordLeadershipEvent(context.Background(), instanceID, lease.Epoch, "MASTER_RECOVERY_FAILED", map[string]any{"phase": "registration_leases"})
-		return
+		return recoveryExitCode(ctx)
 	} else if n > 0 {
 		log.Info("reconciled expired registration leases", slog.Int("count", n))
 	}
 	if n, err := st.ExpireReconciliationAttempts(leaderCtx, time.Now(), time.Second, 5); err != nil {
 		log.Error("reconcile expired catalog-observation leases", slog.String("err", err.Error()))
 		st.RecordLeadershipEvent(context.Background(), instanceID, lease.Epoch, "MASTER_RECOVERY_FAILED", map[string]any{"phase": "catalog_reconciliation_leases"})
-		return
+		return recoveryExitCode(ctx)
 	} else if n > 0 {
 		log.Info("reconciled expired catalog-observation leases", slog.Int("count", n))
 	}
@@ -222,14 +237,18 @@ func main() {
 	httpSrv := httpapi.NewServer(log, st, bc, k, httpapi.StatusInfo{PID: os.Getpid(), HTTPAddr: cfg.HTTPAddr, GRPCAddr: cfg.GRPCAddr, DBPath: processLock.Identity}, cfg.HTTPAuthToken)
 	httpSrv.SetLeadershipGuard(leadership)
 	httpSrv.SetOperability(cfg.TaskMaxAttempts, grpcSrv)
+	// The servers stop when serveCtx ends: on shutdown, on lost leadership,
+	// or when the other server fails.
+	serveCtx, cancelServe := context.WithCancel(leaderCtx)
+	defer cancelServe()
 	go func() {
-		httpErr <- httpSrv.Serve(leaderCtx, cfg.HTTPAddr)
+		httpErr <- httpSrv.Serve(serveCtx, cfg.HTTPAddr)
 	}()
 
 	gcfg := grpcapi.Config{Addr: cfg.GRPCAddr, Insecure: cfg.Insecure, TLSCertFile: cfg.TLSCert, TLSKeyFile: cfg.TLSKey, WorkerAuthToken: cfg.WorkerAuthToken, HeartbeatInterval: 5 * time.Second}
 	grpcErr := make(chan error, 1)
 	go func() {
-		grpcErr <- grpcapi.ListenAndServe(leaderCtx, gcfg, grpcSrv)
+		grpcErr <- grpcapi.ListenAndServe(serveCtx, gcfg, grpcSrv)
 	}()
 
 	log.Info("master started",
@@ -247,21 +266,71 @@ func main() {
 		slog.Int64("leadership_epoch", lease.Epoch),
 	)
 
+	return awaitShutdown(ctx, leaderCtx, cancelServe, httpErr, grpcErr, log)
+}
+
+// recoveryExitCode is the exit code after a startup recovery step fails: a
+// failure caused by a requested shutdown is not an error.
+func recoveryExitCode(signalCtx context.Context) int {
+	if signalCtx.Err() != nil {
+		return exitOK
+	}
+	return exitFailure
+}
+
+// awaitShutdown blocks until the master must stop, then stops both servers
+// and waits for them to drain before returning the exit code. signalCtx ends
+// on SIGINT/SIGTERM; leaderCtx also ends when leadership is lost.
+func awaitShutdown(signalCtx, leaderCtx context.Context, stopServers context.CancelFunc, httpErr, grpcErr <-chan error, log *slog.Logger) int {
+	code := exitOK
+	httpDone, grpcDone := false, false
 	select {
 	case <-leaderCtx.Done():
-		log.Info("master leadership context stopped", slog.String("state", leadership.Status().State))
-		return
-	case err := <-httpErr:
-		if err != nil {
-			log.Error("http server stopped", slog.String("err", err.Error()))
-			os.Exit(1)
+		if signalCtx.Err() != nil {
+			log.Info("master shutting down", slog.String("reason", "signal"))
+		} else {
+			log.Error("master leadership lost; shutting down")
+			code = exitFailure
 		}
+	case err := <-httpErr:
+		httpDone = true
+		code = serverStopExitCode(log, "http", err, leaderCtx)
 	case err := <-grpcErr:
-		if err != nil {
-			log.Error("grpc server stopped", slog.String("err", err.Error()))
-			os.Exit(1)
+		grpcDone = true
+		code = serverStopExitCode(log, "grpc", err, leaderCtx)
+	}
+	stopServers()
+	for !httpDone || !grpcDone {
+		select {
+		case err := <-httpErr:
+			httpDone = true
+			if err != nil {
+				log.Warn("http server shutdown error", slog.String("err", err.Error()))
+			}
+		case err := <-grpcErr:
+			grpcDone = true
+			if err != nil {
+				log.Warn("grpc server shutdown error", slog.String("err", err.Error()))
+			}
 		}
 	}
+	log.Info("master stopped", slog.Int("exit_code", code))
+	return code
+}
+
+// serverStopExitCode classifies a server that stopped on its own. Servers
+// only return nil once their context ends, so a nil result while the master
+// should still be serving is also a failure.
+func serverStopExitCode(log *slog.Logger, name string, err error, leaderCtx context.Context) int {
+	if err != nil {
+		log.Error(name+" server stopped", slog.String("err", err.Error()))
+		return exitFailure
+	}
+	if leaderCtx.Err() == nil {
+		log.Error(name + " server stopped unexpectedly")
+		return exitFailure
+	}
+	return exitOK
 }
 
 type committingRunReconciler interface {
