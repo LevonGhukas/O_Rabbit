@@ -20,9 +20,10 @@ func PlanForLogicalType(name string, t typesystem.LogicalType) (ColumnPlan, type
 	if err != nil {
 		return ColumnPlan{}, typesystem.MappingResult{}, err
 	}
+	convertTarget := storageConversionTarget(t)
 	plan := ColumnPlan{Name: name, DataType: dataType, Builder: func(mem memory.Allocator) array.Builder { return array.NewBuilder(mem, dataType) }}
 	plan.Append = func(builder array.Builder, raw any) error {
-		canonical, err := typesystem.Convert(raw, t)
+		canonical, err := typesystem.Convert(raw, convertTarget)
 		if err != nil {
 			return err
 		}
@@ -44,6 +45,9 @@ func StorageArrowTypeForLogicalType(t typesystem.LogicalType) (arrow.DataType, t
 		}
 		return arrow.ListOf(element), typesystem.MappingFor(t, arrow.ListOf(element).String(), mapping.Class, mapping.Reason), nil
 	}
+	if t.Kind == typesystem.KindUInt32 {
+		return arrow.PrimitiveTypes.Int64, typesystem.MappingFor(t, "long", typesystem.MappingSafePromotion, "Iceberg long preserves the full uint32 range"), nil
+	}
 	if t.Kind == typesystem.KindUInt64 {
 		return arrow.BinaryTypes.String, typesystem.MappingFor(t, "string", typesystem.MappingSemanticFallback, "Iceberg long cannot represent full uint64 range"), nil
 	}
@@ -51,6 +55,22 @@ func StorageArrowTypeForLogicalType(t typesystem.LogicalType) (arrow.DataType, t
 		return arrow.BinaryTypes.String, typesystem.MappingFor(t, "string", typesystem.MappingSemanticFallback, "current Arrow-to-Iceberg bridge accepts timezone-aware timestamps only for UTC aliases"), nil
 	}
 	return ArrowTypeForLogicalType(t)
+}
+
+func storageConversionTarget(t typesystem.LogicalType) typesystem.LogicalType {
+	switch t.Kind {
+	case typesystem.KindUInt32:
+		target := typesystem.LogicalType{Kind: typesystem.KindInt64}
+		target.Nullable = t.Nullable
+		target.SourceTypeName = t.SourceTypeName
+		return target
+	case typesystem.KindArray:
+		if t.Element != nil {
+			element := storageConversionTarget(*t.Element)
+			t.Element = &element
+		}
+	}
+	return t
 }
 
 func storageUTCAlias(zone string) bool {
@@ -77,7 +97,18 @@ func appendLogicalValue(builder array.Builder, dataType arrow.DataType, value an
 	case *array.Int32Builder:
 		b.Append(value.(int32))
 	case *array.Int64Builder:
-		b.Append(value.(int64))
+		switch v := value.(type) {
+		case int64:
+			b.Append(v)
+		case uint32:
+			b.Append(int64(v))
+		case int32:
+			b.Append(int64(v))
+		case int:
+			b.Append(int64(v))
+		default:
+			return fmt.Errorf("int64 append: unexpected type %T", value)
+		}
 	case *array.Uint8Builder:
 		b.Append(value.(uint8))
 	case *array.Uint16Builder:
