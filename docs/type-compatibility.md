@@ -29,13 +29,13 @@ Planner: `internal/arrowio/postgres_to_arrow.go:planPostgresColumn`. It explicit
 
 ## MySQL / MariaDB
 
-Migration status: MySQL/MariaDB now use LogicalType and shared conversion. BIGINT UNSIGNED resolves to string storage; JSON is semantic fallback; ENUM/SET, spatial values, wide BIT, TIME durations, unconstrained decimal, and unknown types are explicit unknown fallback. Other engine sections remain legacy.
+Migration status: MySQL/MariaDB now use LogicalType and shared conversion. BIGINT UNSIGNED resolves to string storage; `INT UNSIGNED`, `INTEGER UNSIGNED`, and `MEDIUMINT UNSIGNED` map to `KindUInt32` and are safely promoted to Arrow `Int64` / Iceberg `long` because Iceberg has no unsigned integer types; JSON is semantic fallback; ENUM/SET, spatial values, wide BIT, TIME durations, unconstrained decimal, and unknown types are explicit unknown fallback. Other engine sections remain legacy.
 
 Planner: `internal/arrowio/mysql_to_arrow.go:planMySQLColumn`; MariaDB is dispatched to this same planner by `PlanForSQLColumn`.
 
 | Source types / aliases recognized | Arrow type | Value conversion / classification | Fallback and notes |
 | --- | --- | --- | --- |
-| `TINYINT`; `SMALLINT`; `MEDIUMINT`, `INT`, `INTEGER`; `BIGINT`; `YEAR`; `UNSIGNED`/`ZEROFILL` variants | Signed/unsigned 8, 16, 32, or 64-bit integer; `YEAR` -> `Int16` | Direct casts after broad integer parsing; Exact by declared width, but runtime narrowing is unchecked | `TINYINT(1)` (exact spelling) maps to `Bool` unless unsigned. |
+| `TINYINT`; `SMALLINT`; `MEDIUMINT`, `INT`, `INTEGER`; `BIGINT`; `YEAR`; `UNSIGNED`/`ZEROFILL` variants | Signed/unsigned 8, 16, 32, or 64-bit integer; `YEAR` -> `Int16`; `INT/MEDIUMINT UNSIGNED` -> `Int64` | Direct casts after broad integer parsing; Exact by declared width, except 32-bit unsigned promoted to `Int64` for Iceberg compatibility | `TINYINT(1)` (exact spelling) maps to `Bool` unless unsigned. `INT/MEDIUMINT/INTEGER UNSIGNED` promotes to `Int64` / Iceberg `long`. `BIGINT UNSIGNED` uses `String`. |
 | `BOOL`, `BOOLEAN`; `BIT(1)`; other `BIT` | `Bool`; `UInt64` | Boolean coercion or integer conversion; Exact / PotentiallyLossy | Other bit widths are widened to `UInt64`. |
 | `FLOAT`; `DOUBLE`, `DOUBLE PRECISION`, `REAL`; decimal aliases `DECIMAL`, `NUMERIC`, `DEC`, `FIXED` | `Float32`, `Float64`, `Decimal128` | Numeric/decimal text coercion; PotentiallyLossy where decimal precision exceeds 38 or narrow float is used | Invalid narrow/decimal values append null. |
 | `DATE`; `DATETIME`; `TIMESTAMP`; `TIME` | `Date32`; timestamp microseconds (UTC for `TIMESTAMP`); `Time64us` | Date/time conversion; PotentiallyLossy | Invalid temporal values append null. |
@@ -83,11 +83,11 @@ Migration status: ClickHouse now uses `LogicalTypeForClickHouseColumn -> PlanFor
 
 Planner: `internal/arrowio/clickhouse_to_arrow.go:planClickHouseColumn`. It unwraps outer `Nullable(...)` and `LowCardinality(...)` but schema nullability remains from source metadata rather than the type wrapper.
 
-Current migrated mappings: `UInt64` is logical `uint64` with string storage fallback; `Decimal256(s)` is logical `decimal(76,s)` with fallback. DateTime timezone arguments are preserved: UTC aliases resolve to native timestamptz, non-UTC zones resolve to string fallback. UUID/JSON are semantic fallbacks. ClickHouse `Time`/`Time64` are unknown fallback because they can be duration-like rather than canonical time-of-day. IPs, enums, tuples/maps/nested values, dynamic/variant/object values, wide integers, geo, aggregate/special, and unknown types are `unknown` lossless-string fallback.
+Current migrated mappings: `UInt32` is logical `uint32` with safe promotion to Arrow `Int64` / Iceberg `long` (`MappingSafePromotion`) because Iceberg has no unsigned integer types; `UInt64` is logical `uint64` with string storage fallback; `Decimal256(s)` is logical `decimal(76,s)` with fallback. DateTime timezone arguments are preserved: UTC aliases resolve to native timestamptz, non-UTC zones resolve to string fallback. UUID/JSON are semantic fallbacks. ClickHouse `Time`/`Time64` are unknown fallback because they can be duration-like rather than canonical time-of-day. IPs, enums, tuples/maps/nested values, dynamic/variant/object values, wide integers, geo, aggregate/special, and unknown types are `unknown` lossless-string fallback.
 
 | Source types / aliases recognized | Arrow type | Value conversion / classification | Fallback and notes |
 | --- | --- | --- | --- |
-| `UInt8`..`UInt64`, `Int8`..`Int64`; `Float32`, `BFloat16`, `Float64`; `Bool`, `Boolean` | Corresponding Arrow integer/float/bool | Broad runtime coercers; `BFloat16` -> `Float32` is SafePromotion | All narrow integer casts are unchecked. |
+| `UInt8`, `UInt16`, `UInt32`, `UInt64`, `Int8`..`Int64`; `Float32`, `BFloat16`, `Float64`; `Bool`, `Boolean` | Corresponding Arrow integer/float/bool, except `UInt32` -> `Int64` and `UInt64` -> `String` | Broad runtime coercers; `BFloat16` -> `Float32` and `UInt32` -> `Int64` are SafePromotion | `UInt32` is promoted to `Int64` / Iceberg `long` to avoid 32-bit signed overflow. `UInt64` resolves to `String`. |
 | `Decimal`, `Decimal32`, `Decimal64`, `Decimal128` | `Decimal128` precision 38 max | Decimal coercion; PotentiallyLossy if source capacity/scale does not fit | |
 | `Date`, `Date32`, `DateTime`, `DateTime64`, `Time`, `Time64` | `Date32`, timestamp microseconds, `Time64us` | Temporal conversion; PotentiallyLossy (microsecond target and explicit 1900–2299 clamp) | Invalid runtime values append null. |
 | `Array(T)` | `List<T>` | Recursive planner + slice/PG-array/JSON-array parser; SafePromotion | Invalid non-slice value appends a null list. |
@@ -176,7 +176,7 @@ Normal `nil` input is excluded. These non-null inputs append Arrow null and retu
 | File / converter | Target Arrow type | Non-null condition | Tested |
 | --- | --- | --- | --- |
 | `internal/arrowio/type_plan.go:planInt8`, `planInt16`, `planInt32` | narrow signed integer | `asInt64` rejects input (for example invalid numeric text or oversized `uint64`) | Added in `TestCurrentImplicitNullFallbacks`. |
-| `internal/arrowio/type_plan.go:planUint8`, `planUint16`, `planUint32` | narrow unsigned integer | `asUint64` rejects input (for example negative integer or invalid text) | Added in `TestCurrentImplicitNullFallbacks`. |
+| `internal/arrowio/type_plan.go:planUint8`, `planUint16` | narrow unsigned integer | `asUint64` rejects input (for example negative integer or invalid text) | Added in `TestCurrentImplicitNullFallbacks`. (`planUint32` now delegates to `PlanForLogicalType` with `Int64` promotion). |
 | `internal/arrowio/type_plan.go:planFloat32` | `Float32` | `asFloat64` rejects input | Added in `TestCurrentImplicitNullFallbacks`. |
 | `internal/arrowio/type_plan.go:planDate32`, `planTime64`, `planTimestampUs`, `planDecimal128`, `planList` | date, time, timestamp, decimal, list | Helper rejects input / list input is not a slice-like representation | Added in `TestCurrentImplicitNullFallbacks`. |
 | `internal/arrowio/mongo_to_arrow.go:mongoValueToArrowType` / `mongoBuilderFromArrowType` | inferred `Float64`, `Bool`, timestamp, decimal, binary | Later document value does not have the inferred compatible type, or decimal cannot parse | Added in `TestCurrentMongoIncompatibleValuesBecomeNull`. |
@@ -198,7 +198,7 @@ Several numeric helpers return `(0,false)` on failure (`asInt64`, `asUint64`, pa
 | File / function | Source domain -> target | Check before cast | Risk / tested |
 | --- | --- | --- | --- |
 | `internal/arrowio/type_plan.go:planInt8`, `planInt16`, `planInt32` | accepted `int64` -> narrow signed | No target-range check | Wrap/truncate. Tested in `TestCurrentUncheckedNarrowIntegerCastsWrap`. |
-| `internal/arrowio/type_plan.go:planUint8`, `planUint16`, `planUint32` | accepted `uint64` -> narrow unsigned | No target-range check | Wrap/truncate. Tested in `TestCurrentUncheckedNarrowIntegerCastsWrap`. |
+| `internal/arrowio/type_plan.go:planUint8`, `planUint16` | accepted `uint64` -> narrow unsigned | No target-range check | Wrap/truncate. Tested in `TestCurrentUncheckedNarrowIntegerCastsWrap`. (`planUint32` now safely promotes to `Int64`). |
 | `internal/arrowio/sql_to_arrow.go:asInt64` | `uint` -> `int64` | No `MaxInt64` check (unlike `uint64`) | On 64-bit platforms, high values can change sign; not separately tested because `uint` width is architecture-dependent. |
 | `internal/connectors/source.go:asInt64Value` | `uint` -> `int64` | No `MaxInt64` check | Same architecture-dependent sign risk; used for cursor encoding. |
 | `internal/connectors/cassandra.go:cassandraToDriverValue` | `uint64` -> `int64` | No check | Values above `MaxInt64` change sign before Arrow conversion; not unit-tested directly. |
