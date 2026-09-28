@@ -24,6 +24,10 @@ func (s *Store) MigrateLegacySecrets(ctx context.Context, k secretcrypto.Key) er
 			return fmt.Errorf("migrate server credentials: %w", err)
 		}
 
+		if err := migrateLegacyConfigVersions(ctx, tx, k); err != nil {
+			return fmt.Errorf("migrate config versions: %w", err)
+		}
+
 		return nil
 	})
 }
@@ -86,6 +90,80 @@ func migrateLegacyConnectionSecrets(
 		if _, err := tx.ExecContext(
 			ctx,
 			`UPDATE connections SET secret_enc_blob=? WHERE id=?`,
+			encrypted,
+			item.id,
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func migrateLegacyConfigVersions(
+	ctx context.Context,
+	tx *sql.Tx,
+	k secretcrypto.Key,
+) error {
+	rows, err := tx.QueryContext(
+		ctx,
+		`SELECT id, server_id, config_id, content_enc
+		 FROM config_versions
+		 WHERE length(content_enc) > 0`,
+	)
+	if err != nil {
+		return err
+	}
+
+	type configVersion struct {
+		id       string
+		serverID string
+		configID string
+		content  []byte
+	}
+
+	var items []configVersion
+
+	for rows.Next() {
+		var item configVersion
+
+		if err := rows.Scan(
+			&item.id,
+			&item.serverID,
+			&item.configID,
+			&item.content,
+		); err != nil {
+			rows.Close()
+			return err
+		}
+
+		items = append(items, item)
+	}
+
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, item := range items {
+		encrypted, migrated, err := secretcrypto.ReencryptLegacy(
+			k,
+			item.content,
+			configVersionAAD(item.serverID, item.configID),
+		)
+		if err != nil {
+			return fmt.Errorf("config version %s: %w", item.id, err)
+		}
+
+		if !migrated {
+			continue
+		}
+
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE config_versions SET content_enc=? WHERE id=?`,
 			encrypted,
 			item.id,
 		); err != nil {

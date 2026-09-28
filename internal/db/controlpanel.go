@@ -173,6 +173,13 @@ func DecryptServerCredential(k secretcrypto.Key, cred ServerCredential) (ServerC
 	return out, nil
 }
 
+func configVersionAAD(serverID, configID string) []byte {
+	return []byte(
+		"server:" + strings.TrimSpace(serverID) +
+			":config:" + strings.TrimSpace(configID),
+	)
+}
+
 func EncryptConfigVersionContent(k secretcrypto.Key, aad string, content []byte) ([]byte, error) {
 	if k.IsZero() {
 		return nil, ErrMasterKeyRequired
