@@ -1043,7 +1043,8 @@ func (s *Store) UpdateWorkerHeartbeat(ctx context.Context, bootID, workerID, add
 				VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
 				ON CONFLICT(boot_id) DO UPDATE SET
 					status='ACTIVE',
-					last_heartbeat=excluded.last_heartbeat;`,
+					last_heartbeat=excluded.last_heartbeat
+				WHERE worker_instances.worker_id=excluded.worker_id;`,
 				bootID, workerID, hostname, pid, version, now, now,
 			)
 			if err != nil {
@@ -1160,8 +1161,8 @@ func (s *Store) TouchWorkerHeartbeat(ctx context.Context, bootID, workerID strin
 
 		if bootID != "" {
 			_, err = tx.ExecContext(ctx, `
-				UPDATE worker_instances SET status='ACTIVE', last_heartbeat=? WHERE boot_id=?;`,
-				now, bootID)
+				UPDATE worker_instances SET status='ACTIVE', last_heartbeat=? WHERE boot_id=? AND worker_id=?;`,
+				now, bootID, workerID)
 			if err != nil {
 				return err
 			}

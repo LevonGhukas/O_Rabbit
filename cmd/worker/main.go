@@ -122,20 +122,41 @@ func main() {
 	cfg.LogFormat = normalizedFormat
 	slog.SetDefault(log)
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// With TLS the worker authenticates with its master-issued identity
+	// certificate, enrolling on first start; the master derives the worker ID
+	// from that certificate. Plaintext (loopback development) keeps the
+	// configured worker ID.
 	var transportCreds credentials.TransportCredentials
+	var identity *workerIdentity
 	if cfg.InsecureGRPC {
 		transportCreds = insecure.NewCredentials()
 	} else {
-		tlsCfg, err := grpcapi.ClientTLSConfig(cfg.TLSCAFile, cfg.TLSServerName, cfg.TLSCertFile, cfg.TLSKeyFile)
+		identity, err = loadWorkerIdentity(cfg.IdentityDir)
+		if err == nil && identity != nil && time.Now().After(identity.leaf().NotAfter) {
+			log.Warn("worker identity certificate expired; re-enrolling", slog.String("worker_id", identity.workerID()))
+			identity = nil
+		}
+		if err == nil && identity == nil {
+			identity, err = enrollWorker(ctx, log, cfg, cfg.IdentityDir)
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Error("worker identity unavailable", slog.String("err", err.Error()))
+			os.Exit(2)
+		}
+		tlsCfg, err := grpcapi.ClientTLSConfig(cfg.TLSCAFile, cfg.TLSServerName, identity.clientCertificate)
 		if err != nil {
 			log.Error("configure worker gRPC TLS", slog.String("err", err.Error()))
 			os.Exit(2)
 		}
 		transportCreds = credentials.NewTLS(tlsCfg)
+		cfg.WorkerID = identity.workerID()
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	repositoryRoot, _ := os.Getwd()
 	workspaceManager, err := workerworkspace.Open(workerworkspace.Config{
@@ -198,6 +219,9 @@ func main() {
 	defer conn.Close()
 
 	cp := grpcpb.NewControlPlaneClient(conn)
+	if identity != nil {
+		go identity.renewLoop(ctx, log, cp)
+	}
 
 	cap := map[string]any{
 		"go":                 runtime.Version(),
@@ -306,7 +330,7 @@ func main() {
 		capJSON, _ := json.Marshal(cap)
 
 		rtctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		tres, err := cp.RequestTask(rtctx, &grpcpb.RequestTaskRequest{WorkerId: cfg.WorkerID, CapabilitiesJson: string(capJSON), ProtocolVersion: 5})
+		tres, err := cp.RequestTask(rtctx, &grpcpb.RequestTaskRequest{WorkerId: cfg.WorkerID, CapabilitiesJson: string(capJSON), ProtocolVersion: grpcapi.WorkerProtocolVersion})
 		cancel()
 		if err != nil {
 			// When master is down, RequestTask will error quickly; back off and avoid log spam.
@@ -596,7 +620,11 @@ func executeTaskManaged(ctx context.Context, log *slog.Logger, cp grpcpb.Control
 	log.Info("workspace created", slog.String("task_id", t.TaskId), slog.String("attempt_id", t.AttemptId))
 	err = executeTaskWithBody(ctx, cp, workerID, t, realLeaseClock{}, func(taskCtx context.Context) error {
 		taskCtx = withWorkspaceDir(taskCtx, workspace.Path)
-		return executeTaskBody(taskCtx, log, cp, workerID, t, clients)
+		creds, err := fetchTaskCredentials(taskCtx, cp, workerID, t)
+		if err != nil {
+			return err
+		}
+		return executeTaskBody(withTaskCredentials(taskCtx, creds), log, cp, workerID, t, clients)
 	})
 	state := "COMPLETED"
 	if err != nil {
@@ -800,13 +828,11 @@ func executeTaskBody(ctx context.Context, log *slog.Logger, cp grpcpb.ControlPla
 	}()
 
 	s3Cfg := s3io.Config{
-		Endpoint:        t.S3Endpoint,
-		Region:          t.S3Region,
-		Bucket:          t.S3Bucket,
-		ForcePathStyle:  t.S3ForcePathStyle,
-		AccessKeyID:     t.S3AccessKeyId,
-		SecretAccessKey: t.S3SecretAccessKey,
-		SessionToken:    t.S3SessionToken,
+		Endpoint:       t.S3Endpoint,
+		Region:         t.S3Region,
+		Bucket:         t.S3Bucket,
+		ForcePathStyle: t.S3ForcePathStyle,
+		Credentials:    taskCredentialsFromContext(ctx).S3,
 	}
 	if err := checkTaskCancellation(ctx, log, cp, workerID, t, extracted.Rows, 0, extracted.ParquetBytes); err != nil {
 		return err
@@ -1046,7 +1072,7 @@ func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 		res.OutputPart = int64(t.TaskIndex)
 	}
 
-	src, ms, err := clients.SQLReader(ctx, sourceEngine, t.SourceDsn)
+	src, ms, err := clients.SQLReader(ctx, sourceEngine, taskCredentialsFromContext(ctx).SourceDSN)
 	res.DBConnectMS = ms
 	if err != nil {
 		return res, fmt.Errorf("open %s: %w", sourceEngine, err)
@@ -1130,7 +1156,7 @@ func extractFlightSQLTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 	}
 	res.OutputPart = int64(t.TaskIndex)
 
-	src, ms, err := clients.FlightSQL(ctx, t.SourceDsn)
+	src, ms, err := clients.FlightSQL(ctx, taskCredentialsFromContext(ctx).SourceDSN)
 	res.DBConnectMS = ms
 	if err != nil {
 		return res, fmt.Errorf("open flightsql: %w", err)
@@ -1191,7 +1217,7 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 	}
 	res.OutputPart = int64(t.TaskIndex)
 
-	src, ms, err := clients.DocumentReader(ctx, sourceEngine, t.SourceDsn)
+	src, ms, err := clients.DocumentReader(ctx, sourceEngine, taskCredentialsFromContext(ctx).SourceDSN)
 	res.DBConnectMS = ms
 	if err != nil {
 		return res, fmt.Errorf("open %s: %w", sourceEngine, err)
