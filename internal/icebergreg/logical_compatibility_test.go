@@ -93,6 +93,17 @@ func TestResolveStorageMappingKeepsDestinationsCompatible(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, compatible)
 
+	uint32Logical := typesystem.LogicalType{Kind: typesystem.KindUInt32}
+	resolvedUInt32, err := ResolveStorageMapping(uint32Logical)
+	require.NoError(t, err)
+	require.Equal(t, arrow.PrimitiveTypes.Int64, resolvedUInt32.ArrowType)
+	require.Equal(t, "long", resolvedUInt32.ExpectedIceberg.TypeName)
+	require.Equal(t, typesystem.MappingSafePromotion, resolvedUInt32.Class)
+	require.False(t, resolvedUInt32.Fallback)
+	compatible, err = ArrowTypeCompatibleWithIceberg(resolvedUInt32.ArrowType, resolvedUInt32.ExpectedIceberg)
+	require.NoError(t, err)
+	require.True(t, compatible)
+
 	for _, logical := range []typesystem.LogicalType{
 		typesystem.Decimal(39, 2),
 		{Kind: typesystem.KindUUID},
