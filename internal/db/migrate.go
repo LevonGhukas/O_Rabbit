@@ -36,6 +36,7 @@ var migrations = []migration{
 	{version: 21, sql: schemaV21},
 	{version: 22, sql: schemaV22},
 	{version: 23, sql: schemaV23},
+	{version: 24, sql: schemaV24},
 }
 
 const schemaV21 = `
@@ -44,6 +45,41 @@ ALTER TABLE iceberg_registrations ADD COLUMN retry_override_config_json TEXT NOT
 
 const schemaV22 = `
 ALTER TABLE iceberg_registrations ADD COLUMN manual_retry_budget INTEGER NOT NULL DEFAULT 0;
+`
+
+// schemaV24 adds master-issued worker identities. worker_ca holds the single
+// CA that signs worker certificates (its key sealed with ORABBIT_MASTER_KEY).
+// Enrollment tokens are stored only as SHA-256 digests.
+const schemaV24 = `
+CREATE TABLE IF NOT EXISTS worker_ca (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  cert_pem TEXT NOT NULL,
+  key_enc BLOB NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS worker_identities (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  hostname TEXT NOT NULL DEFAULT '',
+  pool TEXT NOT NULL,
+  status TEXT NOT NULL,
+  cert_serial TEXT NOT NULL,
+  cert_not_after TEXT NOT NULL,
+  enrollment_token_id TEXT NOT NULL,
+  enrolled_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_worker_identities_pool_status ON worker_identities(pool, status);
+CREATE TABLE IF NOT EXISTS worker_enrollment_tokens (
+  id TEXT PRIMARY KEY,
+  token_sha256 TEXT NOT NULL UNIQUE,
+  pool TEXT NOT NULL,
+  max_uses INTEGER NOT NULL,
+  use_count INTEGER NOT NULL DEFAULT 0,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 `
 
 const schemaV23 = `

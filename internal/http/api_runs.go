@@ -45,6 +45,9 @@ type runSubmitRequest struct {
 	Performance runSubmitPerformanceRequest `json:"performance"`
 	Iceberg     runSubmitIcebergRequest     `json:"iceberg"`
 	Consistency runSubmitConsistencyRequest `json:"consistency"`
+	// WorkerPool limits the run's tasks and credentials to workers enrolled
+	// into this pool. Empty means "default".
+	WorkerPool string `json:"worker_pool,omitempty"`
 }
 
 type runSubmitConsistencyRequest struct {
@@ -99,6 +102,7 @@ type existingJobRunRequest struct {
 }
 
 type validatedRunSubmitSpec struct {
+	WorkerPool              string
 	SourceEngine            string
 	SourceDSN               string
 	SourceMode              string
@@ -815,9 +819,14 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 	if icebergTable == "" {
 		icebergTable = icebergreg.DefaultTable(engine, sourceName)
 	}
+	workerPool := strings.TrimSpace(req.WorkerPool)
+	if workerPool != "" && !jobopts.ValidWorkerPool(workerPool) {
+		return validatedRunSubmitSpec{}, invalidSubmitField("worker_pool", "worker_pool must be 1-63 lowercase letters, digits, '-' or '_', starting with a letter or digit", nil)
+	}
 	// Build the spec once so every submit path carries the same source
 	// options (e.g. column_types); Iceberg only adds its own fields below.
 	spec := validatedRunSubmitSpec{
+		WorkerPool:              workerPool,
 		SourceEngine:            engine,
 		SourceDSN:               sourceDSN,
 		SourceMode:              sourceMode,
@@ -979,6 +988,10 @@ func buildFrontendJobRequest(spec validatedRunSubmitSpec, sourceConnectionID, ta
 		"select_columns":         spec.SelectColumns,
 		"column_types":           spec.ColumnTypes,
 	}
+	if spec.WorkerPool != "" {
+		options["worker_pool"] = spec.WorkerPool
+	}
+
 	if strings.TrimSpace(spec.RecordPath) != "" {
 		options["record_path"] = strings.TrimSpace(spec.RecordPath)
 	}

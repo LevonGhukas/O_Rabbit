@@ -38,15 +38,15 @@ func TestBuildParquetObjectPayloadsIncludesOptionalFields(t *testing.T) {
 func TestWorkerProtocolCompatibilityFailsClosed(t *testing.T) {
 	st := openGRPCTestStore(t)
 	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, nil)
-	for _, version := range []int32{0, 4, 6} {
+	for _, version := range []int32{0, 5, 7} {
 		_, err := srv.RequestTask(context.Background(), &grpcpb.RequestTaskRequest{WorkerId: "legacy", ProtocolVersion: version})
 		if status.Code(err) != codes.FailedPrecondition ||
-			!strings.Contains(err.Error(), "accepted version=5") ||
+			!strings.Contains(err.Error(), "accepted version=6") ||
 			!strings.Contains(err.Error(), "exact match required") {
 			t.Fatalf("version=%d error=%v", version, err)
 		}
 	}
-	if _, err := srv.RequestTask(context.Background(), &grpcpb.RequestTaskRequest{WorkerId: "current", ProtocolVersion: 5}); err != nil {
+	if _, err := srv.RequestTask(context.Background(), &grpcpb.RequestTaskRequest{WorkerId: "current", ProtocolVersion: WorkerProtocolVersion}); err != nil {
 		t.Fatalf("current protocol rejected: %v", err)
 	}
 }

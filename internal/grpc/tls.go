@@ -7,15 +7,14 @@ import (
 	"fmt"
 	"os"
 	"strings"
-
-	"google.golang.org/grpc/credentials"
 )
 
 // ServerTLSConfig builds the master's gRPC TLS configuration. When
-// clientCAFile is set, every worker must present a certificate signed by that
-// CA (mutual TLS); otherwise only the server is authenticated.
-func ServerTLSConfig(certFile, keyFile, clientCAFile string) (*tls.Config, error) {
-	certFile, keyFile, clientCAFile = strings.TrimSpace(certFile), strings.TrimSpace(keyFile), strings.TrimSpace(clientCAFile)
+// workerCAs is set, a client certificate is verified against it whenever one
+// is presented; the identity interceptor then requires one on every worker
+// RPC except enrollment.
+func ServerTLSConfig(certFile, keyFile string, workerCAs *x509.CertPool) (*tls.Config, error) {
+	certFile, keyFile = strings.TrimSpace(certFile), strings.TrimSpace(keyFile)
 	if certFile == "" || keyFile == "" {
 		return nil, errors.New("gRPC TLS requires both a certificate and a private key")
 	}
@@ -27,23 +26,19 @@ func ServerTLSConfig(certFile, keyFile, clientCAFile string) (*tls.Config, error
 		MinVersion:   tls.VersionTLS12,
 		Certificates: []tls.Certificate{cert},
 	}
-	if clientCAFile != "" {
-		pool, err := loadCertPool(clientCAFile)
-		if err != nil {
-			return nil, fmt.Errorf("load gRPC client CA: %w", err)
-		}
-		cfg.ClientCAs = pool
-		cfg.ClientAuth = tls.RequireAndVerifyClientCert
+	if workerCAs != nil {
+		cfg.ClientCAs = workerCAs
+		cfg.ClientAuth = tls.VerifyClientCertIfGiven
 	}
 	return cfg, nil
 }
 
 // ClientTLSConfig builds a worker's gRPC TLS configuration. caFile pins the
-// CA that signed the master certificate (system roots when empty); certFile
-// and keyFile provide the worker's client certificate for mutual TLS and must
-// be set together.
-func ClientTLSConfig(caFile, serverName, certFile, keyFile string) (*tls.Config, error) {
-	caFile, certFile, keyFile = strings.TrimSpace(caFile), strings.TrimSpace(certFile), strings.TrimSpace(keyFile)
+// CA that signed the master certificate (system roots when empty).
+// clientCert, when set, supplies the worker identity certificate for each
+// handshake, so a renewed certificate is used on the next connection.
+func ClientTLSConfig(caFile, serverName string, clientCert func() (*tls.Certificate, error)) (*tls.Config, error) {
+	caFile = strings.TrimSpace(caFile)
 	cfg := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		ServerName: strings.TrimSpace(serverName),
@@ -55,25 +50,12 @@ func ClientTLSConfig(caFile, serverName, certFile, keyFile string) (*tls.Config,
 		}
 		cfg.RootCAs = pool
 	}
-	if (certFile == "") != (keyFile == "") {
-		return nil, errors.New("worker client certificate and key must be set together")
-	}
-	if certFile != "" {
-		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
-			return nil, fmt.Errorf("load worker client certificate: %w", err)
+	if clientCert != nil {
+		cfg.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return clientCert()
 		}
-		cfg.Certificates = []tls.Certificate{cert}
 	}
 	return cfg, nil
-}
-
-func serverTransportCredentials(cfg Config) (credentials.TransportCredentials, error) {
-	tlsCfg, err := ServerTLSConfig(cfg.TLSCertFile, cfg.TLSKeyFile, cfg.TLSClientCAFile)
-	if err != nil {
-		return nil, err
-	}
-	return credentials.NewTLS(tlsCfg), nil
 }
 
 func loadCertPool(path string) (*x509.CertPool, error) {

@@ -27,6 +27,9 @@ func (c masterConfig) validateLeasePolicy() error {
 	if c.MaxActiveRuns <= 0 || c.MaxActiveTasks <= 0 || c.CatalogWorkLimit <= 0 || c.UploadCapacityLimit <= 0 {
 		return fmt.Errorf("global active-run, active-task, catalog-work, and upload-capacity limits must be positive")
 	}
+	if c.WorkerCertTTL < time.Hour || c.WorkerCertTTL > 30*24*time.Hour {
+		return fmt.Errorf("worker certificate TTL must be between 1h and 720h")
+	}
 	if c.UploadCapacityLeaseTTL < 3*time.Second {
 		return fmt.Errorf("upload capacity lease TTL must be at least 3s")
 	}
@@ -73,15 +76,6 @@ func (c masterConfig) validateAuthentication() error {
 		if strings.TrimSpace(c.TLSKey) == "" {
 			return fmt.Errorf("gRPC TLS requires ORABBIT_TLS_KEY_FILE")
 		}
-		// Task assignments carry source and target credentials, so a reachable
-		// listener must authenticate workers cryptographically, not only by the
-		// shared bearer token.
-		if grpcRemote && strings.TrimSpace(c.TLSClientCA) == "" {
-			return fmt.Errorf(
-				"remote gRPC listen address %q requires mutual TLS; set ORABBIT_TLS_CLIENT_CA_FILE",
-				c.GRPCAddr,
-			)
-		}
 	}
 
 	if !isLoopbackListenAddress(c.HTTPAddr) && strings.TrimSpace(c.HTTPAuthToken) == "" {
@@ -116,6 +110,9 @@ type masterConfig struct {
 	IceBin          string
 
 	Insecure bool
+	// WorkerCertTTL is the lifetime of master-issued worker certificates.
+	// Workers renew at two thirds of it; revocation takes effect immediately.
+	WorkerCertTTL time.Duration
 	// AllowInsecureRemoteGRPC is an explicit opt-in for plaintext gRPC on a
 	// non-loopback listener inside an isolated private network (for example a
 	// single-host Docker network). Task assignments carry source and target
@@ -123,7 +120,6 @@ type masterConfig struct {
 	AllowInsecureRemoteGRPC bool
 	TLSCert                 string
 	TLSKey                  string
-	TLSClientCA             string
 
 	LogLevel                          string
 	LogFormat                         string
@@ -160,7 +156,7 @@ func loadMasterConfigFromEnv() masterConfig {
 		AllowInsecureRemoteGRPC:           envBoolDefault("ORABBIT_GRPC_ALLOW_INSECURE_REMOTE", false),
 		TLSCert:                           strings.TrimSpace(os.Getenv("ORABBIT_TLS_CERT_FILE")),
 		TLSKey:                            strings.TrimSpace(os.Getenv("ORABBIT_TLS_KEY_FILE")),
-		TLSClientCA:                       strings.TrimSpace(os.Getenv("ORABBIT_TLS_CLIENT_CA_FILE")),
+		WorkerCertTTL:                     envDurationDefault("ORABBIT_WORKER_CERT_TTL", 24*time.Hour),
 		LogLevel:                          envutil.EnvOrDefault("ORABBIT_LOG_LEVEL", "INFO"),
 		LogFormat:                         envutil.EnvOrDefault("ORABBIT_LOG_FORMAT", "json"),
 		TaskLeaseDuration:                 envDurationDefault("ORABBIT_TASK_LEASE_DURATION", 30*time.Second),
@@ -196,7 +192,7 @@ func bindMasterFlags(cfg *masterConfig) {
 	flag.BoolVar(&cfg.AllowInsecureRemoteGRPC, "allow-insecure-remote-grpc", cfg.AllowInsecureRemoteGRPC, "Permit plaintext gRPC on a non-loopback listener (isolated private networks only)")
 	flag.StringVar(&cfg.TLSCert, "tls-cert", cfg.TLSCert, "gRPC TLS cert file (or ORABBIT_TLS_CERT_FILE)")
 	flag.StringVar(&cfg.TLSKey, "tls-key", cfg.TLSKey, "gRPC TLS key file (or ORABBIT_TLS_KEY_FILE)")
-	flag.StringVar(&cfg.TLSClientCA, "tls-client-ca", cfg.TLSClientCA, "CA file for verifying worker client certificates; enables mutual TLS (or ORABBIT_TLS_CLIENT_CA_FILE; required for non-loopback gRPC)")
+	flag.DurationVar(&cfg.WorkerCertTTL, "worker-cert-ttl", cfg.WorkerCertTTL, "Lifetime of master-issued worker identity certificates (1h-720h)")
 	flag.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level: DEBUG, INFO, WARN, ERROR")
 	flag.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "Log format: json or text")
 	flag.DurationVar(&cfg.TaskLeaseDuration, "task-lease-duration", cfg.TaskLeaseDuration, "Task attempt lease duration")

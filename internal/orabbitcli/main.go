@@ -74,9 +74,7 @@ func cmdStart(ctx context.Context, args []string) int {
 	tlsKey := fs.String("tls-key", "", "Master gRPC TLS key file (required when -insecure=false and starting master)")
 	tlsCA := fs.String("tls-ca", "", "Worker CA cert for master gRPC TLS (optional)")
 	tlsServerName := fs.String("tls-server-name", "", "Expected server name for worker gRPC TLS (optional)")
-	tlsClientCA := fs.String("tls-client-ca", "", "CA that signs worker client certificates; enables master mutual TLS (required for non-loopback gRPC)")
-	tlsWorkerCert := fs.String("tls-worker-cert", "", "Worker client certificate for mutual TLS (optional)")
-	tlsWorkerKey := fs.String("tls-worker-key", "", "Worker client private key for mutual TLS (optional)")
+	workerEnrollmentToken := fs.String("worker-enrollment-token", "", "Enrollment token for TLS workers that have no identity yet; create one with max_uses >= --count (prefer ORABBIT_WORKER_ENROLLMENT_TOKEN)")
 
 	count := fs.Int("count", 1, "Worker process count")
 	insecure := fs.Bool("insecure", true, "Disable gRPC TLS (dev)")
@@ -113,9 +111,9 @@ func cmdStart(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "starting master with TLS requires both --tls-cert and --tls-key")
 		return exitUsage
 	}
-	if startWorker && (strings.TrimSpace(*tlsWorkerCert) == "") != (strings.TrimSpace(*tlsWorkerKey) == "") {
-		fmt.Fprintln(os.Stderr, "--tls-worker-cert and --tls-worker-key must be set together")
-		return exitUsage
+	if v := strings.TrimSpace(*workerEnrollmentToken); startWorker && v != "" {
+		// Hand the token to child workers through the environment, never argv.
+		_ = os.Setenv("ORABBIT_WORKER_ENROLLMENT_TOKEN", v)
 	}
 
 	parentCtx := ctx
@@ -140,7 +138,7 @@ func cmdStart(ctx context.Context, args []string) int {
 			}
 			out.infof("starting master at http=%s grpc=%s", httpURL, grpcTarget)
 			out.debugf("using master binary %s", managedMasterBin)
-			masterProc, err = supervisor.startMaster(ctx, ctx, managedMasterBin, *dbPath, *httpAddr, *grpcAddr, *insecure, *tlsCert, *tlsKey, *tlsClientCA)
+			masterProc, err = supervisor.startMaster(ctx, ctx, managedMasterBin, *dbPath, *httpAddr, *grpcAddr, *insecure, *tlsCert, *tlsKey)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				return exitCode(err)
@@ -201,8 +199,6 @@ func cmdStart(ctx context.Context, args []string) int {
 					LogFormat:     *workerLogFormat,
 					TLSCA:         *tlsCA,
 					TLSServerName: *tlsServerName,
-					TLSCert:       *tlsWorkerCert,
-					TLSKey:        *tlsWorkerKey,
 				})
 				if err != nil {
 					select {
@@ -476,7 +472,7 @@ func cmdRunInteractive(ctx context.Context, args []string) int {
 			}
 			out.infof("starting local master at %s", cfg.HTTPBase)
 			out.debugf("using master binary %s", managedMasterBin)
-			masterProc, err := supervisor.startMaster(context.TODO(), runCtx, managedMasterBin, cfg.DBPath, *httpAddr, *grpcAddr, true, "", "", "")
+			masterProc, err := supervisor.startMaster(context.TODO(), runCtx, managedMasterBin, cfg.DBPath, *httpAddr, *grpcAddr, true, "", "")
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				return exitCode(err)

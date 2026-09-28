@@ -33,6 +33,8 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
 	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
+	"github.com/LevonGhukas/O_Rabbit/internal/workeridentity"
+	"github.com/aws/aws-sdk-go-v2/aws"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -40,6 +42,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
 	grpcstatus "google.golang.org/grpc/status"
 )
 
@@ -49,7 +52,6 @@ type Config struct {
 	Insecure          bool
 	TLSCertFile       string
 	TLSKeyFile        string
-	TLSClientCAFile   string
 	WorkerAuthToken   string
 	HeartbeatInterval time.Duration
 }
@@ -140,6 +142,9 @@ type Server struct {
 	catalogWorkSlots           chan struct{}
 	uploadCapacityLimit        int
 	uploadCapacityLeaseTTL     time.Duration
+	workerCA                   *workeridentity.CA
+	workerCertTTL              time.Duration
+	assumeRoleFn               func(context.Context, stsRequest) (aws.Credentials, error)
 }
 
 type multipartCleaner interface {
@@ -154,7 +159,11 @@ type canceledObjectCleaner interface {
 	DeleteExactObject(context.Context, string, string) error
 }
 
-const workerProtocolVersion = 5
+// WorkerProtocolVersion is the worker/master protocol revision. Version 6
+// moved task secrets from TaskAssignment to GetTaskCredentials.
+const WorkerProtocolVersion = 6
+
+const workerProtocolVersion = WorkerProtocolVersion
 
 // buildParquetObjectPayloads constructs the task's Parquet object metadata in one pass.
 // rows and bytes remain task totals copied onto each object, not per-object metrics.
@@ -215,6 +224,8 @@ func NewServer(log *slog.Logger, st *db.Store, bc *httpapi.Broadcaster, k crypto
 	s.newCanceledObjectCleanerFn = func(ctx context.Context, cfg s3io.Config) (canceledObjectCleaner, error) {
 		return s3io.New(ctx, cfg)
 	}
+	s.workerCertTTL = 24 * time.Hour
+	s.assumeRoleFn = assumeRoleWithSTS
 	return s
 }
 
@@ -320,7 +331,13 @@ func (s *Server) RequestTask(ctx context.Context, req *grpcpb.RequestTaskRequest
 		return nil, err
 	}
 
-	t, ok, err := s.st.AssignNextPendingTaskWithLease(ctx, req.BootId, req.WorkerId, s.nowFn(), s.leasePolicy, s.attemptIDFn, s.fencingTokenFn)
+	// Authenticated workers only receive tasks, and so credentials, of jobs in
+	// their own pool. Unauthenticated development workers are unrestricted.
+	pool := ""
+	if worker, ok := authenticatedWorkerFrom(ctx); ok {
+		pool = worker.Pool
+	}
+	t, ok, err := s.st.AssignNextPendingTaskInPool(ctx, req.BootId, req.WorkerId, pool, s.nowFn(), s.leasePolicy, s.attemptIDFn, s.fencingTokenFn)
 	if err != nil {
 		return nil, err
 	}
@@ -974,27 +991,8 @@ func (s *Server) buildAssignment(ctx context.Context, t db.Task) (*grpcpb.TaskAs
 		return nil, err
 	}
 
-	srcSecret, err := crypto.Decrypt(s.k, srcConn.SecretEncBlob, []byte(srcConn.ID))
-	if err != nil {
-		return nil, err
-	}
-	tgtSecret, err := crypto.Decrypt(s.k, tgtConn.SecretEncBlob, []byte(tgtConn.ID))
-	if err != nil {
-		return nil, err
-	}
-
-	// Secrets are JSON; decode minimal expected fields.
-	var src map[string]any
-	_ = json.Unmarshal(srcSecret, &src)
-	var tgt map[string]any
-	_ = json.Unmarshal(tgtSecret, &tgt)
-
-	sourceDSN, _ := src["dsn"].(string)
-	accessKey, _ := tgt["access_key_id"].(string)
-	secretKey, _ := tgt["secret_access_key"].(string)
-	sessionToken, _ := tgt["session_token"].(string)
-
-	// Target metadata for S3.
+	// Credentials are not part of the assignment; the leaseholder fetches
+	// them with GetTaskCredentials.
 	var tgtMeta map[string]any
 	_ = json.Unmarshal(tgtConn.MetadataJSON, &tgtMeta)
 	endpoint, _ := tgtMeta["endpoint"].(string)
@@ -1029,16 +1027,12 @@ func (s *Server) buildAssignment(ctx context.Context, t db.Task) (*grpcpb.TaskAs
 		LeaseDeadlineUnixMs: func() int64 { tm, _ := time.Parse(time.RFC3339Nano, t.LeaseDeadline); return tm.UnixMilli() }(),
 		PartitionSpecJson:   string(t.PartitionSpec),
 		SourceEngine:        srcConn.Engine,
-		SourceDsn:           sourceDSN,
 		SourceSql:           job.SourceSQL,
 		S3Endpoint:          endpoint,
 		S3Region:            region,
 		S3Bucket:            bucket,
 		S3Prefix:            outPrefix,
 		S3ForcePathStyle:    forcePathStyle,
-		S3AccessKeyId:       accessKey,
-		S3SecretAccessKey:   secretKey,
-		S3SessionToken:      sessionToken,
 		TargetFileBytes:     opts.TargetFileBytes,
 		PartitionKeys:       opts.PartitionKeys,
 	}, nil
@@ -1659,22 +1653,38 @@ func ListenAndServe(ctx context.Context, cfg Config, srv *Server) error {
 	if err != nil {
 		return err
 	}
+	return Serve(ctx, lis, cfg, srv)
+}
+
+// Serve runs the control-plane gRPC server on lis until ctx is canceled.
+func Serve(ctx context.Context, lis net.Listener, cfg Config, srv *Server) error {
 
 	var creds credentials.TransportCredentials
 	if cfg.Insecure {
 		creds = insecure.NewCredentials()
 	} else {
-		c, err := serverTransportCredentials(cfg)
+		if srv.workerCA == nil {
+			_ = lis.Close()
+			return errors.New("gRPC TLS requires the worker identity CA; call SetWorkerIdentity")
+		}
+		tlsCfg, err := ServerTLSConfig(cfg.TLSCertFile, cfg.TLSKeyFile, srv.workerCA.Pool())
 		if err != nil {
 			_ = lis.Close()
 			return err
 		}
-		creds = c
+		creds = credentials.NewTLS(tlsCfg)
 	}
 
 	g := grpc.NewServer(
 		grpc.Creds(creds),
-		grpc.UnaryInterceptor(workerAuthUnaryServerInterceptor(cfg.WorkerAuthToken)),
+		grpc.ChainUnaryInterceptor(
+			workerAuthUnaryServerInterceptor(cfg.WorkerAuthToken),
+			srv.workerIdentityUnaryInterceptor(!cfg.Insecure),
+		),
+		// Bounded connection age makes workers re-handshake periodically, so a
+		// renewed identity certificate replaces the one a connection was
+		// opened with. The grace period covers long-running result RPCs.
+		grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: time.Hour, MaxConnectionAgeGrace: 35 * time.Minute}),
 	)
 	grpcpb.RegisterControlPlaneServer(g, srv)
 	healthSrv := health.NewServer()

@@ -16,7 +16,6 @@ func TestValidateAuthentication(t *testing.T) {
 		allowRemote bool
 		tlsCert     string
 		tlsKey      string
-		clientCA    string
 		wantErr     string
 	}{
 		{
@@ -84,25 +83,15 @@ func TestValidateAuthentication(t *testing.T) {
 			wantErr:     "requires ORABBIT_WORKER_AUTH_TOKEN",
 		},
 		{
-			name:        "remote tls grpc without client ca",
+			name:        "remote tls grpc",
 			http:        "127.0.0.1:9100",
 			grpc:        "0.0.0.0:9102",
 			workerToken: "worker-secret",
 			tlsCert:     "server.crt",
 			tlsKey:      "server.key",
-			wantErr:     "requires mutual TLS",
 		},
 		{
-			name:        "remote mutual tls grpc",
-			http:        "127.0.0.1:9100",
-			grpc:        "0.0.0.0:9102",
-			workerToken: "worker-secret",
-			tlsCert:     "server.crt",
-			tlsKey:      "server.key",
-			clientCA:    "worker-ca.crt",
-		},
-		{
-			name:    "loopback tls grpc without client ca",
+			name:    "loopback tls grpc",
 			http:    "127.0.0.1:9100",
 			grpc:    "127.0.0.1:9102",
 			tlsCert: "server.crt",
@@ -128,7 +117,6 @@ func TestValidateAuthentication(t *testing.T) {
 				AllowInsecureRemoteGRPC: tc.allowRemote,
 				TLSCert:                 tc.tlsCert,
 				TLSKey:                  tc.tlsKey,
-				TLSClientCA:             tc.clientCA,
 			}
 			err := cfg.validateAuthentication()
 			if tc.wantErr == "" && err != nil {

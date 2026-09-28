@@ -35,6 +35,10 @@ type Config struct {
 	AccessKeyID     string
 	SecretAccessKey string
 	SessionToken    string
+
+	// Credentials, when set, replaces the static keys above, for example with
+	// temporary credentials that are refreshed before they expire.
+	Credentials aws.CredentialsProvider
 }
 
 type objectClient interface {
@@ -96,12 +100,17 @@ func New(ctx context.Context, cfg Config) (*Uploader, error) {
 		return nil, fmt.Errorf("missing bucket")
 	}
 
-	creds := credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, cfg.SessionToken)
+	var creds aws.CredentialsProvider = credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, cfg.SessionToken)
+	if cfg.Credentials != nil {
+		creds = cfg.Credentials
+	}
 
 	awsCfg := aws.Config{
-		Region:      cfg.Region,
-		Credentials: aws.NewCredentialsCache(creds),
-		HTTPClient:  awshttp.NewBuildableClient(),
+		Region: cfg.Region,
+		Credentials: aws.NewCredentialsCache(creds, func(o *aws.CredentialsCacheOptions) {
+			o.ExpiryWindow = 5 * time.Minute
+		}),
+		HTTPClient: awshttp.NewBuildableClient(),
 	}
 
 	if strings.TrimSpace(cfg.Endpoint) != "" {

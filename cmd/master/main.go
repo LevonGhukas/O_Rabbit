@@ -99,6 +99,14 @@ func main() {
 
 	icebergMgr := icebergreg.NewManager(log, icebergreg.ManagerConfig{IceBinary: cfg.IceBin})
 	grpcSrv := grpcapi.NewServer(log, st, bc, k, 5*time.Second, icebergMgr)
+	if !cfg.Insecure {
+		workerCA, err := grpcapi.LoadWorkerCA(ctx, st, k, time.Now())
+		if err != nil {
+			log.Error("load worker identity CA", slog.String("err", err.Error()))
+			os.Exit(1)
+		}
+		grpcSrv.SetWorkerIdentity(workerCA, cfg.WorkerCertTTL)
+	}
 	grpcSrv.SetLeasePolicy(db.LeasePolicy{Duration: cfg.TaskLeaseDuration, MaxAttempts: cfg.TaskMaxAttempts, MaxActiveTasks: cfg.MaxActiveTasks, BackoffBase: cfg.TaskRetryBackoff, BackoffMax: cfg.TaskRetryBackoffMax})
 	grpcSrv.SetCatalogWorkLimit(cfg.CatalogWorkLimit)
 	grpcSrv.SetUploadCapacityPolicy(cfg.UploadCapacityLimit, cfg.UploadCapacityLeaseTTL)
@@ -254,7 +262,7 @@ func main() {
 		httpErr <- httpSrv.Serve(leaderCtx, cfg.HTTPAddr)
 	}()
 
-	gcfg := grpcapi.Config{Addr: cfg.GRPCAddr, Insecure: cfg.Insecure, TLSCertFile: cfg.TLSCert, TLSKeyFile: cfg.TLSKey, TLSClientCAFile: cfg.TLSClientCA, WorkerAuthToken: cfg.WorkerAuthToken, HeartbeatInterval: 5 * time.Second}
+	gcfg := grpcapi.Config{Addr: cfg.GRPCAddr, Insecure: cfg.Insecure, TLSCertFile: cfg.TLSCert, TLSKeyFile: cfg.TLSKey, WorkerAuthToken: cfg.WorkerAuthToken, HeartbeatInterval: 5 * time.Second}
 	grpcErr := make(chan error, 1)
 	go func() {
 		grpcErr <- grpcapi.ListenAndServe(leaderCtx, gcfg, grpcSrv)
@@ -266,7 +274,7 @@ func main() {
 		slog.Bool("http_auth", strings.TrimSpace(cfg.HTTPAuthToken) != ""),
 		slog.Bool("worker_auth", strings.TrimSpace(cfg.WorkerAuthToken) != ""),
 		slog.Bool("insecure", cfg.Insecure),
-		slog.Bool("grpc_mtls", !cfg.Insecure && strings.TrimSpace(cfg.TLSClientCA) != ""),
+		slog.Bool("worker_identity", !cfg.Insecure),
 		slog.String("iceberg_registration", "persisted-run-snapshot"),
 		slog.String("ice_binary", cfg.IceBin),
 		slog.String("log_level", cfg.LogLevel),
