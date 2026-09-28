@@ -59,6 +59,10 @@ type runPlannerFunc func(context.Context, *db.Store, crypto.Key, db.Job, json.Ra
 
 const runPlanningTimeout = 10 * time.Minute
 
+// shutdownTimeout bounds how long Serve waits for in-flight requests after
+// its context ends.
+const shutdownTimeout = 30 * time.Second
+
 // StatusInfo represents the status information of the server, including the PID, HTTP and gRPC addresses, and database path.
 type StatusInfo struct {
 	PID      int    `json:"pid"`
@@ -194,7 +198,13 @@ func (s *Server) Serve(ctx context.Context, addr string) error {
 	go func() { errCh <- srv.ListenAndServe() }()
 	select {
 	case <-ctx.Done():
-		_ = srv.Shutdown(context.Background())
+		// Long-lived SSE streams never finish on their own, so bound the
+		// drain and then close the remaining connections.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			_ = srv.Close()
+		}
 		return nil
 	case err := <-errCh:
 		if err == http.ErrServerClosed {

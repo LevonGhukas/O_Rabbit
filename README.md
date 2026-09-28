@@ -900,6 +900,22 @@ the token.
 Restore the exact `ORABBIT_MASTER_KEY` used when the values were written. A new
 key cannot decrypt existing AES-GCM blobs.
 
+### Master exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Requested shutdown (SIGINT/SIGTERM), including one that interrupted startup recovery |
+| `1` | Runtime failure: startup recovery failed, leadership was lost, or the HTTP/gRPC server failed |
+| `2` | Invalid configuration, including a missing or malformed `ORABBIT_MASTER_KEY` |
+
+Run the master under a supervisor that restarts it on non-zero exit
+(`restart: on-failure` or `unless-stopped`, or a Kubernetes Deployment). On
+every exit the master releases its leadership lease, so a replacement can
+take over without waiting for the lease to expire. On shutdown it stops
+accepting work and waits up to 30 seconds for in-flight HTTP and gRPC
+requests before closing them; runs interrupted mid-commit are resumed by the
+next leader.
+
 ### TLS startup or worker connection fails
 
 When master `-insecure=false`, both `-tls-cert` and `-tls-key` are required.
