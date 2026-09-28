@@ -8,6 +8,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/stretchr/testify/require"
+
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
 
 func TestMySQLTypeMapping(t *testing.T) {
@@ -20,9 +22,9 @@ func TestMySQLTypeMapping(t *testing.T) {
 	}{
 		{"BIGINT UNSIGNED", 0, 0, false, arrow.BinaryTypes.String},
 		{"BIGINT", 0, 0, false, arrow.PrimitiveTypes.Int64},
-		{"INT UNSIGNED", 0, 0, false, arrow.PrimitiveTypes.Uint32},
+		{"INT UNSIGNED", 0, 0, false, arrow.PrimitiveTypes.Int64},
 		{"INT", 0, 0, false, arrow.PrimitiveTypes.Int32},
-		{"MEDIUMINT UNSIGNED", 0, 0, false, arrow.PrimitiveTypes.Uint32},
+		{"MEDIUMINT UNSIGNED", 0, 0, false, arrow.PrimitiveTypes.Int64},
 		{"MEDIUMINT", 0, 0, false, arrow.PrimitiveTypes.Int32},
 		{"SMALLINT UNSIGNED", 0, 0, false, arrow.PrimitiveTypes.Uint16},
 		{"SMALLINT", 0, 0, false, arrow.PrimitiveTypes.Int16},
@@ -114,3 +116,32 @@ func TestMySQLDate32Preservation(t *testing.T) {
 	require.Equal(t, "1960-02-29", arr.Value(0).FormattedString())
 	require.Equal(t, "9999-12-31", arr.Value(1).FormattedString())
 }
+
+func TestMySQLIntUnsignedPromotion(t *testing.T) {
+	for _, colType := range []string{"INT UNSIGNED", "INTEGER UNSIGNED", "MEDIUMINT UNSIGNED"} {
+		t.Run(colType, func(t *testing.T) {
+			logical, err := LogicalTypeForMySQLColumn(colType, 0, 0, false)
+			require.NoError(t, err)
+			require.Equal(t, typesystem.KindUInt32, logical.Kind)
+
+			plan := PlanForSQLColumn("mysql", "unsigned_col", colType, 0, 0, false)
+			require.Equal(t, arrow.PrimitiveTypes.Int64, plan.DataType)
+
+			builder := plan.Builder(memory.DefaultAllocator)
+			defer builder.Release()
+
+			require.NoError(t, plan.Append(builder, uint32(4294967295)))
+			require.NoError(t, plan.Append(builder, uint32(2147483648)))
+			require.NoError(t, plan.Append(builder, nil))
+
+			arr := builder.NewArray().(*array.Int64)
+			defer arr.Release()
+
+			require.Equal(t, 3, arr.Len())
+			require.Equal(t, int64(4294967295), arr.Value(0))
+			require.Equal(t, int64(2147483648), arr.Value(1))
+			require.True(t, arr.IsNull(2))
+		})
+	}
+}
+
