@@ -708,6 +708,7 @@ func (s *Server) ProcessReconciliationOnce(ctx context.Context) (bool, error) {
 	renewDone := make(chan struct{})
 	go func() {
 		defer close(renewDone)
+		defer RecoverPanic(s.log, "reconciliation lease renewal")
 		ticker := time.NewTicker(reconciliationLease / 3)
 		defer ticker.Stop()
 		for {
@@ -1648,6 +1649,71 @@ func newID() string {
 }
 
 // ListenAndServe starts the gRPC server and listens for incoming connections.
+const (
+	// maxRecvMsgBytes bounds each worker request. Results and progress
+	// payloads are far smaller; the limit caps worker-supplied data.
+	maxRecvMsgBytes = 4 << 20
+	maxSendMsgBytes = 16 << 20
+
+	// gracefulStopTimeout bounds shutdown: a long commit running inside
+	// ReportTaskResult must not keep a stopping master alive indefinitely.
+	// Its run stays COMMITTING and is resumed by the next leader.
+	gracefulStopTimeout = 30 * time.Second
+)
+
+// serverOptions are the control-plane server options besides credentials.
+func serverOptions(cfg Config, srv *Server) []grpc.ServerOption {
+	return []grpc.ServerOption{
+		grpc.ChainUnaryInterceptor(
+			recoveryUnaryServerInterceptor(srv.log),
+			workerAuthUnaryServerInterceptor(cfg.WorkerAuthToken),
+			srv.workerIdentityUnaryInterceptor(!cfg.Insecure),
+		),
+		grpc.ChainStreamInterceptor(recoveryStreamServerInterceptor(srv.log)),
+		grpc.MaxRecvMsgSize(maxRecvMsgBytes),
+		grpc.MaxSendMsgSize(maxSendMsgBytes),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			// Ping connections idle this long and drop them if the ping is
+			// not acknowledged, so vanished workers are detected promptly.
+			Time:    2 * time.Minute,
+			Timeout: 20 * time.Second,
+			// Bounded connection age makes workers re-handshake periodically,
+			// so a renewed identity certificate replaces the one a connection
+			// was opened with. The grace period covers long result RPCs.
+			MaxConnectionAge:      time.Hour,
+			MaxConnectionAgeGrace: 35 * time.Minute,
+		}),
+		// Accept the worker's keepalive pings (WorkerKeepaliveParams); pings
+		// more frequent than MinTime are answered with GOAWAY.
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             WorkerKeepaliveParams.Time / 2,
+			PermitWithoutStream: false,
+		}),
+	}
+}
+
+// WorkerKeepaliveParams are the client keepalive settings workers use when
+// dialing the master; they must stay within the server enforcement policy.
+var WorkerKeepaliveParams = keepalive.ClientParameters{
+	Time:                30 * time.Second,
+	Timeout:             10 * time.Second,
+	PermitWithoutStream: false,
+}
+
+func stopGracefully(g *grpc.Server, timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		g.GracefulStop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		g.Stop()
+		<-done
+	}
+}
+
 func ListenAndServe(ctx context.Context, cfg Config, srv *Server) error {
 	lis, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
@@ -1675,17 +1741,7 @@ func Serve(ctx context.Context, lis net.Listener, cfg Config, srv *Server) error
 		creds = credentials.NewTLS(tlsCfg)
 	}
 
-	g := grpc.NewServer(
-		grpc.Creds(creds),
-		grpc.ChainUnaryInterceptor(
-			workerAuthUnaryServerInterceptor(cfg.WorkerAuthToken),
-			srv.workerIdentityUnaryInterceptor(!cfg.Insecure),
-		),
-		// Bounded connection age makes workers re-handshake periodically, so a
-		// renewed identity certificate replaces the one a connection was
-		// opened with. The grace period covers long-running result RPCs.
-		grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: time.Hour, MaxConnectionAgeGrace: 35 * time.Minute}),
-	)
+	g := grpc.NewServer(append([]grpc.ServerOption{grpc.Creds(creds)}, serverOptions(cfg, srv)...)...)
 	grpcpb.RegisterControlPlaneServer(g, srv)
 	healthSrv := health.NewServer()
 	grpc_health_v1.RegisterHealthServer(g, healthSrv)
@@ -1697,7 +1753,7 @@ func Serve(ctx context.Context, lis net.Listener, cfg Config, srv *Server) error
 	select {
 	case <-ctx.Done():
 		healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
-		g.GracefulStop()
+		stopGracefully(g, gracefulStopTimeout)
 		return nil
 	case err := <-errCh:
 		return err

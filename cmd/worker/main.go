@@ -211,6 +211,7 @@ func main() {
 		cfg.MasterAddr,
 		grpc.WithTransportCredentials(transportCreds),
 		grpc.WithUnaryInterceptor(grpcapi.WorkerAuthUnaryClientInterceptor(cfg.WorkerAuthToken)),
+		grpc.WithKeepaliveParams(grpcapi.WorkerKeepaliveParams),
 	)
 	if err != nil {
 		log.Error("dial master", slog.String("err", err.Error()))
