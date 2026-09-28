@@ -58,9 +58,10 @@ func (c masterConfig) validateAuthentication() error {
 		)
 	}
 
-	if grpcRemote && c.Insecure {
+	if grpcRemote && c.Insecure && !c.AllowInsecureRemoteGRPC {
 		return fmt.Errorf(
-			"remote gRPC listen address %q cannot use insecure gRPC; configure TLS",
+			"remote gRPC listen address %q cannot use insecure gRPC; configure TLS "+
+				"(or set ORABBIT_GRPC_ALLOW_INSECURE_REMOTE=true for an isolated private network)",
 			c.GRPCAddr,
 		)
 	}
@@ -106,8 +107,13 @@ type masterConfig struct {
 	IceBin          string
 
 	Insecure bool
-	TLSCert  string
-	TLSKey   string
+	// AllowInsecureRemoteGRPC is an explicit opt-in for plaintext gRPC on a
+	// non-loopback listener inside an isolated private network (for example a
+	// single-host Docker network). Task assignments carry source and target
+	// credentials, so it must never be used on a routable network.
+	AllowInsecureRemoteGRPC bool
+	TLSCert                 string
+	TLSKey                  string
 
 	LogLevel                          string
 	LogFormat                         string
@@ -141,6 +147,7 @@ func loadMasterConfigFromEnv() masterConfig {
 		WorkerAuthToken:                   strings.TrimSpace(os.Getenv("ORABBIT_WORKER_AUTH_TOKEN")),
 		IceBin:                            envutil.EnvOrDefault("ORABBIT_ICE_BIN", "ice"),
 		Insecure:                          envBoolDefault("ORABBIT_GRPC_INSECURE", false),
+		AllowInsecureRemoteGRPC:           envBoolDefault("ORABBIT_GRPC_ALLOW_INSECURE_REMOTE", false),
 		TLSCert:                           strings.TrimSpace(os.Getenv("ORABBIT_TLS_CERT_FILE")),
 		TLSKey:                            strings.TrimSpace(os.Getenv("ORABBIT_TLS_KEY_FILE")),
 		LogLevel:                          envutil.EnvOrDefault("ORABBIT_LOG_LEVEL", "INFO"),
@@ -175,6 +182,7 @@ func bindMasterFlags(cfg *masterConfig) {
 	flag.StringVar(&cfg.WorkerAuthToken, "worker-auth-token", cfg.WorkerAuthToken, "Bearer token required on worker gRPC calls (required for non-loopback gRPC)")
 	flag.StringVar(&cfg.IceBin, "ice-bin", cfg.IceBin, "Ice CLI binary path for master-owned engine=ice registration")
 	flag.BoolVar(&cfg.Insecure, "insecure", cfg.Insecure, "Disable gRPC TLS (dev)")
+	flag.BoolVar(&cfg.AllowInsecureRemoteGRPC, "allow-insecure-remote-grpc", cfg.AllowInsecureRemoteGRPC, "Permit plaintext gRPC on a non-loopback listener (isolated private networks only)")
 	flag.StringVar(&cfg.TLSCert, "tls-cert", cfg.TLSCert, "gRPC TLS cert file (or ORABBIT_TLS_CERT_FILE)")
 	flag.StringVar(&cfg.TLSKey, "tls-key", cfg.TLSKey, "gRPC TLS key file (or ORABBIT_TLS_KEY_FILE)")
 	flag.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level: DEBUG, INFO, WARN, ERROR")

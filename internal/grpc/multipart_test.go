@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
 )
@@ -42,7 +41,7 @@ func TestMultipartCleanupExecutorAbortsOnlyAfterOwnershipLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 	cleaner := &fakeMultipartCleaner{uploads: []s3io.MultipartUploadInfo{{Key: update.ObjectKey, UploadID: "discovered"}}}
-	srv := NewServer(nil, st, nil, crypto.Key{}, time.Second, nil)
+	srv := NewServer(nil, st, nil, testCryptoKey, time.Second, nil)
 	srv.newMultipartCleanerFn = func(context.Context, s3io.Config) (multipartCleaner, error) { return cleaner, nil }
 	srv.SetMultipartCleanupPolicy(time.Nanosecond, time.Second, 3)
 	srv.nowFn = func() time.Time { return now.Add(30 * time.Second) }
@@ -73,7 +72,7 @@ func TestMultipartCleanupPreservesVerifiedFinalObject(t *testing.T) {
 	_, _ = st.ApplyMultipartLifecycle(context.Background(), update, now)
 	_, _ = st.ExpireTaskAttempts(context.Background(), now.Add(2*time.Minute), db.LeasePolicy{Duration: time.Minute, MaxAttempts: 3, BackoffBase: time.Second, BackoffMax: time.Minute})
 	cleaner := &fakeMultipartCleaner{finalExists: true}
-	srv := NewServer(nil, st, nil, crypto.Key{}, time.Second, nil)
+	srv := NewServer(nil, st, nil, testCryptoKey, time.Second, nil)
 	srv.newMultipartCleanerFn = func(context.Context, s3io.Config) (multipartCleaner, error) { return cleaner, nil }
 	srv.SetMultipartCleanupPolicy(time.Nanosecond, time.Second, 3)
 	srv.nowFn = func() time.Time { return now.Add(3 * time.Minute) }

@@ -187,11 +187,11 @@ func newCommitFixtureWithOutput(t *testing.T, suffix string, registrationEnabled
 	parquetKey := prefix + "/_runs/run-" + runID + "/part-000001-000.parquet"
 	datasetKey := dataset.StorageKey("http://minio:9000", "bucket1", prefix)
 	srcID, tgtID := "src-"+suffix, "tgt-"+suffix
-	srcSecret, err := crypto.Encrypt(crypto.Key{}, []byte(`{"dsn":"sqlserver://example"}`), []byte(srcID))
+	srcSecret, err := crypto.Encrypt(testCryptoKey, []byte(`{"dsn":"sqlserver://example"}`), []byte(srcID))
 	if err != nil {
 		t.Fatal(err)
 	}
-	tgtSecret, err := crypto.Encrypt(crypto.Key{}, []byte(`{"access_key_id":"a","secret_access_key":"b"}`), []byte(tgtID))
+	tgtSecret, err := crypto.Encrypt(testCryptoKey, []byte(`{"access_key_id":"a","secret_access_key":"b"}`), []byte(tgtID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func newCommitFixtureWithOutput(t *testing.T, suffix string, registrationEnabled
 	if changed, status, err := st.TryFinalizeRun(ctx, runID); err != nil || !changed || status != "COMMITTING" {
 		t.Fatalf("finalize transition changed=%v status=%s err=%v", changed, status, err)
 	}
-	srv := NewServer(nil, st, nil, crypto.Key{}, time.Second, nil)
+	srv := NewServer(nil, st, nil, testCryptoKey, time.Second, nil)
 	srv.runIcebergRegistrationFn = nil
 	srv.newCommitObjectStoreFn = func(context.Context, s3io.Config) (commitObjectStore, error) { return objects, nil }
 	f := &commitFixture{t: t, ctx: ctx, st: st, srv: srv, objects: objects, runID: runID, jobID: jobID, datasetKey: datasetKey, parquetKey: parquetKey, manifestKey: prefix + "/_commits/run-" + runID + ".json", stateKey: prefix + "/_state.json"}

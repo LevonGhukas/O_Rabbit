@@ -65,7 +65,7 @@ func TestAPIRunSubmitPlannerFailureIncludesDetails(t *testing.T) {
 
 func TestTargetConnectionsReuseOnlyMatchingDestinationIdentity(t *testing.T) {
 	st := openTestStore(t)
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/runs/submit", nil)
 	makeRequest := func(prefix, accessKey string) connectionCreateRequest {
 		spec := validatedRunSubmitSpec{TargetEndpoint: "HTTP://MINIO:9000/", TargetRegion: "us-east-1", TargetBucket: "bucket1", TargetPrefixOverride: prefix, TargetForcePathStyle: true}
@@ -1131,7 +1131,7 @@ func (it *validationDocumentIterator) Err() error           { return nil }
 func (it *validationDocumentIterator) FieldOrder() []string { return it.fieldOrder }
 
 func TestAPISourceEnginesListsCapabilities(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/source-engines", nil)
@@ -1207,7 +1207,7 @@ func assertQueryCapabilitiesDisabled(t *testing.T, engine string, supported bool
 }
 
 func TestAuthMiddlewareProtectsAPISourceEngines(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "topsecret")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "topsecret")
 
 	unauthRec := httptest.NewRecorder()
 	unauthReq := httptest.NewRequest(http.MethodGet, "/api/source-engines", nil)
@@ -1522,7 +1522,7 @@ func TestAPIRunAliasesExposeExistingRunEndpoints(t *testing.T) {
 		t.Fatalf("insert event: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	cases := []struct {
 		name   string
 		method string
@@ -1578,7 +1578,7 @@ type submitTestServer struct {
 }
 
 func newSubmitTestServer(st *db.Store) *submitTestServer {
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	ts := &submitTestServer{Server: srv}
 	srv.runPlanner = func(ctx context.Context, st *db.Store, k crypto.Key, job db.Job, registrationConfig json.RawMessage, audit *db.AuditRecord) (db.Run, []db.TaskInsert, error) {
 		ts.registrationConfig = append(json.RawMessage(nil), registrationConfig...)
@@ -1617,11 +1617,11 @@ func (s *submitTestServer) lastPlannedJob() db.Job {
 func seedExistingJobRunFixture(t *testing.T, st *db.Store, jobID string, incremental bool, withJobRegistration bool) {
 	t.Helper()
 
-	srcSecret, err := crypto.Encrypt(crypto.Key{}, []byte(`{"dsn":"postgresql://user:pass@db:5432/app?sslmode=disable"}`), []byte("src-"+jobID))
+	srcSecret, err := crypto.Encrypt(testCryptoKey, []byte(`{"dsn":"postgresql://user:pass@db:5432/app?sslmode=disable"}`), []byte("src-"+jobID))
 	if err != nil {
 		t.Fatalf("encrypt source secret: %v", err)
 	}
-	tgtSecret, err := crypto.Encrypt(crypto.Key{}, []byte(`{"access_key_id":"minioadmin","secret_access_key":"miniosecret"}`), []byte("tgt-"+jobID))
+	tgtSecret, err := crypto.Encrypt(testCryptoKey, []byte(`{"access_key_id":"minioadmin","secret_access_key":"miniosecret"}`), []byte("tgt-"+jobID))
 	if err != nil {
 		t.Fatalf("encrypt target secret: %v", err)
 	}

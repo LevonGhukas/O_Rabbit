@@ -191,19 +191,34 @@ func ensureRegistrationTx(ctx context.Context, tx *sql.Tx, runID, datasetID, com
 
 func (s *Store) GetRegistrationForRun(ctx context.Context, runID string) (Registration, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id,run_id,dataset_id,dataset_sequence,target_key,commit_id,manifest_key,artifact_set_digest,backend_type,catalog_namespace,table_identifier,status,attempt_count,current_attempt_id,next_eligible_at,last_error_class,last_error_message,registered_snapshot_or_metadata_id,created_at,updated_at,registered_at,retry_override_config_json FROM iceberg_registrations WHERE run_id=? ORDER BY id LIMIT 1`, runID)
-	return scanRegistration(row)
+	return s.scanRegistration(row)
 }
 
 type rowScanner interface{ Scan(...any) error }
 
-func scanRegistration(row rowScanner) (Registration, error) {
+func registrationRetryOverrideAAD(registrationID string) []byte {
+	return []byte("registration-retry-override:" + registrationID)
+}
+
+func (s *Store) encryptRegistrationRetryOverride(registrationID string, plaintext []byte) (string, error) {
+	return encryptStoredJSON(s.masterKey, plaintext, registrationRetryOverrideAAD(registrationID))
+}
+
+func (s *Store) scanRegistration(row rowScanner) (Registration, error) {
 	var r Registration
 	var retryOverride string
 	err := row.Scan(&r.ID, &r.RunID, &r.DatasetID, &r.DatasetSequence, &r.TargetKey, &r.CommitID, &r.ManifestKey, &r.ArtifactSetDigest, &r.BackendType, &r.CatalogNamespace, &r.TableIdentifier, &r.Status, &r.AttemptCount, &r.CurrentAttemptID, &r.NextEligibleAt, &r.LastErrorClass, &r.LastErrorMessage, &r.Receipt, &r.CreatedAt, &r.UpdatedAt, &r.RegisteredAt, &retryOverride)
-	if strings.TrimSpace(retryOverride) != "" {
-		r.RetryOverrideConfigJSON = json.RawMessage(retryOverride)
+	if err != nil {
+		return r, err
 	}
-	return r, err
+	if strings.TrimSpace(retryOverride) != "" {
+		plaintext, derr := decryptStoredJSON(s.masterKey, retryOverride, registrationRetryOverrideAAD(r.ID))
+		if derr != nil {
+			return r, fmt.Errorf("registration %s retry override: %w", r.ID, derr)
+		}
+		r.RetryOverrideConfigJSON = json.RawMessage(plaintext)
+	}
+	return r, nil
 }
 
 // RequeueRegistrationManual moves a terminal, safe registration back to the durable worker queue.
@@ -225,7 +240,11 @@ func (s *Store) RequeueRegistrationManual(ctx context.Context, runID string, ove
 			return fmt.Errorf("registration retry requires a succeeded run with a complete commit")
 		}
 		row := tx.QueryRowContext(ctx, `SELECT id,run_id,dataset_id,dataset_sequence,target_key,commit_id,manifest_key,artifact_set_digest,backend_type,catalog_namespace,table_identifier,status,attempt_count,current_attempt_id,next_eligible_at,last_error_class,last_error_message,registered_snapshot_or_metadata_id,created_at,updated_at,registered_at,retry_override_config_json FROM iceberg_registrations WHERE run_id=? ORDER BY id LIMIT 1`, runID)
-		reg, err := scanRegistration(row)
+		reg, err := s.scanRegistration(row)
+		if err != nil {
+			return err
+		}
+		storedOverride, err := s.encryptRegistrationRetryOverride(reg.ID, override)
 		if err != nil {
 			return err
 		}
@@ -233,7 +252,7 @@ func (s *Store) RequeueRegistrationManual(ctx context.Context, runID string, ove
 		case RegistrationPending, RegistrationRetryRequired:
 			// The endpoint is idempotent for queued work, but a no-override retry
 			// must still clear a prior queued override before it is claimed.
-			if _, err := tx.ExecContext(ctx, `UPDATE iceberg_registrations SET retry_override_config_json=?,updated_at=? WHERE id=? AND status IN ('PENDING','RETRY_REQUIRED') AND current_attempt_id IS NULL`, string(override), now.UTC().Format(time.RFC3339Nano), reg.ID); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE iceberg_registrations SET retry_override_config_json=?,updated_at=? WHERE id=? AND status IN ('PENDING','RETRY_REQUIRED') AND current_attempt_id IS NULL`, storedOverride, now.UTC().Format(time.RFC3339Nano), reg.ID); err != nil {
 				return err
 			}
 			reg.RetryOverrideConfigJSON = append(json.RawMessage(nil), override...)
@@ -246,7 +265,7 @@ func (s *Store) RequeueRegistrationManual(ctx context.Context, runID string, ove
 			return fmt.Errorf("registration retry is not allowed while status is %s", reg.Status)
 		}
 		ns := now.UTC().Format(time.RFC3339Nano)
-		res, err := tx.ExecContext(ctx, `UPDATE iceberg_registrations SET status='PENDING',current_attempt_id=NULL,next_eligible_at=NULL,last_error_class='',last_error_message=NULL,retry_override_config_json=?,manual_retry_budget=manual_retry_budget+1,updated_at=? WHERE id=? AND status IN ('FAILED','CANCELED')`, string(override), ns, reg.ID)
+		res, err := tx.ExecContext(ctx, `UPDATE iceberg_registrations SET status='PENDING',current_attempt_id=NULL,next_eligible_at=NULL,last_error_class='',last_error_message=NULL,retry_override_config_json=?,manual_retry_budget=manual_retry_budget+1,updated_at=? WHERE id=? AND status IN ('FAILED','CANCELED')`, storedOverride, ns, reg.ID)
 		if err != nil {
 			return err
 		}
@@ -281,7 +300,7 @@ func (s *Store) ClaimRegistration(ctx context.Context, now time.Time, policy Reg
 		}
 		defer tx.Rollback()
 		row := tx.QueryRowContext(ctx, `SELECT r.id,r.run_id,r.dataset_id,r.dataset_sequence,r.target_key,r.commit_id,r.manifest_key,r.artifact_set_digest,r.backend_type,r.catalog_namespace,r.table_identifier,r.status,r.attempt_count,r.current_attempt_id,r.next_eligible_at,r.last_error_class,r.last_error_message,r.registered_snapshot_or_metadata_id,r.created_at,r.updated_at,r.registered_at,r.retry_override_config_json FROM iceberg_registrations r WHERE r.status IN ('PENDING','RETRY_REQUIRED') AND (r.next_eligible_at IS NULL OR r.next_eligible_at<=?) AND NOT EXISTS (SELECT 1 FROM iceberg_registrations p WHERE p.dataset_id=r.dataset_id AND p.target_key=r.target_key AND p.dataset_sequence<r.dataset_sequence AND p.status<>'REGISTERED') ORDER BY r.dataset_sequence,r.id LIMIT 1`, now.UTC().Format(time.RFC3339Nano))
-		r, err := scanRegistration(row)
+		r, err := s.scanRegistration(row)
 		if err == sql.ErrNoRows {
 			blocked, qerr := tx.QueryContext(ctx, `SELECT r.id,p.id FROM iceberg_registrations r JOIN iceberg_registrations p ON p.dataset_id=r.dataset_id AND p.target_key=r.target_key AND p.dataset_sequence=(SELECT MIN(x.dataset_sequence) FROM iceberg_registrations x WHERE x.dataset_id=r.dataset_id AND x.target_key=r.target_key AND x.dataset_sequence<r.dataset_sequence AND x.status<>'REGISTERED') WHERE r.status IN ('PENDING','RETRY_REQUIRED')`)
 			if qerr != nil {

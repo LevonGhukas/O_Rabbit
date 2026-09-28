@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 	"github.com/LevonGhukas/O_Rabbit/internal/grpcpb"
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
@@ -75,7 +74,7 @@ func (completingLeadershipRegistrar) RegisterRun(_ context.Context, req icebergr
 }
 
 func TestStaleMasterRejectsWorkerMutations(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, time.Second, nil)
+	srv := NewServer(nil, nil, nil, testCryptoKey, time.Second, nil)
 	srv.SetLeadershipGuard(rejectingLeadership{})
 	if _, err := srv.RegisterWorker(context.Background(), &grpcpb.RegisterWorkerRequest{WorkerId: "w"}); status.Code(err) != codes.Unavailable {
 		t.Fatalf("register code=%s err=%v", status.Code(err), err)
@@ -94,7 +93,7 @@ func TestLeadershipLossCancelsInFlightCommitFinalization(t *testing.T) {
 	assignGRPCTestAttempt(t, st, "task-leader-commit", "worker")
 
 	workCtx, loseLeadership := context.WithCancel(context.Background())
-	srv := NewServer(nil, st, nil, crypto.Key{}, time.Second, nil)
+	srv := NewServer(nil, st, nil, testCryptoKey, time.Second, nil)
 	srv.SetLeadershipGuard(cancellableLeadership{ctx: workCtx})
 	started := make(chan struct{})
 	srv.commitRunFn = func(ctx context.Context, _ string) error {
@@ -149,7 +148,7 @@ func TestLeadershipLossCancelsInFlightCommitFinalization(t *testing.T) {
 	}
 
 	freshCtx := context.Background()
-	fresh := NewServer(nil, st, nil, crypto.Key{}, time.Second, nil)
+	fresh := NewServer(nil, st, nil, testCryptoKey, time.Second, nil)
 	fresh.SetLeadershipGuard(cancellableLeadership{ctx: freshCtx})
 	fresh.commitRunFn = func(ctx context.Context, runID string) error {
 		intent, _ := json.Marshal(durableCommitIntent{CommitID: "fresh-commit", ManifestKey: "dataset/_commits/fresh.json", StateKey: "dataset/_state.json", Manifest: json.RawMessage(`{"schema_version":2,"artifacts":[]}`), ProposedState: json.RawMessage(`{}`)})
@@ -174,7 +173,7 @@ func TestLeadershipLossCancelsRegistrationAndLeavesItRecoverable(t *testing.T) {
 
 	workCtx, loseLeadership := context.WithCancel(context.Background())
 	registrar := &blockingLeadershipRegistrar{started: make(chan struct{}), done: make(chan struct{})}
-	srv := NewServer(nil, st, nil, crypto.Key{}, time.Second, registrar)
+	srv := NewServer(nil, st, nil, testCryptoKey, time.Second, registrar)
 	srv.SetLeadershipGuard(cancellableLeadership{ctx: workCtx})
 	srv.commitRunFn = func(ctx context.Context, runID string) error {
 		return saveGRPCTestVerifiedEmptyIntent(ctx, st, runID, "exports/orders")
@@ -223,7 +222,7 @@ func TestLeadershipLossCancelsRegistrationAndLeavesItRecoverable(t *testing.T) {
 		t.Fatalf("registration is not recoverable: %+v", registration)
 	}
 
-	fresh := NewServer(nil, st, nil, crypto.Key{}, time.Second, completingLeadershipRegistrar{})
+	fresh := NewServer(nil, st, nil, testCryptoKey, time.Second, completingLeadershipRegistrar{})
 	fresh.SetLeadershipGuard(cancellableLeadership{ctx: context.Background()})
 	fresh.nowFn = func() time.Time { return expiredAt.Add(2 * time.Second) }
 	processed, err := fresh.ProcessRegistrationOnce(context.Background())

@@ -38,6 +38,6 @@ func (s *Server) handleMaintenanceSubmit(w http.ResponseWriter, r *http.Request)
 	)
 
 	writeJSON(w, http.StatusNotImplemented, map[string]string{
-	"error": "maintenance operations are not implemented",
+		"error": "maintenance operations are not implemented",
 	})
 }

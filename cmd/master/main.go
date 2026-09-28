@@ -34,6 +34,11 @@ func main() {
 		os.Exit(2)
 	}
 
+	if cfg.Insecure && cfg.AllowInsecureRemoteGRPC && !isLoopbackListenAddress(cfg.GRPCAddr) {
+		log.Warn("plaintext gRPC is enabled on a non-loopback listener; task credentials are sent unencrypted",
+			slog.String("grpc", cfg.GRPCAddr))
+	}
+
 	k, err := crypto.LoadMasterKeyFromEnv()
 	if err != nil {
 		log.Error("load master key", slog.String("err", err.Error()))

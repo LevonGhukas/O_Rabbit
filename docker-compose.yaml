@@ -117,6 +117,9 @@ services:
       - "-grpc-addr"
       - "0.0.0.0:9102"
       - "-insecure=true"
+      # Plaintext gRPC is confined to the private orabbit_net bridge network;
+      # 9102 is not published. Use TLS for any cross-host deployment.
+      - "-allow-insecure-remote-grpc=true"
       - "-log-level"
       - "INFO"
       - "-log-format"
@@ -124,6 +127,7 @@ services:
     environment:
       ORABBIT_HTTP_AUTH_TOKEN: "${ORABBIT_HTTP_AUTH_TOKEN:?set ORABBIT_HTTP_AUTH_TOKEN}"
       ORABBIT_WORKER_AUTH_TOKEN: "${ORABBIT_WORKER_AUTH_TOKEN:?set ORABBIT_WORKER_AUTH_TOKEN}"
+      ORABBIT_MASTER_KEY: "${ORABBIT_MASTER_KEY:?set ORABBIT_MASTER_KEY (openssl rand -base64 32)}"
     ports:
       - "9100:9100"
     volumes:
