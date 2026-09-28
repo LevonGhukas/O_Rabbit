@@ -626,8 +626,109 @@ func TestJobRunsDatasetBusyReturnsStructuredConflict(t *testing.T) {
 		t.Fatalf("error message=%q want=%q", resp.Error.Message, "dataset is busy")
 	}
 	errObj := decodeErrorObject(t, rec)
-	if _, ok := errObj["details"]; ok {
-		t.Fatalf("details field should be omitted for dataset_busy response")
+	details, _ := errObj["details"].(map[string]any)
+	if details["active_run_id"] != "run-busy" || details["active_job_id"] != "other-job" || details["active_run_status"] != "RUNNING" {
+		t.Fatalf("dataset_busy must name the run holding the dataset so it can be canceled: %v", errObj["details"])
+	}
+
+	// The active run is left untouched: busy is a rejection, not a takeover.
+	run, err := st.GetRun(context.Background(), "run-busy")
+	if err != nil || run.Status != "RUNNING" {
+		t.Fatalf("active run status=%q err=%v, want RUNNING", run.Status, err)
+	}
+}
+
+func TestStartingJobAgainDoesNotSupersedeItsActiveRun(t *testing.T) {
+	st := openTestStore(t)
+	createTestConnection(t, st, db.Connection{
+		ID:            "src-1",
+		Name:          "src-1",
+		Kind:          "source",
+		Engine:        "postgres",
+		MetadataJSON:  []byte(`{}`),
+		SecretEncBlob: []byte(`{"dsn":"postgres://example"}`),
+	})
+	createTestConnection(t, st, db.Connection{
+		ID:     "tgt-1",
+		Name:   "tgt-1",
+		Kind:   "target",
+		Engine: "s3",
+		MetadataJSON: []byte(`{
+			"endpoint":"http://localhost:9000",
+			"bucket":"bucket1",
+			"prefix":"exports"
+		}`),
+		SecretEncBlob: []byte(`{"access_key_id":"minioadmin","secret_access_key":"minioadmin"}`),
+	})
+	job := db.Job{
+		ID:                 "job-1",
+		Name:               "job-1",
+		SourceConnectionID: "src-1",
+		TargetConnectionID: "tgt-1",
+		TargetTable:        "big_table",
+		WriteMode:          "append",
+		OptionsJSON:        []byte(`{}`),
+	}
+	if err := st.CreateJob(context.Background(), job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	basePrefix := dataset.Prefix("exports", "postgres", "big_table")
+	datasetKey := dataset.StorageKey("http://localhost:9000", "bucket1", basePrefix)
+	if err := st.CreateRun(context.Background(), db.Run{
+		ID:            "run-busy",
+		JobID:         "job-1",
+		DatasetKey:    datasetKey,
+		Status:        "RUNNING",
+		CorrelationID: "corr-busy",
+		StartedAt:     time.Now().UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("create busy run: %v", err)
+	}
+	if err := st.InsertTasks(context.Background(), []db.TaskInsert{{ID: "task-busy", RunID: "run-busy", TaskIndex: 1, PartitionSpec: []byte(`{}`), Status: "PENDING"}}); err != nil {
+		t.Fatal(err)
+	}
+	leased, ok, err := st.AssignNextPendingTaskWithLease(context.Background(), "", "worker-1", time.Now(), db.LeasePolicy{Duration: time.Minute, MaxAttempts: 3}, nil, nil)
+	if err != nil || !ok {
+		t.Fatalf("lease task ok=%v err=%v", ok, err)
+	}
+
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/jobs/job-1/runs", nil)
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	resp := decodeErrorResponse(t, rec)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d want=%d", rec.Code, http.StatusConflict)
+	}
+	if resp.Error.Code != httperr.CodeDatasetBusy {
+		t.Fatalf("error code=%q want=%q", resp.Error.Code, httperr.CodeDatasetBusy)
+	}
+	if resp.Error.Message != "dataset is busy" {
+		t.Fatalf("error message=%q want=%q", resp.Error.Message, "dataset is busy")
+	}
+	errObj := decodeErrorObject(t, rec)
+	details, _ := errObj["details"].(map[string]any)
+	if details["active_run_id"] != "run-busy" || details["active_job_id"] != "job-1" || details["active_run_status"] != "RUNNING" {
+		t.Fatalf("dataset_busy must name the run holding the dataset so it can be canceled: %v", errObj["details"])
+	}
+
+	// A double submit must not fail the healthy run, its task, or its lease.
+	run, err := st.GetRun(context.Background(), "run-busy")
+	if err != nil || run.Status != "RUNNING" {
+		t.Fatalf("active run status=%q err=%v, want RUNNING", run.Status, err)
+	}
+	tasks, err := st.ListTasksForRun(context.Background(), "run-busy")
+	if err != nil || len(tasks) != 1 || tasks[0].Status != "RUNNING" {
+		t.Fatalf("active task=%+v err=%v, want RUNNING", tasks, err)
+	}
+	if _, err := st.RenewTaskLease(context.Background(), "", leased.ID, leased.AttemptID, leased.FencingToken, "worker-1", time.Now(), time.Minute); err != nil {
+		t.Fatalf("worker must keep its lease after a rejected resubmit: %v", err)
+	}
+	runs, err := st.ListRuns(context.Background())
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("a rejected submit must not create a run: runs=%d err=%v", len(runs), err)
 	}
 }
 

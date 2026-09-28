@@ -926,6 +926,19 @@ means the worker has no identity: start it once with
 means the identity was revoked or the master database was replaced; enroll
 again with a new token and a fresh `ORABBIT_WORKER_IDENTITY_DIR`.
 
+### Starting a run returns `dataset_busy` (409)
+
+A dataset (target bucket and prefix) has at most one active run. Starting
+another run for it, including a second start of the same job, is rejected
+rather than replacing the active run. The error details name the run holding
+the dataset (`active_run_id`, `active_job_id`, `active_run_status`). Wait for
+that run to finish, or cancel it explicitly with
+`orabbit-client run cancel <run-id>` (`POST /runs/{id}/cancel`), then retry.
+Canceling stops its attempts and quarantines its uploaded objects for cleanup.
+
+A run left in `PLANNING` without tasks by a master crash is marked `FAILED`
+at the next master startup, which frees its dataset.
+
 ### A canceled run leaves objects temporarily
 
 Canceled objects are quarantined and cleanup defaults to dry-run for seven
