@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,25 +38,25 @@ import (
 )
 
 type partitionSpec struct {
-	Type           string `json:"type"`
-	SourceMode     string `json:"source_mode"`
-	QueryHash      string `json:"query_hash"`
-	Table          string `json:"table"`
-	CursorColumn   string `json:"cursor_column"`
-	CursorDomain   string `json:"cursor_domain"`
-	Lower          string `json:"lower"`
-	Upper          string `json:"upper"`
-	LowerExclusive bool   `json:"lower_exclusive"`
-	UpperInclusive bool   `json:"upper_inclusive"`
-	OutputPart     int64  `json:"output_part"` 
-	WhereClause    string `json:"where_clause,omitempty"` 
-	SelectColumns []string          `json:"select_columns,omitempty"` 
-	ColumnTypes   map[string]string `json:"column_types,omitempty"`
-	RecordPath    string            `json:"record_path,omitempty"`
-	FileFormat    string            `json:"format,omitempty"`
-	IDColumn       string `json:"id_column"` // legacy alias
-	From           int64  `json:"from"`      // legacy alias
-	To             int64  `json:"to"`        // legacy alias
+	Type           string            `json:"type"`
+	SourceMode     string            `json:"source_mode"`
+	QueryHash      string            `json:"query_hash"`
+	Table          string            `json:"table"`
+	CursorColumn   string            `json:"cursor_column"`
+	CursorDomain   string            `json:"cursor_domain"`
+	Lower          string            `json:"lower"`
+	Upper          string            `json:"upper"`
+	LowerExclusive bool              `json:"lower_exclusive"`
+	UpperInclusive bool              `json:"upper_inclusive"`
+	OutputPart     int64             `json:"output_part"`
+	WhereClause    string            `json:"where_clause,omitempty"`
+	SelectColumns  []string          `json:"select_columns,omitempty"`
+	ColumnTypes    map[string]string `json:"column_types,omitempty"`
+	RecordPath     string            `json:"record_path,omitempty"`
+	FileFormat     string            `json:"format,omitempty"`
+	IDColumn       string            `json:"id_column"` // legacy alias
+	From           int64             `json:"from"`      // legacy alias
+	To             int64             `json:"to"`        // legacy alias
 }
 
 type sourceExtract struct {
@@ -126,17 +125,11 @@ func main() {
 	var transportCreds credentials.TransportCredentials
 	if cfg.InsecureGRPC {
 		transportCreds = insecure.NewCredentials()
-	} else if strings.TrimSpace(cfg.TLSCAFile) != "" {
-		creds, err := credentials.NewClientTLSFromFile(strings.TrimSpace(cfg.TLSCAFile), strings.TrimSpace(cfg.TLSServerName))
-		if err != nil {
-			log.Error("load worker TLS CA", slog.String("err", err.Error()))
-			os.Exit(2)
-		}
-		transportCreds = creds
 	} else {
-		tlsCfg := &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			ServerName: strings.TrimSpace(cfg.TLSServerName),
+		tlsCfg, err := grpcapi.ClientTLSConfig(cfg.TLSCAFile, cfg.TLSServerName, cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			log.Error("configure worker gRPC TLS", slog.String("err", err.Error()))
+			os.Exit(2)
 		}
 		transportCreds = credentials.NewTLS(tlsCfg)
 	}
@@ -595,8 +588,6 @@ func (realLeaseClock) NewTimer(d time.Duration) leaseTimer {
 func (t realLeaseTimer) C() <-chan time.Time { return t.timer.C }
 func (t realLeaseTimer) Stop()               { t.timer.Stop() }
 
-
-
 func executeTaskManaged(ctx context.Context, log *slog.Logger, cp grpcpb.ControlPlaneClient, workerID, workerInstanceID string, t *grpcpb.TaskAssignment, clients *clientCache, manager *workerworkspace.Manager) error {
 	workspace, err := manager.Create(t.RunId, t.TaskId, t.AttemptId, t.AttemptNumber, workerID, workerInstanceID)
 	if err != nil {
@@ -648,8 +639,6 @@ func executeTaskWithBody(ctx context.Context, cp grpcpb.ControlPlaneClient, work
 		return err
 	}
 }
-
-
 
 func renewalDelay(now, deadline time.Time) time.Duration {
 	remaining := deadline.Sub(now)
