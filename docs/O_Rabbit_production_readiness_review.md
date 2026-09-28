@@ -43,6 +43,7 @@ So the task becomes two concrete phases:
    - only the assigned worker receives that task’s secrets
    - S3 credentials should be scoped and temporary where possible
    - no worker should receive credentials unrelated to its task
+**Status:** DONE
 
 **5. A panic in any gRPC handler crashes the master.** [server.go:1673](internal/grpc/server.go:1673) installs only the auth interceptor, and grpc-go does not recover panics. Add a recovery interceptor like the HTTP one, and set keepalive and max-message-size options.
 

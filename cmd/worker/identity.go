@@ -161,6 +161,7 @@ func enrollWorker(ctx context.Context, log *slog.Logger, cfg workerConfig, dir s
 	conn, err := grpc.NewClient(cfg.MasterAddr,
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
 		grpc.WithUnaryInterceptor(grpcapi.WorkerAuthUnaryClientInterceptor(cfg.WorkerAuthToken)),
+		grpc.WithKeepaliveParams(grpcapi.WorkerKeepaliveParams),
 	)
 	if err != nil {
 		return nil, err

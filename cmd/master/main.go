@@ -156,103 +156,67 @@ func main() {
 	leadership.SetReady(true)
 	grpcSrv.SetLeadershipGuard(leadership)
 	go runCommittingReconciliationLoop(leaderCtx, 2*time.Second, 30*time.Minute, grpcSrv, log)
-	go func() {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-leaderCtx.Done():
-				return
-			case <-ticker.C:
-				for i := 0; i < 2; i++ {
-					processed, err := grpcSrv.ProcessReconciliationOnce(leaderCtx)
-					if err != nil {
-						log.Warn("catalog reconciliation failed", slog.String("err", err.Error()))
-						break
-					}
-					if !processed {
-						break
-					}
-				}
-				for i := 0; i < 4; i++ {
-					processed, err := grpcSrv.ProcessRegistrationOnce(leaderCtx)
-					if err != nil {
-						log.Warn("durable iceberg registration FAILED", slog.String("err", err.Error()))
-						break
-					}
-					if !processed {
-						break
-					}
-				}
-				if _, err := st.ExpireRegistrationAttempts(leaderCtx, time.Now(), registrationPolicy); err != nil && leaderCtx.Err() == nil {
-					log.Warn("registration lease expiration scan failed", slog.String("err", err.Error()))
-				}
-				if _, err := st.ExpireReconciliationAttempts(leaderCtx, time.Now(), time.Second, 5); err != nil && leaderCtx.Err() == nil {
-					log.Warn("reconciliation lease expiration scan failed", slog.String("err", err.Error()))
-				}
+	go runPeriodic(leaderCtx, log, "catalog registration and reconciliation", 2*time.Second, func() {
+		for i := 0; i < 2; i++ {
+			processed, err := grpcSrv.ProcessReconciliationOnce(leaderCtx)
+			if err != nil {
+				log.Warn("catalog reconciliation failed", slog.String("err", err.Error()))
+				break
+			}
+			if !processed {
+				break
 			}
 		}
-	}()
-	go func() {
-		ticker := time.NewTicker(cfg.TaskLeaseScanInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-leaderCtx.Done():
-				return
-			case <-ticker.C:
-				if _, err := grpcSrv.ExpireLeases(leaderCtx); err != nil && leaderCtx.Err() == nil {
-					log.Warn("task lease expiration scan failed", slog.String("err", err.Error()))
-				}
+		for i := 0; i < 4; i++ {
+			processed, err := grpcSrv.ProcessRegistrationOnce(leaderCtx)
+			if err != nil {
+				log.Warn("durable iceberg registration FAILED", slog.String("err", err.Error()))
+				break
+			}
+			if !processed {
+				break
 			}
 		}
-	}()
-	go func() {
-		ticker := time.NewTicker(cfg.MultipartCleanupScanInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-leaderCtx.Done():
-				return
-			case <-ticker.C:
-				for i := 0; i < 4; i++ {
-					processed, err := grpcSrv.ProcessMultipartCleanupOnce(leaderCtx)
-					if err != nil {
-						if leaderCtx.Err() == nil {
-							log.Warn("multipart cleanup failed", slog.String("err", err.Error()))
-						}
-						break
-					}
-					if !processed {
-						break
-					}
+		if _, err := st.ExpireRegistrationAttempts(leaderCtx, time.Now(), registrationPolicy); err != nil && leaderCtx.Err() == nil {
+			log.Warn("registration lease expiration scan failed", slog.String("err", err.Error()))
+		}
+		if _, err := st.ExpireReconciliationAttempts(leaderCtx, time.Now(), time.Second, 5); err != nil && leaderCtx.Err() == nil {
+			log.Warn("reconciliation lease expiration scan failed", slog.String("err", err.Error()))
+		}
+	})
+	go runPeriodic(leaderCtx, log, "task lease expiration", cfg.TaskLeaseScanInterval, func() {
+		if _, err := grpcSrv.ExpireLeases(leaderCtx); err != nil && leaderCtx.Err() == nil {
+			log.Warn("task lease expiration scan failed", slog.String("err", err.Error()))
+		}
+	})
+	go runPeriodic(leaderCtx, log, "multipart cleanup", cfg.MultipartCleanupScanInterval, func() {
+		for i := 0; i < 4; i++ {
+			processed, err := grpcSrv.ProcessMultipartCleanupOnce(leaderCtx)
+			if err != nil {
+				if leaderCtx.Err() == nil {
+					log.Warn("multipart cleanup failed", slog.String("err", err.Error()))
 				}
+				break
+			}
+			if !processed {
+				break
 			}
 		}
-	}()
-	go func() {
-		ticker := time.NewTicker(cfg.CanceledObjectCleanupScanInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-leaderCtx.Done():
-				return
-			case <-ticker.C:
-				for i := 0; i < 4; i++ {
-					processed, err := grpcSrv.ProcessCanceledObjectCleanupOnce(leaderCtx)
-					if err != nil {
-						if leaderCtx.Err() == nil {
-							log.Warn("canceled-object cleanup failed", slog.String("err", err.Error()))
-						}
-						break
-					}
-					if !processed {
-						break
-					}
+	})
+	go runPeriodic(leaderCtx, log, "canceled-object cleanup", cfg.CanceledObjectCleanupScanInterval, func() {
+		for i := 0; i < 4; i++ {
+			processed, err := grpcSrv.ProcessCanceledObjectCleanupOnce(leaderCtx)
+			if err != nil {
+				if leaderCtx.Err() == nil {
+					log.Warn("canceled-object cleanup failed", slog.String("err", err.Error()))
 				}
+				break
+			}
+			if !processed {
+				break
 			}
 		}
-	}()
+	})
 
 	httpErr := make(chan error, 1)
 	httpSrv := httpapi.NewServer(log, st, bc, k, httpapi.StatusInfo{PID: os.Getpid(), HTTPAddr: cfg.HTTPAddr, GRPCAddr: cfg.GRPCAddr, DBPath: processLock.Identity}, cfg.HTTPAuthToken)
@@ -321,12 +285,32 @@ func runCommittingReconciliationLoop(ctx context.Context, interval, timeout time
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			reconcileCtx, cancel := context.WithTimeout(ctx, timeout)
-			err := reconciler.ReconcileCommittingRuns(reconcileCtx)
-			cancel()
-			if err != nil && ctx.Err() == nil {
-				log.Warn("live committing-run reconciliation failed", slog.String("err", err.Error()))
-			}
+			func() {
+				defer grpcapi.RecoverPanic(log, "committing-run reconciliation")
+				reconcileCtx, cancel := context.WithTimeout(ctx, timeout)
+				defer cancel()
+				if err := reconciler.ReconcileCommittingRuns(reconcileCtx); err != nil && ctx.Err() == nil {
+					log.Warn("live committing-run reconciliation failed", slog.String("err", err.Error()))
+				}
+			}()
+		}
+	}
+}
+
+// runPeriodic calls tick every interval until ctx ends. A panic in one tick is
+// logged and the loop continues, so a background job cannot crash the master.
+func runPeriodic(ctx context.Context, log *slog.Logger, name string, interval time.Duration, tick func()) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			func() {
+				defer grpcapi.RecoverPanic(log, name)
+				tick()
+			}()
 		}
 	}
 }

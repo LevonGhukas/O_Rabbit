@@ -25,6 +25,7 @@ func (s *Server) launchIcebergRegistration(runID string) {
 		return
 	}
 	go func() {
+		defer RecoverPanic(s.log, "iceberg registration")
 		base := context.Background()
 		if leader, ok := s.leadership.(interface{ WorkContext() context.Context }); ok && leader.WorkContext() != nil {
 			base = leader.WorkContext()
@@ -260,6 +261,7 @@ func (s *Server) ProcessRegistrationOnce(ctx context.Context) (bool, error) {
 	renewDone := make(chan struct{})
 	go func() {
 		defer close(renewDone)
+		defer RecoverPanic(s.log, "registration lease renewal")
 		ticker := time.NewTicker(policy.LeaseDuration / 3)
 		defer ticker.Stop()
 		for {
