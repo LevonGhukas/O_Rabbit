@@ -46,6 +46,7 @@ So the task becomes two concrete phases:
 **Status:** DONE
 
 **5. A panic in any gRPC handler crashes the master.** [server.go:1673](internal/grpc/server.go:1673) installs only the auth interceptor, and grpc-go does not recover panics. Add a recovery interceptor like the HTTP one, and set keepalive and max-message-size options.
+**Status:** DONE
 
 **6. The master exits 0 on fatal errors.** In [cmd/master/main.go](cmd/master/main.go), recovery failures (committing runs, leases, registrations) and loss of leadership all `return` from `main`, which exits with code 0. `restart: on-failure` and Kubernetes treat that as a clean exit. Use `os.Exit(1)`.
 
