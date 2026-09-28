@@ -255,10 +255,9 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 	basePrefix := dataset.Prefix(targetPrefix, srcEngine, sourceName)
 	datasetKey := dataset.StorageKey(endpoint, bucket, basePrefix)
 
-	// Ensure a single active RUNNING run per job.
-	// If a previous CLI run was interrupted, its run/tasks may still be RUNNING and can steal worker capacity.
-	_, _ = st.FailRunningRunsForJob(ctx, job.ID, "superseded by new run")
-
+	// A dataset has at most one active run. A new run for a busy dataset is
+	// rejected with DatasetBusyError below; an unwanted active run must be
+	// canceled explicitly (POST /runs/{id}/cancel), never superseded silently.
 	run = db.Run{
 		ID:                     newID(),
 		JobID:                  job.ID,
