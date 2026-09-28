@@ -41,6 +41,8 @@ type localWorkerLaunchSpec struct {
 	LogFormat     string
 	TLSCA         string
 	TLSServerName string
+	TLSCert       string
+	TLSKey        string
 }
 
 func newLocalSupervisor(runtimeDir string, out *cliOutput) *localSupervisor {
@@ -117,7 +119,7 @@ func (s *localSupervisor) reconcileManagedState() (int, error) {
 	return pruneManagedProcessState(s.runtimeDir)
 }
 
-func (s *localSupervisor) startMaster(commandCtx, followCtx context.Context, binaryPath, dbPath, httpAddr, grpcAddr string, insecure bool, tlsCert, tlsKey string) (*managedProcessHandle, error) {
+func (s *localSupervisor) startMaster(commandCtx, followCtx context.Context, binaryPath, dbPath, httpAddr, grpcAddr string, insecure bool, tlsCert, tlsKey, tlsClientCA string) (*managedProcessHandle, error) {
 	args := []string{
 		"-db", dbPath,
 		"-http-addr", httpAddr,
@@ -126,6 +128,9 @@ func (s *localSupervisor) startMaster(commandCtx, followCtx context.Context, bin
 	}
 	if !insecure {
 		args = append(args, "-tls-cert", strings.TrimSpace(tlsCert), "-tls-key", strings.TrimSpace(tlsKey))
+		if v := strings.TrimSpace(tlsClientCA); v != "" {
+			args = append(args, "-tls-client-ca", v)
+		}
 	}
 	return s.launchManagedProcess(commandCtx, followCtx, "master", binaryPath, args, procInfo{
 		Kind:     "master",
@@ -151,6 +156,9 @@ func (s *localSupervisor) startWorker(spec localWorkerLaunchSpec) (*managedProce
 		}
 		if v := strings.TrimSpace(spec.TLSServerName); v != "" {
 			args = append(args, "-tls-server-name", v)
+		}
+		if cert, key := strings.TrimSpace(spec.TLSCert), strings.TrimSpace(spec.TLSKey); cert != "" && key != "" {
+			args = append(args, "-tls-cert", cert, "-tls-key", key)
 		}
 	}
 	return s.launchManagedProcess(spec.CommandCtx, spec.FollowCtx, "worker:"+strings.TrimSpace(spec.WorkerID), spec.BinaryPath, args, procInfo{
