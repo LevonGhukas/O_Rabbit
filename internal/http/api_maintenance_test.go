@@ -5,12 +5,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 )
 
 func TestHandleMaintenanceSubmitMethodNotAllowed(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{}, "")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/maintenance", nil)
@@ -23,7 +21,7 @@ func TestHandleMaintenanceSubmitMethodNotAllowed(t *testing.T) {
 }
 
 func TestHandleMaintenanceSubmitInvalidJSON(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{}, "")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/maintenance", strings.NewReader("{"))
@@ -36,7 +34,7 @@ func TestHandleMaintenanceSubmitInvalidJSON(t *testing.T) {
 }
 
 func TestHandleMaintenanceSubmitInvalidOperation(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{}, "")
 
 	body := `{"operation":"drop"}`
 	rec := httptest.NewRecorder()
@@ -50,7 +48,7 @@ func TestHandleMaintenanceSubmitInvalidOperation(t *testing.T) {
 }
 
 func TestHandleMaintenanceSubmitCompactNotImplemented(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{}, "")
 
 	body := `{
 		"operation":"compact",
@@ -68,7 +66,7 @@ func TestHandleMaintenanceSubmitCompactNotImplemented(t *testing.T) {
 }
 
 func TestHandleMaintenanceSubmitVacuumNotImplemented(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{}, "")
 
 	body := `{
 		"operation":"vacuum",

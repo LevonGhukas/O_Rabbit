@@ -8,13 +8,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 )
 
 func TestConnectionCreateWritesAuditRecord(t *testing.T) {
 	st := openTestStore(t)
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "topsecret")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "topsecret")
 
 	reqBody := `{
 		"name":"source-1",
@@ -73,7 +72,7 @@ func TestConnectionUpdateWritesAuditBeforeAfter(t *testing.T) {
 		MetadataJSON:  []byte(`{"dsn":"postgres://old"}`),
 		SecretEncBlob: []byte(`plaintext-secret`),
 	})
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "topsecret")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "topsecret")
 
 	reqBody := `{
 		"name":"source-new",
@@ -117,7 +116,7 @@ func TestConnectionDeleteWritesBeforeOnlyAuditRecord(t *testing.T) {
 		MetadataJSON:  []byte(`{"dsn":"postgres://delete"}`),
 		SecretEncBlob: []byte(`plaintext-secret`),
 	})
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/connections/conn-delete", nil)
@@ -147,7 +146,7 @@ func TestConnectionDeleteWritesBeforeOnlyAuditRecord(t *testing.T) {
 
 func TestJobCreateUpdateDeleteWriteAuditRecords(t *testing.T) {
 	st := openTestStore(t)
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 
 	createBody := `{
 		"name":"job-1",
@@ -259,7 +258,7 @@ func TestRunStartWritesCompactAuditRecord(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "topsecret")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "topsecret")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/jobs/job-run/runs", nil)
 	req.Header.Set("Authorization", "Bearer topsecret")

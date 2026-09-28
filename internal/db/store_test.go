@@ -2,12 +2,12 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"strings"
-	"testing"
 	"log/slog"
 	"path/filepath"
-	"encoding/json"
+	"strings"
+	"testing"
 
 	secretcrypto "github.com/LevonGhukas/O_Rabbit/internal/crypto"
 )
@@ -20,6 +20,7 @@ func openTestStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
+	st.SetMasterKey(testMasterKey(t))
 	t.Cleanup(func() { _ = st.Close() })
 	return st
 }

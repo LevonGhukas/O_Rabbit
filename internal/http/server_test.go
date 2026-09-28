@@ -18,7 +18,7 @@ import (
 )
 
 func TestHandlerAuthMiddlewareReturnsJSONUnauthorized(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{PID: 1, HTTPAddr: ":9100", GRPCAddr: ":9102", DBPath: "test.sqlite"}, "topsecret")
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{PID: 1, HTTPAddr: ":9100", GRPCAddr: ":9102", DBPath: "test.sqlite"}, "topsecret")
 	h := srv.Handler()
 
 	healthReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
@@ -60,7 +60,7 @@ func TestHandlerAuthMiddlewareReturnsJSONUnauthorized(t *testing.T) {
 
 func TestBearerAuthenticationCasesDoNotLeakToken(t *testing.T) {
 	const secret = "admin-token-0123456789"
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, secret)
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{}, secret)
 	h := srv.Handler()
 	tests := []struct {
 		name   string
@@ -92,7 +92,7 @@ func TestBearerAuthenticationCasesDoNotLeakToken(t *testing.T) {
 }
 
 func TestHealthzRemainsPlainTextLiveness(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, "topsecret")
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{}, "topsecret")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 
@@ -107,7 +107,7 @@ func TestHealthzRemainsPlainTextLiveness(t *testing.T) {
 }
 
 func TestReadyReturnsJSONOKWithoutAuth(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "topsecret")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "topsecret")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 
@@ -132,7 +132,7 @@ func TestReadyReturnsServiceUnavailableWhenStoreNotReady(t *testing.T) {
 		t.Fatalf("close store: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 
@@ -152,7 +152,7 @@ func TestReadyReturnsServiceUnavailableWhenStoreNotReady(t *testing.T) {
 }
 
 func TestStatusMethodNotAllowedReturnsJSON(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{PID: 1, HTTPAddr: ":9100", GRPCAddr: ":9102", DBPath: "test.sqlite"}, "")
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{PID: 1, HTTPAddr: ":9100", GRPCAddr: ":9102", DBPath: "test.sqlite"}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/status", nil)
 
@@ -175,7 +175,7 @@ func TestStatusMethodNotAllowedReturnsJSON(t *testing.T) {
 }
 
 func TestInvalidJSONBodyReturnsStructuredError(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/connections", strings.NewReader("{"))
 
@@ -198,7 +198,7 @@ func TestInvalidJSONBodyReturnsStructuredError(t *testing.T) {
 }
 
 func TestUnknownRouteReturnsJSONNotFound(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/does-not-exist", nil)
 
@@ -221,7 +221,7 @@ func TestUnknownRouteReturnsJSONNotFound(t *testing.T) {
 }
 
 func TestUnknownRouteWithoutAuthReturnsUnauthorized(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "topsecret")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "topsecret")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/does-not-exist", nil)
 
@@ -239,7 +239,7 @@ func TestUnknownRouteWithoutAuthReturnsUnauthorized(t *testing.T) {
 }
 
 func TestUnknownRouteWithValidAuthReturnsJSONNotFound(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "topsecret")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "topsecret")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/does-not-exist", nil)
 	req.Header.Set("Authorization", "Bearer topsecret")
@@ -258,7 +258,7 @@ func TestUnknownRouteWithValidAuthReturnsJSONNotFound(t *testing.T) {
 }
 
 func TestConnectionNotFoundReturnsStructuredError(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/connections/missing", nil)
 
@@ -312,7 +312,7 @@ func TestRunCancelEndpointCancelsPendingTasksAndPublishesEvent(t *testing.T) {
 	ch, unsub := bc.Subscribe(run.ID)
 	defer unsub()
 
-	srv := NewServer(nil, st, bc, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, bc, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/runs/"+run.ID+"/cancel", strings.NewReader(`{}`))
 
@@ -378,7 +378,7 @@ func TestRunCancelEndpointRejectsTerminalRuns(t *testing.T) {
 		t.Fatalf("create run: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/runs/"+run.ID+"/cancel", strings.NewReader(`{}`))
 
@@ -394,7 +394,7 @@ func TestRunCancelEndpointRejectsTerminalRuns(t *testing.T) {
 }
 
 func TestDeleteMissingConnectionReturnsStructuredError(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/connections/missing", nil)
 
@@ -440,7 +440,7 @@ func TestConnectionDeleteConflictReturnsStructuredError(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/connections/"+conn.ID, nil)
 
@@ -464,7 +464,7 @@ func TestInternalErrorReturnsGenericStructuredJSON(t *testing.T) {
 	if err := st.Close(); err != nil {
 		t.Fatalf("close store: %v", err)
 	}
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/connections", nil)
 
@@ -483,7 +483,7 @@ func TestInternalErrorReturnsGenericStructuredJSON(t *testing.T) {
 }
 
 func TestJobNotFoundReturnsStructuredError(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/jobs/missing", nil)
 
@@ -502,7 +502,7 @@ func TestJobNotFoundReturnsStructuredError(t *testing.T) {
 }
 
 func TestDeleteMissingJobReturnsStructuredError(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/jobs/missing", nil)
 
@@ -521,7 +521,7 @@ func TestDeleteMissingJobReturnsStructuredError(t *testing.T) {
 }
 
 func TestJobExtraSegmentsReturnJSONNotFound(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "")
 	tests := []string{
 		"/jobs/job-1/extra",
 		"/jobs/job-1/runs/extra",
@@ -609,7 +609,7 @@ func TestJobRunsDatasetBusyReturnsStructuredConflict(t *testing.T) {
 		t.Fatalf("create busy run: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/jobs/job-1/runs", nil)
 
@@ -668,7 +668,7 @@ func TestJobRunsPersistRegistrationConfigSnapshot(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/jobs/job-reg/runs", strings.NewReader(`{
 		"registration_config": {
@@ -748,7 +748,7 @@ func TestJobRunsPersistIceRegistrationConfigSnapshotWithRawConfig(t *testing.T) 
 		t.Fatalf("create job: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/jobs/job-ice/runs", strings.NewReader(`{
 		"registration_config": {
@@ -811,7 +811,7 @@ func TestJobRunsGenericPlannerFailureReturnsStructuredInternalError(t *testing.T
 		t.Fatalf("create job: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/jobs/job-bad/runs", nil)
 
@@ -830,7 +830,7 @@ func TestJobRunsGenericPlannerFailureReturnsStructuredInternalError(t *testing.T
 }
 
 func TestRecovererReturnsStructuredJSONInternalError(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{}, "")
 	h := srv.withRecoverer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic("boom")
 	}))

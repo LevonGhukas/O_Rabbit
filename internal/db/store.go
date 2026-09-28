@@ -5,6 +5,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,10 +14,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"encoding/base64"
 
+	secretcrypto "github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
-    secretcrypto "github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	_ "modernc.org/sqlite"
 )
 
@@ -27,60 +27,56 @@ func runRegistrationConfigAAD(runID string) []byte {
 }
 
 func (s *Store) encryptRunRegistrationConfig(runID string, plaintext []byte) (string, error) {
-	if len(plaintext) == 0 {
-		return "", nil
-	}
-	if s.masterKey.IsZero() {
-		return "", ErrMasterKeyRequired
-	}
-
-	encrypted, err := secretcrypto.Encrypt(
-		s.masterKey,
-		plaintext,
-		runRegistrationConfigAAD(runID),
-	)
-	if err != nil {
-		return "", fmt.Errorf("encrypt run registration config: %w", err)
-	}
-
-	return encryptedRegistrationConfigPrefix +
-		base64.StdEncoding.EncodeToString(encrypted), nil
+	return encryptStoredJSON(s.masterKey, plaintext, runRegistrationConfigAAD(runID))
 }
 
 func (s *Store) decryptRunRegistrationConfig(runID, stored string) ([]byte, error) {
-	if strings.TrimSpace(stored) == "" {
-		return nil, nil
-	}
-
-	if !strings.HasPrefix(stored, encryptedRegistrationConfigPrefix) {
-		// Legacy plaintext row.
-		return []byte(stored), nil
-	}
-
-	if s.masterKey.IsZero() {
-		return nil, ErrMasterKeyRequired
-	}
-
-	encoded := strings.TrimPrefix(stored, encryptedRegistrationConfigPrefix)
-
-	blob, err := base64.StdEncoding.DecodeString(encoded)
+	plaintext, err := decryptStoredJSON(s.masterKey, stored, runRegistrationConfigAAD(runID))
 	if err != nil {
-		return nil, fmt.Errorf("decode encrypted run registration config: %w", err)
+		return nil, fmt.Errorf("run %s registration config: %w", runID, err)
 	}
-
-	plaintext, err := secretcrypto.Decrypt(
-		s.masterKey,
-		blob,
-		runRegistrationConfigAAD(runID),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt run registration config: %w", err)
-	}
-
 	return plaintext, nil
 }
 
+// encryptStoredJSON seals a JSON document for a TEXT column as
+// "enc:v1:<base64 blob>". Empty input stays empty.
+func encryptStoredJSON(k secretcrypto.Key, plaintext, aad []byte) (string, error) {
+	if len(plaintext) == 0 {
+		return "", nil
+	}
+	if k.IsZero() {
+		return "", ErrMasterKeyRequired
+	}
+	encrypted, err := secretcrypto.Encrypt(k, plaintext, aad)
+	if err != nil {
+		return "", err
+	}
+	return encryptedRegistrationConfigPrefix + base64.StdEncoding.EncodeToString(encrypted), nil
+}
 
+// decryptStoredJSON opens a value written by encryptStoredJSON. Unprefixed
+// values are legacy plaintext that MigrateLegacySecrets should have sealed at
+// startup, so they are refused rather than trusted.
+func decryptStoredJSON(k secretcrypto.Key, stored string, aad []byte) ([]byte, error) {
+	if strings.TrimSpace(stored) == "" {
+		return nil, nil
+	}
+	if !strings.HasPrefix(stored, encryptedRegistrationConfigPrefix) {
+		return nil, errors.New("value is stored unencrypted; run the legacy secret migration")
+	}
+	if k.IsZero() {
+		return nil, ErrMasterKeyRequired
+	}
+	blob, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(stored, encryptedRegistrationConfigPrefix))
+	if err != nil {
+		return nil, fmt.Errorf("decode encrypted value: %w", err)
+	}
+	plaintext, err := secretcrypto.Decrypt(k, blob, aad)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt value: %w", err)
+	}
+	return plaintext, nil
+}
 
 type Store struct {
 	db                      *sql.DB

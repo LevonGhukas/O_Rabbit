@@ -41,7 +41,7 @@ func loadWorkerConfigFromEnv() workerConfig {
 		MasterAddr:           "localhost:9102",
 		WorkerID:             "",
 		WorkerAddr:           "",
-		InsecureGRPC:         true,
+		InsecureGRPC:         false,
 		TLSCAFile:            "",
 		TLSServerName:        "",
 		WorkerAuthToken:      strings.TrimSpace(os.Getenv("ORABBIT_WORKER_AUTH_TOKEN")),

@@ -43,6 +43,9 @@ func TestCompleteRunCommitAtomicallyQueuesExactRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err = st.MigrateLegacySecrets(ctx, st.masterKey); err != nil {
+		t.Fatal(err)
+	}
 	if err = st.CompleteRunCommit(ctx, runID); err != nil {
 		t.Fatal(err)
 	}
