@@ -3,9 +3,14 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
+
+// ErrCommitClaimLost is returned when a committer no longer holds the run's
+// commit claim, for example because its lease expired.
+var ErrCommitClaimLost = errors.New("commit claim lost")
 
 const (
 	CommitReconciliationPending        = "PENDING"
@@ -107,5 +112,55 @@ func (s *Store) RecordCommitReconciliationFailure(ctx context.Context, runID, cl
 			return err
 		}
 		return tx.Commit()
+	})
+}
+
+// ClaimCommittingRun gives the caller the exclusive right to publish a
+// COMMITTING run until the claim expires. It succeeds only if the run is
+// eligible for a commit attempt and no other live claim exists.
+func (s *Store) ClaimCommittingRun(ctx context.Context, runID, token string, now time.Time, lease time.Duration) (bool, error) {
+	nowS := now.UTC().Format(time.RFC3339Nano)
+	var claimed bool
+	err := withBusyRetry(ctx, func() error {
+		res, err := s.db.ExecContext(ctx, `UPDATE runs SET commit_claim_token=?,commit_claim_expires_at=?
+			WHERE id=? AND status='COMMITTING'
+			AND commit_reconciliation_status IN ('','PENDING','RETRY_REQUIRED')
+			AND (commit_reconciliation_next_eligible_at IS NULL OR julianday(commit_reconciliation_next_eligible_at)<=julianday(?))
+			AND (commit_claim_token='' OR commit_claim_expires_at IS NULL OR julianday(commit_claim_expires_at)<=julianday(?))`,
+			token, now.Add(lease).UTC().Format(time.RFC3339Nano), runID, nowS, nowS)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		claimed = n == 1
+		return err
+	})
+	return claimed, err
+}
+
+// RenewCommitClaim extends a held claim; it returns ErrCommitClaimLost if the
+// claim expired or the run is no longer committing.
+func (s *Store) RenewCommitClaim(ctx context.Context, runID, token string, now time.Time, lease time.Duration) error {
+	return withBusyRetry(ctx, func() error {
+		res, err := s.db.ExecContext(ctx, `UPDATE runs SET commit_claim_expires_at=? WHERE id=? AND status='COMMITTING' AND commit_claim_token=? AND julianday(commit_claim_expires_at)>julianday(?)`,
+			now.Add(lease).UTC().Format(time.RFC3339Nano), runID, token, now.UTC().Format(time.RFC3339Nano))
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			if err != nil {
+				return err
+			}
+			return ErrCommitClaimLost
+		}
+		return nil
+	})
+}
+
+// ReleaseCommitClaim drops a claim held with token, whatever the run status.
+func (s *Store) ReleaseCommitClaim(ctx context.Context, runID, token string) error {
+	return withBusyRetry(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, `UPDATE runs SET commit_claim_token='',commit_claim_expires_at=NULL WHERE id=? AND commit_claim_token=?`, runID, token)
+		return err
 	})
 }

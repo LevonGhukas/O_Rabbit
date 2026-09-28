@@ -635,3 +635,39 @@ func TestFailAbandonedPlanningRunsFreesOnlyTasklessPlanningRuns(t *testing.T) {
 		t.Fatalf("dataset must be free after recovery: %v", err)
 	}
 }
+
+func TestCommitClaimIsExclusiveAndExpires(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	if err := st.CreateRun(ctx, Run{ID: "run-claim", JobID: "job", Status: "RUNNING", CorrelationID: "c", StartedAt: nowUTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`UPDATE runs SET status='COMMITTING', commit_reconciliation_status='PENDING' WHERE id='run-claim'`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if ok, err := st.ClaimCommittingRun(ctx, "run-claim", "a", now, time.Minute); err != nil || !ok {
+		t.Fatalf("first claim ok=%v err=%v", ok, err)
+	}
+	if ok, _ := st.ClaimCommittingRun(ctx, "run-claim", "b", now, time.Minute); ok {
+		t.Fatal("a live claim must be exclusive")
+	}
+	if err := st.RenewCommitClaim(ctx, "run-claim", "b", now, time.Minute); !errors.Is(err, ErrCommitClaimLost) {
+		t.Fatalf("non-holder renewal err=%v", err)
+	}
+	// A crashed holder stops renewing; its claim can be taken after expiry.
+	later := now.Add(2 * time.Minute)
+	if err := st.RenewCommitClaim(ctx, "run-claim", "a", later, time.Minute); !errors.Is(err, ErrCommitClaimLost) {
+		t.Fatalf("expired claim renewal err=%v", err)
+	}
+	if ok, err := st.ClaimCommittingRun(ctx, "run-claim", "b", later, time.Minute); err != nil || !ok {
+		t.Fatalf("takeover after expiry ok=%v err=%v", ok, err)
+	}
+	// Releasing with a stale token must not drop the new holder's claim.
+	if err := st.ReleaseCommitClaim(ctx, "run-claim", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := st.ClaimCommittingRun(ctx, "run-claim", "c", later, time.Minute); ok {
+		t.Fatal("stale release must not free another holder's claim")
+	}
+}

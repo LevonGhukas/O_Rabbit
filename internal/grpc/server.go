@@ -626,43 +626,17 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *grpcpb.ReportTaskRes
 		return nil, ferr
 	}
 	if changed {
-		launchIcebergRegistration := false
-		emitRunStatusEvent := true
-		// NOTE: when a run reaches the SUCCEEDED state, it is not fully finished until we commit it:
-		// promote staged objects into their final keys and write <prefix>/_state.json.
-		//
-		// We publish "run SUCCEEDED" only after commitRun succeeds so clients (and the CLI) can safely
-		// proceed immediately to downstream steps (like Iceberg insert) without racing _state.json.
+		// Publishing a run (verifying artifacts, writing the manifest and
+		// dataset state) can take many minutes, so it never runs inside this
+		// worker's RPC. The run is now COMMITTING; a claimed committer on the
+		// master's own context publishes it and emits "run committed".
+		re := db.Event{ID: newID(), RunID: runID, TS: time.Now().UTC().Format(time.RFC3339Nano), Level: "INFO", Message: fmt.Sprintf("run %s", newStatus), FieldsJSON: []byte(`{}`)}
+		_ = s.st.InsertEvent(ctx, re)
+		if s.bc != nil {
+			s.bc.Publish(re)
+		}
 		if newStatus == "COMMITTING" {
-			commitCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-			defer cancel()
-			if err := s.finalizeRunCommit(commitCtx, runID); err != nil {
-				msg := err.Error()
-
-				fields, _ := json.Marshal(map[string]any{"error": msg})
-				fe := db.Event{ID: newID(), RunID: runID, TS: time.Now().UTC().Format(time.RFC3339Nano), Level: "ERROR", Message: "commit failed", FieldsJSON: fields}
-				_ = s.st.InsertEvent(ctx, fe)
-				if s.bc != nil {
-					s.bc.Publish(fe)
-				}
-
-				return &grpcpb.ReportTaskResultResponse{Accepted: accepted, Message: msg}, nil
-			}
-			newStatus = "SUCCEEDED"
-			launchIcebergRegistration = true
-			// CompleteRunCommit atomically records the sole final completion event.
-			emitRunStatusEvent = false
-		}
-
-		if emitRunStatusEvent {
-			re := db.Event{ID: newID(), RunID: runID, TS: time.Now().UTC().Format(time.RFC3339Nano), Level: "INFO", Message: fmt.Sprintf("run %s", newStatus), FieldsJSON: []byte(`{}`)}
-			_ = s.st.InsertEvent(ctx, re)
-			if s.bc != nil {
-				s.bc.Publish(re)
-			}
-		}
-		if launchIcebergRegistration {
-			s.launchIcebergRegistration(runID)
+			s.launchCommit(runID)
 		}
 	}
 

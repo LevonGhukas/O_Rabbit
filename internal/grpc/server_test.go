@@ -660,8 +660,24 @@ func TestReportTaskResultDoesNotScheduleIcebergRegistrationWhenCommitFails(t *te
 	if !resp.Accepted {
 		t.Fatalf("accepted=%v want true", resp.Accepted)
 	}
-	if resp.Message != "rpc error: code = Internal desc = commit blew up" {
+	// The worker's RPC returns once the run is COMMITTING; the commit runs
+	// asynchronously and its failure is recorded on the run, not returned.
+	if resp.Message != "accepted" {
 		t.Fatalf("message=%q", resp.Message)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		run, err := st.GetRun(ctx, "run-ice-fail")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run.CommitReconciliationAttempt == 1 && run.CommitReconciliationStatus == db.CommitReconciliationRetryRequired {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("commit failure was not recorded: status=%s reconciliation=%s attempts=%d", run.Status, run.CommitReconciliationStatus, run.CommitReconciliationAttempt)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	select {
