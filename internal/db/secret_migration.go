@@ -28,6 +28,14 @@ func (s *Store) MigrateLegacySecrets(ctx context.Context, k secretcrypto.Key) er
 			return fmt.Errorf("migrate config versions: %w", err)
 		}
 
+		if err := migrateLegacyEncryptedJSONColumn(ctx, tx, k, "runs", "registration_config_json", runRegistrationConfigAAD); err != nil {
+			return fmt.Errorf("migrate run registration configs: %w", err)
+		}
+
+		if err := migrateLegacyEncryptedJSONColumn(ctx, tx, k, "iceberg_registrations", "retry_override_config_json", registrationRetryOverrideAAD); err != nil {
+			return fmt.Errorf("migrate registration retry overrides: %w", err)
+		}
+
 		return nil
 	})
 }
@@ -265,6 +273,66 @@ func migrateLegacyServerCredentials(
 			password,
 			passphrase,
 			item.serverID,
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// migrateLegacyEncryptedJSONColumn seals plaintext JSON left in a TEXT column
+// by releases that stored it unencrypted. table and column are fixed
+// identifiers supplied by this package, never user input.
+func migrateLegacyEncryptedJSONColumn(
+	ctx context.Context,
+	tx *sql.Tx,
+	k secretcrypto.Key,
+	table, column string,
+	aad func(id string) []byte,
+) error {
+	rows, err := tx.QueryContext(
+		ctx,
+		`SELECT id, `+column+` FROM `+table+`
+		 WHERE trim(`+column+`) <> '' AND `+column+` NOT LIKE '`+encryptedRegistrationConfigPrefix+`%'`,
+	)
+	if err != nil {
+		return err
+	}
+
+	type legacyValue struct {
+		id    string
+		value string
+	}
+
+	var items []legacyValue
+
+	for rows.Next() {
+		var item legacyValue
+		if err := rows.Scan(&item.id, &item.value); err != nil {
+			rows.Close()
+			return err
+		}
+		items = append(items, item)
+	}
+
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, item := range items {
+		sealed, err := encryptStoredJSON(k, []byte(item.value), aad(item.id))
+		if err != nil {
+			return fmt.Errorf("%s %s: %w", table, item.id, err)
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE `+table+` SET `+column+`=? WHERE id=?`,
+			sealed,
+			item.id,
 		); err != nil {
 			return err
 		}

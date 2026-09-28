@@ -13,6 +13,7 @@ func TestValidateAuthentication(t *testing.T) {
 		httpToken   string
 		workerToken string
 		insecure    bool
+		allowRemote bool
 		wantErr     string
 	}{
 		{
@@ -42,11 +43,11 @@ func TestValidateAuthentication(t *testing.T) {
 			wantErr:  "requires ORABBIT_HTTP_AUTH_TOKEN",
 		},
 		{
-			name:      "remote insecure grpc without worker token",
-			http:      "127.0.0.1:9100",
-			grpc:      "0.0.0.0:9102",
-			insecure:  true,
-			wantErr:   "requires ORABBIT_WORKER_AUTH_TOKEN",
+			name:     "remote insecure grpc without worker token",
+			http:     "127.0.0.1:9100",
+			grpc:     "0.0.0.0:9102",
+			insecure: true,
+			wantErr:  "requires ORABBIT_WORKER_AUTH_TOKEN",
 		},
 		{
 			name:        "remote insecure grpc with worker token",
@@ -63,6 +64,29 @@ func TestValidateAuthentication(t *testing.T) {
 			insecure: true,
 			wantErr:  "requires ORABBIT_WORKER_AUTH_TOKEN",
 		},
+		{
+			name:        "remote insecure grpc with explicit private-network opt-in",
+			http:        "127.0.0.1:9100",
+			grpc:        "0.0.0.0:9102",
+			workerToken: "worker-secret",
+			insecure:    true,
+			allowRemote: true,
+		},
+		{
+			name:        "private-network opt-in still requires worker token",
+			http:        "127.0.0.1:9100",
+			grpc:        "0.0.0.0:9102",
+			insecure:    true,
+			allowRemote: true,
+			wantErr:     "requires ORABBIT_WORKER_AUTH_TOKEN",
+		},
+		{
+			name:        "remote tls grpc without cert",
+			http:        "127.0.0.1:9100",
+			grpc:        "0.0.0.0:9102",
+			workerToken: "worker-secret",
+			wantErr:     "requires ORABBIT_TLS_CERT_FILE",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -72,6 +96,8 @@ func TestValidateAuthentication(t *testing.T) {
 				HTTPAuthToken:   tc.httpToken,
 				WorkerAuthToken: tc.workerToken,
 				Insecure:        tc.insecure,
+
+				AllowInsecureRemoteGRPC: tc.allowRemote,
 			}
 			err := cfg.validateAuthentication()
 			if tc.wantErr == "" && err != nil {

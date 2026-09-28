@@ -102,6 +102,10 @@ func cmdStart(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "--count must be >= 1")
 		return exitUsage
 	}
+	if startMaster && strings.TrimSpace(os.Getenv("ORABBIT_MASTER_KEY")) == "" {
+		fmt.Fprintln(os.Stderr, "starting master requires ORABBIT_MASTER_KEY (for example: export ORABBIT_MASTER_KEY=\"$(openssl rand -base64 32)\")")
+		return exitUsage
+	}
 	if startMaster && !*insecure && (strings.TrimSpace(*tlsCert) == "" || strings.TrimSpace(*tlsKey) == "") {
 		fmt.Fprintln(os.Stderr, "starting master with TLS requires both --tls-cert and --tls-key")
 		return exitUsage

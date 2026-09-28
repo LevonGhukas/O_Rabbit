@@ -37,7 +37,7 @@ func (s *Store) ClaimReconciliation(ctx context.Context, now time.Time, lease ti
 		}
 		defer tx.Rollback()
 		row := tx.QueryRowContext(ctx, `SELECT id,run_id,dataset_id,dataset_sequence,target_key,commit_id,manifest_key,artifact_set_digest,backend_type,catalog_namespace,table_identifier,status,attempt_count,current_attempt_id,next_eligible_at,last_error_class,last_error_message,registered_snapshot_or_metadata_id,created_at,updated_at,registered_at,retry_override_config_json FROM iceberg_registrations WHERE status='RECONCILING' AND reconciliation_status IN ('PENDING','RETRY_REQUIRED') AND (reconciliation_next_eligible_at IS NULL OR reconciliation_next_eligible_at<=?) ORDER BY dataset_sequence,id LIMIT 1`, now.UTC().Format(time.RFC3339Nano))
-		r, e := scanRegistration(row)
+		r, e := s.scanRegistration(row)
 		if e == sql.ErrNoRows {
 			return tx.Commit()
 		}

@@ -194,9 +194,10 @@ split-worker Compose file translates its other connection settings into flags.
 | `ORABBIT_GRPC_ADDR` | `127.0.0.1:9102` | gRPC listen address |
 | `ORABBIT_HTTP_AUTH_TOKEN` | empty | Bearer token for known API and SSE routes |
 | `ORABBIT_WORKER_AUTH_TOKEN` | empty | Shared bearer token for worker control-plane RPCs; required for non-loopback gRPC |
-| `ORABBIT_MASTER_KEY` | empty | Base64 or hex encoded 32-byte AES-256 key |
+| `ORABBIT_MASTER_KEY` | required | Base64 or hex encoded 32-byte AES-256 key |
 | `ORABBIT_ICE_BIN` | `ice` | `ice` CLI executable used by `engine=ice` registration |
-| `ORABBIT_GRPC_INSECURE` | `true` | Disable master gRPC TLS |
+| `ORABBIT_GRPC_INSECURE` | `false` | Disable master gRPC TLS (loopback only) |
+| `ORABBIT_GRPC_ALLOW_INSECURE_REMOTE` | `false` | Permit plaintext gRPC on a non-loopback listener; isolated private networks only |
 | `ORABBIT_TLS_CERT_FILE` | empty | Master gRPC certificate |
 | `ORABBIT_TLS_KEY_FILE` | empty | Master gRPC private key |
 | `ORABBIT_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARN`, or `ERROR` |
@@ -244,9 +245,8 @@ counts, connected workers, and master logs before raising a limit. Repeated
 upload waiting with healthy task-lease renewal indicates the global upload
 limit is full.
 
-If `ORABBIT_MASTER_KEY` is absent, connection secrets use plaintext
-compatibility storage. Remote SSH credentials and saved remote configuration
-versions require a master key. Keep the key stable: replacing or losing it makes
+The master refuses to start without `ORABBIT_MASTER_KEY`; every stored secret
+is encrypted with it. Keep the key stable: replacing or losing it makes
 previously encrypted values unreadable.
 
 Generate suitable secrets without placing their values in source control:
@@ -308,6 +308,13 @@ Example deployment files are provided as `.env.master.example`,
 ## Running locally
 
 ### Native processes
+
+The master requires an encryption key. Generate one once and keep it; losing
+it makes stored secrets unreadable:
+
+```sh
+export ORABBIT_MASTER_KEY="$(openssl rand -base64 32)"
+```
 
 Start a master:
 
@@ -593,11 +600,20 @@ The default HTTP and gRPC listeners bind to `127.0.0.1`. A non-loopback HTTP
 listener is accepted only when `ORABBIT_HTTP_AUTH_TOKEN` is set and must sit
 behind a trusted TLS-terminating proxy or tunnel; the built-in HTTP listener
 does not terminate TLS. A non-loopback gRPC listener is accepted only when
-`ORABBIT_WORKER_AUTH_TOKEN` is set. The master validates the bearer credential
-on every worker-facing RPC; health checks remain unauthenticated.
-`ORABBIT_GRPC_INSECURE=true` disables encryption, not worker authentication,
-and is suitable only for loopback or a trusted private container/VPN network.
-Any public gRPC endpoint must use both worker authentication and TLS.
+`ORABBIT_WORKER_AUTH_TOKEN` is set and gRPC TLS is configured
+(`ORABBIT_TLS_CERT_FILE`/`ORABBIT_TLS_KEY_FILE`). The master validates the
+bearer credential on every worker-facing RPC; health checks remain
+unauthenticated. gRPC TLS is on by default; `ORABBIT_GRPC_INSECURE=true`
+disables encryption (not worker authentication) and is accepted only on a
+loopback listener, unless `ORABBIT_GRPC_ALLOW_INSECURE_REMOTE=true` is also set
+for an isolated private network such as a single-host Docker network. Task
+assignments carry source and target credentials, so never combine those two
+settings on a routable network.
+
+`ORABBIT_MASTER_KEY` is required. At startup the master encrypts any legacy
+plaintext connection secrets, SSH credentials, saved config versions, run
+registration configs, and registration retry overrides, and it refuses to read
+plaintext secrets afterwards.
 
 ### Core routes
 

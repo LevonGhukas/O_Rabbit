@@ -25,7 +25,7 @@ services:
           -master "$${ORABBIT_MASTER_GRPC_ADDR}" \
           -worker-id "$${wid}" \
           -worker-addr "$${waddr}" \
-          -insecure="$${ORABBIT_GRPC_INSECURE:-true}" \
+          -insecure="$${ORABBIT_GRPC_INSECURE:-false}" \
           -tls-ca "$${ORABBIT_TLS_CA_FILE:-}" \
           -tls-server-name "$${ORABBIT_TLS_SERVER_NAME:-}" \
           -poll "$${ORABBIT_WORKER_POLL:-2s}" \
