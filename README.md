@@ -200,6 +200,7 @@ split-worker Compose file translates its other connection settings into flags.
 | `ORABBIT_GRPC_ALLOW_INSECURE_REMOTE` | `false` | Permit plaintext gRPC on a non-loopback listener; isolated private networks only |
 | `ORABBIT_TLS_CERT_FILE` | empty | Master gRPC certificate |
 | `ORABBIT_TLS_KEY_FILE` | empty | Master gRPC private key |
+| `ORABBIT_TLS_CLIENT_CA_FILE` | empty | CA that signs worker client certificates; enables mutual TLS and is required for a non-loopback gRPC listener |
 | `ORABBIT_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARN`, or `ERROR` |
 | `ORABBIT_LOG_FORMAT` | `json` | `json` or `text` |
 | `ORABBIT_TASK_LEASE_DURATION` | `30s` | Attempt lease duration |
@@ -277,13 +278,15 @@ These values configure logging and managed temporary storage directly:
 | `ORABBIT_TEMP_DRY_RUN` | `false` |
 
 The worker flags `-master`, `-worker-id`, `-worker-addr`, `-insecure`,
-`-tls-ca`, `-tls-server-name`, `-worker-auth-token`, and `-poll` configure
+`-tls-ca`, `-tls-server-name`, `-tls-cert`, `-tls-key`, `-worker-auth-token`,
+and `-poll` configure
 control-plane access. Prefer the environment variable over the token flag so
 the credential is not exposed in process arguments. In
 `docker-compose.worker.yml`, `ORABBIT_MASTER_GRPC_ADDR`,
 `ORABBIT_GRPC_INSECURE`, `ORABBIT_TLS_CA_FILE`,
 `ORABBIT_TLS_SERVER_NAME`, and `ORABBIT_WORKER_POLL` are translated to those
-flags.
+flags. The worker reads its mutual-TLS client certificate and key from
+`ORABBIT_TLS_CERT_FILE` and `ORABBIT_TLS_KEY_FILE` (or `-tls-cert`/`-tls-key`).
 
 ### Connector and CLI environment
 
@@ -600,8 +603,11 @@ The default HTTP and gRPC listeners bind to `127.0.0.1`. A non-loopback HTTP
 listener is accepted only when `ORABBIT_HTTP_AUTH_TOKEN` is set and must sit
 behind a trusted TLS-terminating proxy or tunnel; the built-in HTTP listener
 does not terminate TLS. A non-loopback gRPC listener is accepted only when
-`ORABBIT_WORKER_AUTH_TOKEN` is set and gRPC TLS is configured
-(`ORABBIT_TLS_CERT_FILE`/`ORABBIT_TLS_KEY_FILE`). The master validates the
+`ORABBIT_WORKER_AUTH_TOKEN` is set and mutual TLS is configured: the server
+certificate (`ORABBIT_TLS_CERT_FILE`/`ORABBIT_TLS_KEY_FILE`) plus
+`ORABBIT_TLS_CLIENT_CA_FILE`, the CA that must have signed every worker's
+client certificate. Workers present that certificate with
+`ORABBIT_TLS_CERT_FILE`/`ORABBIT_TLS_KEY_FILE`. The master validates the
 bearer credential on every worker-facing RPC; health checks remain
 unauthenticated. gRPC TLS is on by default; `ORABBIT_GRPC_INSECURE=true`
 disables encryption (not worker authentication) and is accepted only on a
@@ -837,9 +843,13 @@ key cannot decrypt existing AES-GCM blobs.
 
 ### TLS startup or worker connection fails
 
-When master `-insecure=false`, both `-tls-cert` and `-tls-key` are required.
-Workers must use `-insecure=false`, a trusted `-tls-ca`, and, when needed,
-`-tls-server-name`.
+When master `-insecure=false`, both `-tls-cert` and `-tls-key` are required,
+and a non-loopback `-grpc-addr` also requires `-tls-client-ca`. Workers must use
+`-insecure=false`, a trusted `-tls-ca`, a client certificate signed by the
+master's client CA (`-tls-cert`/`-tls-key`), and, when needed,
+`-tls-server-name`. A handshake error such as "certificate required" or "bad
+certificate" means the worker's client certificate is missing or not signed by
+`ORABBIT_TLS_CLIENT_CA_FILE`.
 
 ### A canceled run leaves objects temporarily
 

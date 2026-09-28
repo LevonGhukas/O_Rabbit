@@ -254,7 +254,7 @@ func main() {
 		httpErr <- httpSrv.Serve(leaderCtx, cfg.HTTPAddr)
 	}()
 
-	gcfg := grpcapi.Config{Addr: cfg.GRPCAddr, Insecure: cfg.Insecure, TLSCertFile: cfg.TLSCert, TLSKeyFile: cfg.TLSKey, WorkerAuthToken: cfg.WorkerAuthToken, HeartbeatInterval: 5 * time.Second}
+	gcfg := grpcapi.Config{Addr: cfg.GRPCAddr, Insecure: cfg.Insecure, TLSCertFile: cfg.TLSCert, TLSKeyFile: cfg.TLSKey, TLSClientCAFile: cfg.TLSClientCA, WorkerAuthToken: cfg.WorkerAuthToken, HeartbeatInterval: 5 * time.Second}
 	grpcErr := make(chan error, 1)
 	go func() {
 		grpcErr <- grpcapi.ListenAndServe(leaderCtx, gcfg, grpcSrv)
@@ -266,6 +266,7 @@ func main() {
 		slog.Bool("http_auth", strings.TrimSpace(cfg.HTTPAuthToken) != ""),
 		slog.Bool("worker_auth", strings.TrimSpace(cfg.WorkerAuthToken) != ""),
 		slog.Bool("insecure", cfg.Insecure),
+		slog.Bool("grpc_mtls", !cfg.Insecure && strings.TrimSpace(cfg.TLSClientCA) != ""),
 		slog.String("iceberg_registration", "persisted-run-snapshot"),
 		slog.String("ice_binary", cfg.IceBin),
 		slog.String("log_level", cfg.LogLevel),

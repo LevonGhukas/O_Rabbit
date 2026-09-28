@@ -49,6 +49,7 @@ type Config struct {
 	Insecure          bool
 	TLSCertFile       string
 	TLSKeyFile        string
+	TLSClientCAFile   string
 	WorkerAuthToken   string
 	HeartbeatInterval time.Duration
 }
@@ -1663,8 +1664,9 @@ func ListenAndServe(ctx context.Context, cfg Config, srv *Server) error {
 	if cfg.Insecure {
 		creds = insecure.NewCredentials()
 	} else {
-		c, err := credentials.NewServerTLSFromFile(cfg.TLSCertFile, cfg.TLSKeyFile)
+		c, err := serverTransportCredentials(cfg)
 		if err != nil {
+			_ = lis.Close()
 			return err
 		}
 		creds = c

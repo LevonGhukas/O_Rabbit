@@ -73,6 +73,15 @@ func (c masterConfig) validateAuthentication() error {
 		if strings.TrimSpace(c.TLSKey) == "" {
 			return fmt.Errorf("gRPC TLS requires ORABBIT_TLS_KEY_FILE")
 		}
+		// Task assignments carry source and target credentials, so a reachable
+		// listener must authenticate workers cryptographically, not only by the
+		// shared bearer token.
+		if grpcRemote && strings.TrimSpace(c.TLSClientCA) == "" {
+			return fmt.Errorf(
+				"remote gRPC listen address %q requires mutual TLS; set ORABBIT_TLS_CLIENT_CA_FILE",
+				c.GRPCAddr,
+			)
+		}
 	}
 
 	if !isLoopbackListenAddress(c.HTTPAddr) && strings.TrimSpace(c.HTTPAuthToken) == "" {
@@ -114,6 +123,7 @@ type masterConfig struct {
 	AllowInsecureRemoteGRPC bool
 	TLSCert                 string
 	TLSKey                  string
+	TLSClientCA             string
 
 	LogLevel                          string
 	LogFormat                         string
@@ -150,6 +160,7 @@ func loadMasterConfigFromEnv() masterConfig {
 		AllowInsecureRemoteGRPC:           envBoolDefault("ORABBIT_GRPC_ALLOW_INSECURE_REMOTE", false),
 		TLSCert:                           strings.TrimSpace(os.Getenv("ORABBIT_TLS_CERT_FILE")),
 		TLSKey:                            strings.TrimSpace(os.Getenv("ORABBIT_TLS_KEY_FILE")),
+		TLSClientCA:                       strings.TrimSpace(os.Getenv("ORABBIT_TLS_CLIENT_CA_FILE")),
 		LogLevel:                          envutil.EnvOrDefault("ORABBIT_LOG_LEVEL", "INFO"),
 		LogFormat:                         envutil.EnvOrDefault("ORABBIT_LOG_FORMAT", "json"),
 		TaskLeaseDuration:                 envDurationDefault("ORABBIT_TASK_LEASE_DURATION", 30*time.Second),
@@ -185,6 +196,7 @@ func bindMasterFlags(cfg *masterConfig) {
 	flag.BoolVar(&cfg.AllowInsecureRemoteGRPC, "allow-insecure-remote-grpc", cfg.AllowInsecureRemoteGRPC, "Permit plaintext gRPC on a non-loopback listener (isolated private networks only)")
 	flag.StringVar(&cfg.TLSCert, "tls-cert", cfg.TLSCert, "gRPC TLS cert file (or ORABBIT_TLS_CERT_FILE)")
 	flag.StringVar(&cfg.TLSKey, "tls-key", cfg.TLSKey, "gRPC TLS key file (or ORABBIT_TLS_KEY_FILE)")
+	flag.StringVar(&cfg.TLSClientCA, "tls-client-ca", cfg.TLSClientCA, "CA file for verifying worker client certificates; enables mutual TLS (or ORABBIT_TLS_CLIENT_CA_FILE; required for non-loopback gRPC)")
 	flag.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level: DEBUG, INFO, WARN, ERROR")
 	flag.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "Log format: json or text")
 	flag.DurationVar(&cfg.TaskLeaseDuration, "task-lease-duration", cfg.TaskLeaseDuration, "Task attempt lease duration")

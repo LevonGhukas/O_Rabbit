@@ -21,6 +21,8 @@ type workerConfig struct {
 	InsecureGRPC         bool
 	TLSCAFile            string
 	TLSServerName        string
+	TLSCertFile          string
+	TLSKeyFile           string
 	WorkerAuthToken      string
 	Poll                 time.Duration
 	LogLevel             string
@@ -44,6 +46,8 @@ func loadWorkerConfigFromEnv() workerConfig {
 		InsecureGRPC:         false,
 		TLSCAFile:            "",
 		TLSServerName:        "",
+		TLSCertFile:          strings.TrimSpace(os.Getenv("ORABBIT_TLS_CERT_FILE")),
+		TLSKeyFile:           strings.TrimSpace(os.Getenv("ORABBIT_TLS_KEY_FILE")),
 		WorkerAuthToken:      strings.TrimSpace(os.Getenv("ORABBIT_WORKER_AUTH_TOKEN")),
 		Poll:                 2 * time.Second,
 		LogLevel:             envutil.EnvOrDefault("ORABBIT_LOG_LEVEL", "INFO"),
@@ -68,6 +72,8 @@ func newWorkerFlagSet(cfg *workerConfig) *flag.FlagSet {
 	fs.BoolVar(&cfg.InsecureGRPC, "insecure", cfg.InsecureGRPC, "Disable gRPC TLS (dev)")
 	fs.StringVar(&cfg.TLSCAFile, "tls-ca", cfg.TLSCAFile, "CA certificate file for master gRPC TLS")
 	fs.StringVar(&cfg.TLSServerName, "tls-server-name", cfg.TLSServerName, "Expected TLS server name (optional)")
+	fs.StringVar(&cfg.TLSCertFile, "tls-cert", cfg.TLSCertFile, "Worker client certificate for mutual TLS (or ORABBIT_TLS_CERT_FILE)")
+	fs.StringVar(&cfg.TLSKeyFile, "tls-key", cfg.TLSKeyFile, "Worker client private key for mutual TLS (or ORABBIT_TLS_KEY_FILE)")
 	fs.StringVar(&cfg.WorkerAuthToken, "worker-auth-token", cfg.WorkerAuthToken, "Bearer token for worker gRPC calls (or ORABBIT_WORKER_AUTH_TOKEN)")
 	fs.DurationVar(&cfg.Poll, "poll", cfg.Poll, "Poll interval when no tasks")
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level: DEBUG, INFO, WARN, ERROR (or ORABBIT_LOG_LEVEL)")
