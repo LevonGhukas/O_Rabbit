@@ -37,6 +37,7 @@ var migrations = []migration{
 	{version: 22, sql: schemaV22},
 	{version: 23, sql: schemaV23},
 	{version: 24, sql: schemaV24},
+	{version: 25, sql: schemaV25},
 }
 
 const schemaV21 = `
@@ -45,6 +46,13 @@ ALTER TABLE iceberg_registrations ADD COLUMN retry_override_config_json TEXT NOT
 
 const schemaV22 = `
 ALTER TABLE iceberg_registrations ADD COLUMN manual_retry_budget INTEGER NOT NULL DEFAULT 0;
+`
+
+// schemaV25 adds a leased claim on committing runs so exactly one committer
+// publishes a run at a time.
+const schemaV25 = `
+ALTER TABLE runs ADD COLUMN commit_claim_token TEXT NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN commit_claim_expires_at TEXT;
 `
 
 // schemaV24 adds master-issued worker identities. worker_ca holds the single

@@ -49,6 +49,7 @@ So the task becomes two concrete phases:
 **Status:** DONE
 
 **6. The master exits 0 on fatal errors.** In [cmd/master/main.go](cmd/master/main.go), recovery failures (committing runs, leases, registrations) and loss of leadership all `return` from `main`, which exits with code 0. `restart: on-failure` and Kubernetes treat that as a clean exit. Use `os.Exit(1)`.
+**Status:** DONE
 
 **7. Starting a run kills the job's in-flight run.** In [planner.go](internal/planner/planner.go), `CreateRunAndTasks` calls `FailRunningRunsForJob(... "superseded by new run")` before the active-dataset guard. A double-click, a CLI retry or a second scheduler tick silently fails a healthy run. The direct SQL in `failRunIDs` ([store.go:168](internal/db/store.go:168)) also:
 - skips `task_attempts` and upload-capacity leases;
@@ -57,12 +58,14 @@ So the task becomes two concrete phases:
 - registers no cleanup for objects already uploaded.
 
 Fix: reject the new run with `DatasetBusyError` (that logic already exists) and require an explicit cancel.
+**Status:** DONE
 
 **8. Commit runs synchronously inside the last worker's `ReportTaskResult` call.** See [server.go:~610](internal/grpc/server.go).
 - The commit re-downloads and re-hashes every artifact through the master, with a 30-minute budget.
 - Its context comes from the RPC context, and the worker gives up after 5s per attempt and 15s overall ([result_reporting.go](cmd/worker/result_reporting.go)). Any real-sized run therefore has its commit cancelled mid-flight and relies on the 2-second reconciliation loop.
 - That loop also picks up the same run immediately (`next_eligible_at IS NULL`), so two commits run at once with no claim or lease. The intent CAS stops corruption, but the losing commit can record false failures such as "state for run exists without durable intent" and use up retry attempts.
 - Fix: move the run to COMMITTING and return; let a single leased committer do the work.
+**Status:** DONE
 
 ## 🟠 High
 
