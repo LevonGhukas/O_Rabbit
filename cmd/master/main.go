@@ -80,7 +80,7 @@ func run() int {
 	defer processLock.Close()
 	cfg.DBPath = processLock.DatabasePath
 
-	st, err := db.Open(ctx, db.Config{Path: cfg.DBPath}, log)
+	st, err := db.Open(ctx, db.Config{Path: cfg.DBPath, ReadConns: cfg.DBReadConns}, log)
 	if err != nil {
 		log.Error("open db", slog.String("err", err.Error()))
 		return exitFailure
@@ -239,6 +239,22 @@ func run() int {
 			}
 		}
 	})
+	if cfg.HistoryRetention > 0 {
+		go runPeriodic(leaderCtx, log, "history retention", cfg.HistoryPruneInterval, func() {
+			res, err := st.PruneHistory(leaderCtx, time.Now().Add(-cfg.HistoryRetention))
+			if err != nil && leaderCtx.Err() == nil {
+				log.Warn("history retention prune failed", slog.String("err", err.Error()))
+			}
+			if res.Total() > 0 {
+				log.Info("history retention pruned rows",
+					slog.Int64("events", res.Events),
+					slog.Int64("task_attempts", res.TaskAttempts),
+					slog.Int64("registration_attempts", res.RegistrationAttempts),
+					slog.Int64("leadership_history", res.LeadershipHistory),
+				)
+			}
+		})
+	}
 
 	httpErr := make(chan error, 1)
 	httpSrv := httpapi.NewServer(log, st, bc, k, httpapi.StatusInfo{PID: os.Getpid(), HTTPAddr: cfg.HTTPAddr, GRPCAddr: cfg.GRPCAddr, DBPath: processLock.Identity}, cfg.HTTPAuthToken)

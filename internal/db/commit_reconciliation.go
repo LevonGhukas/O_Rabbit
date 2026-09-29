@@ -31,7 +31,7 @@ func (s *Store) attachCommitReconciliationProjection(ctx context.Context, run *R
 	}
 	var next sql.NullString
 	var operator int
-	if err := s.db.QueryRowContext(ctx, `SELECT commit_reconciliation_status,commit_reconciliation_attempt_count,commit_reconciliation_next_eligible_at,operator_action_required FROM runs WHERE id=?`, run.ID).Scan(
+	if err := s.rdb.QueryRowContext(ctx, `SELECT commit_reconciliation_status,commit_reconciliation_attempt_count,commit_reconciliation_next_eligible_at,operator_action_required FROM runs WHERE id=?`, run.ID).Scan(
 		&run.CommitReconciliationStatus,
 		&run.CommitReconciliationAttempt,
 		&next,

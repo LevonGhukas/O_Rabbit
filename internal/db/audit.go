@@ -34,7 +34,7 @@ func (s *Store) ListAuditRecords(ctx context.Context, limit int) ([]AuditRecord,
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.rdb.QueryContext(ctx, `
 		SELECT id, ts, actor_type, actor_id, action, resource_type, resource_id, request_id, before_json, after_json, metadata_json
 		FROM audit_log
 		ORDER BY ts DESC, id DESC
