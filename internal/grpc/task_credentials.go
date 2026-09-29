@@ -11,7 +11,6 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 	"github.com/LevonGhukas/O_Rabbit/internal/grpcpb"
-	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -61,15 +60,11 @@ func (s *Server) taskCredentials(ctx context.Context, runID, attemptID string) (
 	if err != nil {
 		return nil, "", err
 	}
-	job, err := s.st.GetJob(ctx, run.JobID)
+	r, err := s.resolveRun(ctx, run)
 	if err != nil {
 		return nil, "", err
 	}
-	srcConn, err := s.st.GetConnection(ctx, job.SourceConnectionID)
-	if err != nil {
-		return nil, "", err
-	}
-	tgtConn, err := s.st.GetConnection(ctx, job.TargetConnectionID)
+	srcConn, err := s.st.GetConnection(ctx, r.config.Job.SourceConnectionID)
 	if err != nil {
 		return nil, "", err
 	}
@@ -77,48 +72,38 @@ func (s *Server) taskCredentials(ctx context.Context, runID, attemptID string) (
 	if err != nil {
 		return nil, "", fmt.Errorf("source connection secret: %w", err)
 	}
-	tgt, err := decryptSecretMap(s.k, tgtConn)
+	s3cfg, err := s.targetS3Config(ctx, r)
 	if err != nil {
-		return nil, "", fmt.Errorf("target connection secret: %w", err)
-	}
-	var tgtMeta map[string]any
-	if err := json.Unmarshal(tgtConn.MetadataJSON, &tgtMeta); err != nil {
-		return nil, "", fmt.Errorf("target connection metadata: %w", err)
+		return nil, "", err
 	}
 
 	resp := &grpcpb.GetTaskCredentialsResponse{SourceDsn: stringMapValue(src, "dsn")}
-	accessKey, secretKey, sessionToken := stringMapValue(tgt, "access_key_id"), stringMapValue(tgt, "secret_access_key"), stringMapValue(tgt, "session_token")
-
+	tgtMeta := r.target.Metadata
 	mode := strings.ToLower(stringMapValue(tgtMeta, "credential_mode"))
 	switch mode {
 	case "", targetCredentialModeStatic:
-		resp.S3AccessKeyId, resp.S3SecretAccessKey, resp.S3SessionToken = accessKey, secretKey, sessionToken
+		resp.S3AccessKeyId, resp.S3SecretAccessKey, resp.S3SessionToken = s3cfg.AccessKeyID, s3cfg.SecretAccessKey, s3cfg.SessionToken
 		return resp, targetCredentialModeStatic, nil
 	case targetCredentialModeSTS:
 	default:
 		return nil, "", fmt.Errorf("target credential_mode %q is not supported", mode)
 	}
 
-	opts, err := jobopts.Parse(job.OptionsJSON)
-	if err != nil {
-		return nil, "", fmt.Errorf("job options: %w", err)
-	}
-	bucket := stringMapValue(tgtMeta, "bucket")
-	prefix := strings.TrimSuffix(datasetPrefixForJob(job, srcConn.Engine, opts, tgtMeta), "/") + "/_runs/run-" + runID
+	prefix := strings.TrimSuffix(r.prefix, "/") + "/_runs/run-" + runID
 	durationSeconds := defaultSTSDurationSeconds
 	if v, ok := tgtMeta["sts_duration_seconds"].(float64); ok && v > 0 {
 		durationSeconds = int(math.Min(math.Max(v, minSTSDurationSeconds), maxSTSDurationSeconds))
 	}
 	creds, err := s.assumeRoleFn(ctx, stsRequest{
 		Endpoint:        stsEndpoint(tgtMeta),
-		Region:          firstNonEmpty(stringMapValue(tgtMeta, "region"), "us-east-1"),
+		Region:          r.target.Region,
 		RoleARN:         stringMapValue(tgtMeta, "sts_role_arn"),
 		SessionName:     stsSessionName(attemptID),
-		Policy:          s3PrefixSessionPolicy(stsPartition(stringMapValue(tgtMeta, "sts_role_arn")), bucket, prefix),
+		Policy:          s3PrefixSessionPolicy(stsPartition(stringMapValue(tgtMeta, "sts_role_arn")), r.target.Bucket, prefix),
 		DurationSeconds: int32(durationSeconds),
-		AccessKeyID:     accessKey,
-		SecretAccessKey: secretKey,
-		SessionToken:    sessionToken,
+		AccessKeyID:     s3cfg.AccessKeyID,
+		SecretAccessKey: s3cfg.SecretAccessKey,
+		SessionToken:    s3cfg.SessionToken,
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("assume scoped S3 role: %w", err)

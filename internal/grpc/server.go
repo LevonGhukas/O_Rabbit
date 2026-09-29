@@ -68,6 +68,7 @@ type commitObjectStore interface {
 	GetObjectBytes(context.Context, string) ([]byte, bool, error)
 	PutObjectBytes(context.Context, string, []byte, string, map[string]string) error
 	OpenObject(context.Context, string) (io.ReadCloser, bool, error)
+	ObjectChecksum(context.Context, string) (int64, string, bool, error)
 }
 
 type s3CommitObjectStore struct{ uploader *s3io.Uploader }
@@ -107,6 +108,10 @@ func (s s3CommitObjectStore) PutObjectBytes(ctx context.Context, key string, b [
 
 func (s s3CommitObjectStore) OpenObject(ctx context.Context, key string) (io.ReadCloser, bool, error) {
 	return s.uploader.OpenObject(ctx, key)
+}
+
+func (s s3CommitObjectStore) ObjectChecksum(ctx context.Context, key string) (int64, string, bool, error) {
+	return s.uploader.ObjectChecksum(ctx, key)
 }
 
 // Server implements the gRPC control plane server.
@@ -568,7 +573,7 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *grpcpb.ReportTaskRes
 		if a == nil {
 			return nil, grpcstatus.Error(codes.InvalidArgument, "nil artifact integrity record")
 		}
-		records[i] = artifact.Record{ObjectKey: a.ObjectKey, ByteSize: a.ByteSize, SHA256: a.Sha256, RowCount: a.RowCount, SchemaFingerprint: a.SchemaFingerprint, RunID: a.RunId, TaskID: a.TaskId, AttemptID: a.AttemptId, AttemptNumber: int(a.AttemptNumber), FileIndex: int(a.FileIndex), FormatVersion: int(a.FormatVersion), VerificationMethod: a.VerificationMethod, VerificationStatus: a.VerificationStatus, VerifiedAt: a.VerifiedAt, MaxHWM: a.MaxHwm}
+		records[i] = artifact.Record{ObjectKey: a.ObjectKey, ByteSize: a.ByteSize, SHA256: a.Sha256, RowCount: a.RowCount, SchemaFingerprint: a.SchemaFingerprint, RunID: a.RunId, TaskID: a.TaskId, AttemptID: a.AttemptId, AttemptNumber: int(a.AttemptNumber), FileIndex: int(a.FileIndex), FormatVersion: int(a.FormatVersion), VerificationMethod: a.VerificationMethod, VerificationStatus: a.VerificationStatus, VerifiedAt: a.VerifiedAt, MaxHWM: a.MaxHwm, ProviderChecksumSHA256: a.ProviderChecksumSha256}
 		if records[i].RunID != runID {
 			return nil, grpcstatus.Error(codes.InvalidArgument, "artifact run identity mismatch")
 		}
@@ -705,7 +710,7 @@ func (s *Server) ProcessReconciliationOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return true, err
 	}
-	job, err := s.st.GetJob(ctx, run.JobID)
+	resolved, err := s.resolveRun(ctx, run)
 	if err != nil {
 		return true, err
 	}
@@ -713,19 +718,7 @@ func (s *Server) ProcessReconciliationOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return true, err
 	}
-	tgt, err := s.st.GetConnection(ctx, job.TargetConnectionID)
-	if err != nil {
-		return true, err
-	}
-	src, err := s.st.GetConnection(ctx, job.SourceConnectionID)
-	if err != nil {
-		return true, err
-	}
-	var meta map[string]any
-	_ = json.Unmarshal(tgt.MetadataJSON, &meta)
-	bucket, _ := meta["bucket"].(string)
-	opts, _ := jobopts.Parse(job.OptionsJSON)
-	prefix := datasetPrefixForJob(job, src.Engine, opts, meta)
+	bucket, opts, prefix := resolved.target.Bucket, resolved.opts, resolved.prefix
 	artifacts, err := s.st.ListArtifactsForRun(ctx, r.RunID)
 	if err != nil {
 		return true, err
@@ -736,11 +729,9 @@ func (s *Server) ProcessReconciliationOnce(ctx context.Context) (bool, error) {
 	}
 	table := reg.Table
 	if table == "" {
-		table = icebergreg.DefaultTable(src.Engine, strings.TrimSpace(opts.Table))
+		table = icebergreg.DefaultTable(resolved.config.SourceEngine, strings.TrimSpace(opts.Table))
 	}
-	endpoint, _ := meta["endpoint"].(string)
-	region, _ := meta["region"].(string)
-	obs, err := inspector.InspectCatalog(attemptCtx, icebergreg.InspectionRequest{Registration: reg, Table: table, DatasetBucket: bucket, DatasetPrefix: prefix, DatasetS3: s3io.Config{Endpoint: endpoint, Region: region, Bucket: bucket, ForcePathStyle: true}})
+	obs, err := inspector.InspectCatalog(attemptCtx, icebergreg.InspectionRequest{Registration: reg, Table: table, DatasetBucket: bucket, DatasetPrefix: prefix, DatasetS3: s3io.Config{Endpoint: resolved.target.Endpoint, Region: resolved.target.Region, Bucket: bucket, ForcePathStyle: resolved.target.ForcePathStyle}})
 	if err != nil {
 		if obs.TableExists && obs.MetadataStart != "" {
 			op := icebergreg.OperationIdentity{RegistrationID: r.ID, RunID: r.RunID, CommitID: r.CommitID, ArtifactSetDigest: r.ArtifactSetDigest, ManifestKey: r.ManifestKey}
@@ -798,22 +789,14 @@ func (s *Server) ProcessMultipartCleanupOnce(ctx context.Context) (bool, error) 
 	if err != nil {
 		return finish("RETRY", "MULTIPART_TRACKING_FAILED", err)
 	}
-	job, err := s.st.GetJob(ctx, run.JobID)
+	resolved, err := s.resolveRun(ctx, run)
 	if err != nil {
 		return finish("RETRY", "MULTIPART_TRACKING_FAILED", err)
 	}
-	target, err := s.st.GetConnection(ctx, job.TargetConnectionID)
+	cfg, err := s.targetS3Config(ctx, resolved)
 	if err != nil {
 		return finish("RETRY", "MULTIPART_TRACKING_FAILED", err)
 	}
-	var metadata, secret map[string]any
-	_ = json.Unmarshal(target.MetadataJSON, &metadata)
-	plain, err := crypto.Decrypt(s.k, target.SecretEncBlob, []byte(target.ID))
-	if err != nil {
-		return finish("RETRY", "MULTIPART_TRACKING_FAILED", err)
-	}
-	_ = json.Unmarshal(plain, &secret)
-	cfg := s3io.Config{Endpoint: stringMapValue(metadata, "endpoint"), Region: stringMapValue(metadata, "region"), Bucket: stringMapValue(metadata, "bucket"), ForcePathStyle: true, AccessKeyID: stringMapValue(secret, "access_key_id"), SecretAccessKey: stringMapValue(secret, "secret_access_key"), SessionToken: stringMapValue(secret, "session_token")}
 	uploader, err := s.newMultipartCleanerFn(ctx, cfg)
 	if err != nil {
 		return finish("RETRY", "MULTIPART_TRACKING_FAILED", err)
@@ -885,22 +868,14 @@ func (s *Server) ProcessCanceledObjectCleanupOnce(ctx context.Context) (bool, er
 	if err != nil {
 		return finish("FAILED", "CLEANUP_REFERENCE_AMBIGUOUS", false)
 	}
-	job, err := s.st.GetJob(ctx, run.JobID)
+	resolved, err := s.resolveRun(ctx, run)
 	if err != nil {
 		return finish("FAILED", "CLEANUP_REFERENCE_AMBIGUOUS", false)
 	}
-	target, err := s.st.GetConnection(ctx, job.TargetConnectionID)
+	cfg, err := s.targetS3Config(ctx, resolved)
 	if err != nil {
 		return finish("FAILED", "CLEANUP_REFERENCE_AMBIGUOUS", false)
 	}
-	var metadata, secret map[string]any
-	_ = json.Unmarshal(target.MetadataJSON, &metadata)
-	plain, err := crypto.Decrypt(s.k, target.SecretEncBlob, []byte(target.ID))
-	if err != nil {
-		return finish("FAILED", "CLEANUP_REFERENCE_AMBIGUOUS", false)
-	}
-	_ = json.Unmarshal(plain, &secret)
-	cfg := s3io.Config{Endpoint: stringMapValue(metadata, "endpoint"), Region: stringMapValue(metadata, "region"), Bucket: stringMapValue(metadata, "bucket"), ForcePathStyle: true, AccessKeyID: stringMapValue(secret, "access_key_id"), SecretAccessKey: stringMapValue(secret, "secret_access_key"), SessionToken: stringMapValue(secret, "session_token")}
 	cleaner, err := s.newCanceledObjectCleanerFn(ctx, cfg)
 	if err != nil {
 		return finish("FAILED", "CLEANUP_OBJECT_VERIFICATION_FAILED", false)
@@ -953,63 +928,37 @@ func (s *Server) buildAssignment(ctx context.Context, t db.Task) (*grpcpb.TaskAs
 	if err != nil {
 		return nil, err
 	}
-	job, err := s.st.GetJob(ctx, run.JobID)
+	// The run's configuration snapshot, not the live job, decides where and
+	// how it writes. Credentials are fetched separately by the leaseholder
+	// with GetTaskCredentials.
+	r, err := s.resolveRun(ctx, run)
 	if err != nil {
 		return nil, err
 	}
-	srcConn, err := s.st.GetConnection(ctx, job.SourceConnectionID)
+	leaseDeadline, err := time.Parse(time.RFC3339Nano, t.LeaseDeadline)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("task %s lease deadline: %w", t.ID, err)
 	}
-	tgtConn, err := s.st.GetConnection(ctx, job.TargetConnectionID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Credentials are not part of the assignment; the leaseholder fetches
-	// them with GetTaskCredentials.
-	var tgtMeta map[string]any
-	_ = json.Unmarshal(tgtConn.MetadataJSON, &tgtMeta)
-	endpoint, _ := tgtMeta["endpoint"].(string)
-	region, _ := tgtMeta["region"].(string)
-	bucket, _ := tgtMeta["bucket"].(string)
-	forcePathStyle := true
-	if v, ok := tgtMeta["force_path_style"].(bool); ok {
-		forcePathStyle = v
-	}
-	if endpoint == "" {
-		endpoint = "http://localhost:9000"
-	}
-	if region == "" {
-		region = "us-east-1"
-	}
-	if strings.TrimSpace(bucket) == "" {
-		return nil, fmt.Errorf("target connection metadata missing bucket")
-	}
-
-	opts, _ := jobopts.Parse(job.OptionsJSON)
-	outPrefix := datasetPrefixForJob(job, srcConn.Engine, opts, tgtMeta)
-
 	return &grpcpb.TaskAssignment{
 		TaskId:              t.ID,
 		RunId:               run.ID,
-		JobId:               job.ID,
+		JobId:               r.config.Job.ID,
 		TaskIndex:           int32(t.TaskIndex),
 		CorrelationId:       run.CorrelationID,
 		AttemptId:           t.AttemptID,
 		FencingToken:        t.FencingToken,
 		AttemptNumber:       int32(t.AttemptNumber),
-		LeaseDeadlineUnixMs: func() int64 { tm, _ := time.Parse(time.RFC3339Nano, t.LeaseDeadline); return tm.UnixMilli() }(),
+		LeaseDeadlineUnixMs: leaseDeadline.UnixMilli(),
 		PartitionSpecJson:   string(t.PartitionSpec),
-		SourceEngine:        srcConn.Engine,
-		SourceSql:           job.SourceSQL,
-		S3Endpoint:          endpoint,
-		S3Region:            region,
-		S3Bucket:            bucket,
-		S3Prefix:            outPrefix,
-		S3ForcePathStyle:    forcePathStyle,
-		TargetFileBytes:     opts.TargetFileBytes,
-		PartitionKeys:       opts.PartitionKeys,
+		SourceEngine:        r.config.SourceEngine,
+		SourceSql:           r.config.Job.SourceSQL,
+		S3Endpoint:          r.target.Endpoint,
+		S3Region:            r.target.Region,
+		S3Bucket:            r.target.Bucket,
+		S3Prefix:            r.prefix,
+		S3ForcePathStyle:    r.target.ForcePathStyle,
+		TargetFileBytes:     r.opts.TargetFileBytes,
+		PartitionKeys:       r.opts.PartitionKeys,
 	}, nil
 }
 
@@ -1025,14 +974,18 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 	if run.Status == "SUCCEEDED" {
 		return nil
 	}
-	job, err := s.st.GetJob(ctx, run.JobID)
+	// Commit where the run was planned to write, per its configuration
+	// snapshot, even if the job or connections were edited since.
+	resolved, err := s.resolveRun(ctx, run)
 	if err != nil {
 		return err
 	}
+	job := resolved.config.Job
 	srcConn, err := s.st.GetConnection(ctx, job.SourceConnectionID)
 	if err != nil {
 		return err
 	}
+	srcConn.Engine = resolved.config.SourceEngine
 	tasks, err := s.st.ListTasksForRun(ctx, runID)
 	if err != nil {
 		return err
@@ -1086,40 +1039,14 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 	}
 	sort.Strings(committedKeys)
 
-	// Load target connection for S3 writes.
-	tgtConn, err := s.st.GetConnection(ctx, job.TargetConnectionID)
+	s3cfg, err := s.targetS3Config(ctx, resolved)
 	if err != nil {
 		return err
 	}
-	tgtSecret, err := crypto.Decrypt(s.k, tgtConn.SecretEncBlob, []byte(tgtConn.ID))
-	if err != nil {
-		return err
-	}
-	var tgt map[string]any
-	_ = json.Unmarshal(tgtSecret, &tgt)
-	accessKey, _ := tgt["access_key_id"].(string)
-	secretKey, _ := tgt["secret_access_key"].(string)
-	sessionToken, _ := tgt["session_token"].(string)
-
-	var tgtMeta map[string]any
-	_ = json.Unmarshal(tgtConn.MetadataJSON, &tgtMeta)
-	endpoint, _ := tgtMeta["endpoint"].(string)
-	region, _ := tgtMeta["region"].(string)
-	bucket, _ := tgtMeta["bucket"].(string)
-	forcePathStyle := true
-	if v, ok := tgtMeta["force_path_style"].(bool); ok {
-		forcePathStyle = v
-	}
-	if endpoint == "" {
-		endpoint = "http://localhost:9000"
-	}
-	if region == "" {
-		region = "us-east-1"
-	}
-	if strings.TrimSpace(bucket) == "" {
-		return fmt.Errorf("target connection metadata missing bucket")
-	}
-	opts, _ := jobopts.Parse(job.OptionsJSON)
+	endpoint, region, bucket, forcePathStyle := s3cfg.Endpoint, s3cfg.Region, s3cfg.Bucket, s3cfg.ForcePathStyle
+	accessKey, secretKey, sessionToken := s3cfg.AccessKeyID, s3cfg.SecretAccessKey, s3cfg.SessionToken
+	tgtMeta := resolved.target.Metadata
+	opts := resolved.opts
 	if opts.NormalizedSourceMode() == "query" && strings.TrimSpace(opts.QueryHash) == "" {
 		sourceQuery := strings.TrimSpace(opts.Query)
 		if sourceQuery == "" {
@@ -1186,6 +1113,28 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 		}
 	}
 	for _, record := range acceptedArtifacts {
+		// The store's own checksum, recorded when the worker verified the
+		// upload, proves the object is unchanged with a HEAD. Only objects
+		// without one are re-read and hashed through the master.
+		if record.ProviderChecksumSHA256 != "" {
+			size, checksum, found, err := u.ObjectChecksum(ctx, record.ObjectKey)
+			if err != nil {
+				return fmt.Errorf("commit artifact verification %s: %w", record.ObjectKey, err)
+			}
+			if !found {
+				return fmt.Errorf("commit artifact verification: missing object %s", record.ObjectKey)
+			}
+			if size != record.ByteSize {
+				return fmt.Errorf("commit artifact size mismatch: %s", record.ObjectKey)
+			}
+			if checksum != "" {
+				if checksum != record.ProviderChecksumSHA256 {
+					return fmt.Errorf("commit artifact sha256 mismatch: %s", record.ObjectKey)
+				}
+				continue
+			}
+			// The store reported no checksum now; fall back to hashing.
+		}
 		body, found, err := u.OpenObject(ctx, record.ObjectKey)
 		if err != nil {
 			return fmt.Errorf("commit artifact verification %s: %w", record.ObjectKey, err)
@@ -1224,8 +1173,13 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 	}
 
 	cursorDomain := resolveCursorDomain(opts, tasks)
+	// The high-water mark only moves forward: a run that re-read rows below it
+	// (cursor_lookback) and found nothing newer must not move it back. Values
+	// of an unknown cursor type cannot be ordered, so they replace the mark.
 	maxHWM := existingHWM
-	if runMax := deriveMaxCursor(tasks, cursorDomain); strings.TrimSpace(runMax) != "" {
+	if runMax := deriveMaxCursor(tasks, cursorDomain); strings.TrimSpace(runMax) != "" &&
+		(strings.TrimSpace(existingHWM) == "" || cursorDomain == connectors.CursorDomainUnknown ||
+			connectors.CompareCursorValues(cursorDomain, runMax, existingHWM) > 0) {
 		maxHWM = runMax
 	}
 	maxPart := maxInt(maxPartNumber(committedKeys), existingMaxPart)
@@ -1794,15 +1748,16 @@ func (s *Server) purgeStaleFullRunsForRun(ctx context.Context, runID string) {
 		return
 	}
 
-	job, err := s.st.GetJob(ctx, run.JobID)
+	resolved, err := s.resolveRun(ctx, run)
 	if err != nil {
-		s.log.Warn("full-run purge: failed to load job",
+		s.log.Warn("full-run purge: failed to resolve run configuration",
 			slog.String("run_id", runID),
 			slog.String("job_id", run.JobID),
 			slog.String("err", err.Error()),
 		)
 		return
 	}
+	job := resolved.config.Job
 
 	// Only apply retention to full (non-incremental) jobs.
 	if job.Incremental {
@@ -1836,58 +1791,15 @@ func (s *Server) purgeStaleFullRunsForRun(ctx context.Context, runID string) {
 	// to_purge = all except the latest retainCount runs.
 	toPurge := allRuns[:len(allRuns)-retainCount]
 
-	// Resolve S3 target connection details (needed to build the S3 client).
-	tgtConn, err := s.st.GetConnection(ctx, job.TargetConnectionID)
+	cfg, err := s.targetS3Config(ctx, resolved)
 	if err != nil {
-		s.log.Warn("full-run purge: failed to load target connection",
+		s.log.Warn("full-run purge: failed to resolve target",
 			slog.String("job_id", job.ID),
 			slog.String("err", err.Error()),
 		)
 		return
 	}
-	tgtSecret, err := crypto.Decrypt(s.k, tgtConn.SecretEncBlob, []byte(tgtConn.ID))
-	if err != nil {
-		s.log.Warn("full-run purge: failed to decrypt target credentials",
-			slog.String("job_id", job.ID),
-			slog.String("err", err.Error()),
-		)
-		return
-	}
-	var tgt map[string]any
-	_ = json.Unmarshal(tgtSecret, &tgt)
-	accessKey, _ := tgt["access_key_id"].(string)
-	secretKey, _ := tgt["secret_access_key"].(string)
-	sessionToken, _ := tgt["session_token"].(string)
-
-	var tgtMeta map[string]any
-	_ = json.Unmarshal(tgtConn.MetadataJSON, &tgtMeta)
-	endpoint, _ := tgtMeta["endpoint"].(string)
-	region, _ := tgtMeta["region"].(string)
-	bucket, _ := tgtMeta["bucket"].(string)
-	forcePathStyle := true
-	if v, ok := tgtMeta["force_path_style"].(bool); ok {
-		forcePathStyle = v
-	}
-	if endpoint == "" {
-		endpoint = "http://localhost:9000"
-	}
-	if region == "" {
-		region = "us-east-1"
-	}
-	if strings.TrimSpace(bucket) == "" {
-		s.log.Warn("full-run purge: target connection has no bucket", slog.String("job_id", job.ID))
-		return
-	}
-
-	u, err := s3io.New(ctx, s3io.Config{
-		Endpoint:        endpoint,
-		Region:          region,
-		Bucket:          bucket,
-		ForcePathStyle:  forcePathStyle,
-		AccessKeyID:     accessKey,
-		SecretAccessKey: secretKey,
-		SessionToken:    sessionToken,
-	})
+	u, err := s3io.New(ctx, cfg)
 	if err != nil {
 		s.log.Warn("full-run purge: failed to create S3 client",
 			slog.String("job_id", job.ID),
@@ -1895,18 +1807,7 @@ func (s *Server) purgeStaleFullRunsForRun(ctx context.Context, runID string) {
 		)
 		return
 	}
-
-	// Derive the dataset base prefix for this job (same logic used by commitRun).
-	srcConn, err := s.st.GetConnection(ctx, job.SourceConnectionID)
-	if err != nil {
-		s.log.Warn("full-run purge: failed to load source connection",
-			slog.String("job_id", job.ID),
-			slog.String("err", err.Error()),
-		)
-		return
-	}
-	opts, _ := jobopts.Parse(job.OptionsJSON)
-	basePrefix := strings.TrimSuffix(strings.TrimSpace(datasetPrefixForJob(job, srcConn.Engine, opts, tgtMeta)), "/")
+	basePrefix := strings.TrimSuffix(strings.TrimSpace(resolved.prefix), "/")
 	if basePrefix == "" {
 		s.log.Warn("full-run purge: could not resolve dataset prefix", slog.String("job_id", job.ID))
 		return

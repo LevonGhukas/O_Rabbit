@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 )
 
@@ -238,13 +239,24 @@ func TestRunStartWritesCompactAuditRecord(t *testing.T) {
 		MetadataJSON:  []byte(`{}`),
 		SecretEncBlob: []byte(`{}`),
 	})
+	// A new dataset: the object store has no _state.json yet.
+	objectStore := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`<Error><Code>NoSuchKey</Code><Message>not found</Message></Error>`))
+	}))
+	defer objectStore.Close()
+	targetSecret, err := crypto.Encrypt(testCryptoKey, []byte(`{"access_key_id":"a","secret_access_key":"b"}`), []byte("tgt-run"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	createTestConnection(t, st, db.Connection{
 		ID:            "tgt-run",
 		Name:          "tgt-run",
 		Kind:          "target",
 		Engine:        "s3",
-		MetadataJSON:  []byte(`{"prefix":"exports"}`),
-		SecretEncBlob: []byte(`{}`),
+		MetadataJSON:  []byte(`{"prefix":"exports","bucket":"exports-bucket","endpoint":"` + objectStore.URL + `"}`),
+		SecretEncBlob: targetSecret,
 	})
 	if err := st.CreateJob(context.Background(), db.Job{
 		ID:                 "job-run",

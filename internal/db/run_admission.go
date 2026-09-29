@@ -50,6 +50,9 @@ func (s *Store) StartRunWithTasks(ctx context.Context, run Run, tasks []TaskInse
 		if err := insertTasksTx(ctx, tx, tasks); err != nil {
 			return err
 		}
+		if err := snapshotRunConfigTx(ctx, tx, run.ID); err != nil {
+			return err
+		}
 		var err error
 		admitted, err = s.admitRunTx(ctx, tx, run.ID)
 		return err

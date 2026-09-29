@@ -84,49 +84,32 @@ func loadDatasetState(ctx context.Context, st *db.Store, k crypto.Key, job db.Jo
 		return datasetState{}, false, "", false, err
 	}
 
-	var tgtMeta map[string]any
-	_ = json.Unmarshal(tgtConn.MetadataJSON, &tgtMeta)
-
-	endpoint, _ := tgtMeta["endpoint"].(string)
-	region, _ := tgtMeta["region"].(string)
-	bucket, _ := tgtMeta["bucket"].(string)
-	forcePathStyle := true
-	if v, ok := tgtMeta["force_path_style"].(bool); ok {
-		forcePathStyle = v
+	target, err := dataset.ParseTarget(tgtConn.MetadataJSON)
+	if err != nil {
+		return datasetState{}, false, "", false, err
 	}
-	prefix, _ := tgtMeta["prefix"].(string)
-
-	localTarget := isLocalEndpoint(endpoint)
+	localTarget := isLocalEndpoint(target.Endpoint)
 
 	// Compute dataset prefix (derived if metadata.prefix empty).
-	basePrefix := dataset.Prefix(prefix, srcEngine, sourceDatasetName(job, opts))
-
-	if strings.TrimSpace(bucket) == "" {
-		// Can't read state without a bucket.
-		return datasetState{}, false, basePrefix, localTarget, nil
-	}
-	if endpoint == "" {
-		endpoint = "http://localhost:9000"
-	}
-	if region == "" {
-		region = "us-east-1"
-	}
+	basePrefix := dataset.Prefix(target.Prefix, srcEngine, sourceDatasetName(job, opts))
 
 	sec, err := crypto.Decrypt(k, tgtConn.SecretEncBlob, []byte(tgtConn.ID))
 	if err != nil {
 		return datasetState{}, false, basePrefix, localTarget, err
 	}
 	var tgtSecret map[string]any
-	_ = json.Unmarshal(sec, &tgtSecret)
+	if err := json.Unmarshal(sec, &tgtSecret); err != nil {
+		return datasetState{}, false, basePrefix, localTarget, fmt.Errorf("target connection secret is not a JSON object: %w", err)
+	}
 	accessKey, _ := tgtSecret["access_key_id"].(string)
 	secretKey, _ := tgtSecret["secret_access_key"].(string)
 	sessionToken, _ := tgtSecret["session_token"].(string)
 
 	u, err := s3io.New(ctx, s3io.Config{
-		Endpoint:        endpoint,
-		Region:          region,
-		Bucket:          bucket,
-		ForcePathStyle:  forcePathStyle,
+		Endpoint:        target.Endpoint,
+		Region:          target.Region,
+		Bucket:          target.Bucket,
+		ForcePathStyle:  target.ForcePathStyle,
 		AccessKeyID:     accessKey,
 		SecretAccessKey: secretKey,
 		SessionToken:    sessionToken,
@@ -246,14 +229,13 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 	if err != nil {
 		return db.Run{}, nil, err
 	}
-	var tgtMeta map[string]any
-	_ = json.Unmarshal(tgtConn.MetadataJSON, &tgtMeta)
-	targetPrefix, _ := tgtMeta["prefix"].(string)
-	endpoint, _ := tgtMeta["endpoint"].(string)
-	bucket, _ := tgtMeta["bucket"].(string)
+	target, err := dataset.ParseTarget(tgtConn.MetadataJSON)
+	if err != nil {
+		return db.Run{}, nil, err
+	}
 	sourceName := sourceDatasetName(job, o)
-	basePrefix := dataset.Prefix(targetPrefix, srcEngine, sourceName)
-	datasetKey := dataset.StorageKey(endpoint, bucket, basePrefix)
+	basePrefix := dataset.Prefix(target.Prefix, srcEngine, sourceName)
+	datasetKey := dataset.StorageKey(target.Endpoint, target.Bucket, basePrefix)
 
 	// A dataset has at most one active run. A new run for a busy dataset is
 	// rejected with DatasetBusyError below; an unwanted active run must be
@@ -685,19 +667,31 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 			}
 		}
 
+		// Resume after the high-water mark, or, with cursor_lookback, at an
+		// inclusive bound below it so late-committed rows are re-read.
+		lowerBound, lowerExclusive := fromHWM, strings.TrimSpace(fromHWM) != ""
+		if lowerExclusive && strings.TrimSpace(o.CursorLookback) != "" {
+			start, err := connectors.CursorLookbackStart(cv.Domain, fromHWM, o.CursorLookback)
+			if err != nil {
+				return db.Run{}, nil, err
+			}
+			lowerBound, lowerExclusive = start, false
+			emitPlanEvent(ctx, st, run.ID, "INFO", "cursor lookback applied", map[string]any{"from_hwm": fromHWM, "cursor_lookback": o.CursorLookback, "lower_bound_inclusive": start})
+		}
+
 		idx := basePart + 1
 		var tasks []db.TaskInsert
 		if cv.RangeCapable {
-			tasks, err = buildOrderedCursorRangeTasks(run.ID, idx, o.Table, cursorColumn, cv.Domain, fromHWM, stats, o, snapshotCtx)
+			tasks, err = buildOrderedCursorRangeTasks(run.ID, idx, o.Table, cursorColumn, cv.Domain, lowerBound, lowerExclusive, stats, o, snapshotCtx)
 			if err != nil {
 				return db.Run{}, nil, err
 			}
 		} else {
-			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, cursorColumn, cv.Domain, fromHWM, strings.TrimSpace(fromHWM) != "", snapshotCtx)
+			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, cursorColumn, cv.Domain, lowerBound, lowerExclusive, snapshotCtx)
 			tasks = []db.TaskInsert{{ID: newID(), RunID: run.ID, TaskIndex: idx, PartitionSpec: part, Status: "PENDING"}}
 		}
 		if len(tasks) == 0 {
-			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, cursorColumn, cv.Domain, fromHWM, strings.TrimSpace(fromHWM) != "", snapshotCtx)
+			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, cursorColumn, cv.Domain, lowerBound, lowerExclusive, snapshotCtx)
 			tasks = []db.TaskInsert{{ID: newID(), RunID: run.ID, TaskIndex: idx, PartitionSpec: part, Status: "PENDING"}}
 		}
 
@@ -1191,20 +1185,27 @@ func minInt(a, b int) int {
 	return b
 }
 
-func buildOrderedCursorRangeTasks(runID string, baseIndex int, table, column string, domain connectors.CursorDomain, fromHWM string, stats connectors.CursorStats, o jobopts.Options, snapshotCtx string) ([]db.TaskInsert, error) {
+// buildOrderedCursorRangeTasks splits (lower, max] into range tasks, or
+// [lower, max] when lowerExclusive is false. An empty lower starts at the
+// source minimum.
+func buildOrderedCursorRangeTasks(runID string, baseIndex int, table, column string, domain connectors.CursorDomain, lower string, lowerExclusive bool, stats connectors.CursorStats, o jobopts.Options, snapshotCtx string) ([]db.TaskInsert, error) {
 	maxValue := strings.TrimSpace(stats.MaxValue)
 	minValue := strings.TrimSpace(stats.MinValue)
 	if maxValue == "" || minValue == "" {
 		return nil, nil
 	}
 
+	lower = strings.TrimSpace(lower)
 	startInclusive := minValue
-	if strings.TrimSpace(fromHWM) != "" {
-		next, ok := connectors.CursorSuccessor(domain, fromHWM)
-		if !ok {
-			return nil, nil
+	if lower != "" {
+		startInclusive = lower
+		if lowerExclusive {
+			next, ok := connectors.CursorSuccessor(domain, lower)
+			if !ok {
+				return nil, nil
+			}
+			startInclusive = next
 		}
-		startInclusive = next
 	}
 	if startInclusive == "" || connectors.CompareCursorValues(domain, startInclusive, maxValue) > 0 {
 		return nil, nil
@@ -1227,8 +1228,6 @@ func buildOrderedCursorRangeTasks(runID string, baseIndex int, table, column str
 	if err != nil {
 		return nil, err
 	}
-	lower := strings.TrimSpace(fromHWM)
-	lowerExclusive := lower != ""
 	idx := baseIndex
 	sourceMode := o.NormalizedSourceMode()
 	queryHash := strings.TrimSpace(o.QueryHash)
@@ -1253,7 +1252,10 @@ func buildOrderedCursorRangeTasks(runID string, baseIndex int, table, column str
 // It exists to keep this logic isolated and reusable.
 func persistTunedOptionsBestEffort(ctx context.Context, st *db.Store, job db.Job, o jobopts.Options) error {
 	var m map[string]any
-	_ = json.Unmarshal(job.OptionsJSON, &m)
+	if err := json.Unmarshal(job.OptionsJSON, &m); err != nil {
+		// Never overwrite options that could not be read.
+		return fmt.Errorf("job options are not a JSON object: %w", err)
+	}
 	m = o.MergeInto(m)
 
 	b, err := json.Marshal(m)
