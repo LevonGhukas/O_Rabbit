@@ -211,6 +211,11 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 		srcEngine = "db"
 	}
 	o.SourceMode = o.NormalizedSourceMode()
+	if strings.TrimSpace(o.WhereClause) != "" {
+		if err := connectors.ValidateWhereClause(o.WhereClause); err != nil {
+			return db.Run{}, nil, fmt.Errorf("options_json.where_clause is invalid: %w", err)
+		}
+	}
 	if o.SourceMode == "query" {
 		sourceQuery, err := connectors.NormalizeReadOnlySQLQuery(sourceQueryForJob(job, o))
 		if err != nil {

@@ -424,9 +424,21 @@ func (s *Store) GetConnection(ctx context.Context, id string) (Connection, error
 }
 
 func (s *Store) ListConnections(ctx context.Context) ([]Connection, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, kind, engine, metadata_json, secret_enc_blob, created_at, updated_at FROM connections ORDER BY created_at DESC;`)
+	out, _, err := s.ListConnectionsPage(ctx, 0, "")
+	return out, err
+}
+
+// ListConnectionsPage lists connections newest first. With limit > 0 it
+// returns at most limit connections after cursor and the cursor of the next
+// page ("" on the last page); limit 0 returns every connection.
+func (s *Store) ListConnectionsPage(ctx context.Context, limit int, cursor string) ([]Connection, string, error) {
+	query, args, err := keysetPage(`SELECT id, name, kind, engine, metadata_json, secret_enc_blob, created_at, updated_at FROM connections`, "created_at", limit, cursor)
 	if err != nil {
-		return nil, err
+		return nil, "", err
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, "", err
 	}
 	defer rows.Close()
 	var out []Connection
@@ -434,12 +446,21 @@ func (s *Store) ListConnections(ctx context.Context) ([]Connection, error) {
 		var c Connection
 		var meta string
 		if err := rows.Scan(&c.ID, &c.Name, &c.Kind, &c.Engine, &meta, &c.SecretEncBlob, &c.CreatedAt, &c.UpdatedAt); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		c.MetadataJSON = []byte(meta)
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+		last := out[len(out)-1]
+		next = formatEventCursor(last.CreatedAt, last.ID)
+	}
+	return out, next, nil
 }
 
 func (s *Store) UpdateConnection(ctx context.Context, c Connection) error {
@@ -599,21 +620,31 @@ func (s *Store) SetRunTypeWarnings(ctx context.Context, runID string, warnings [
 }
 
 func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json, commit_id, commit_intent_json, commit_phase FROM runs ORDER BY started_at DESC;`)
+	out, _, err := s.ListRunsPage(ctx, 0, "")
+	return out, err
+}
+
+// ListRunsPage lists runs newest first, paged like ListConnectionsPage.
+func (s *Store) ListRunsPage(ctx context.Context, limit int, cursor string) ([]Run, string, error) {
+	query, args, err := keysetPage(`SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json, commit_id, commit_intent_json, commit_phase FROM runs`, "started_at", limit, cursor)
 	if err != nil {
-		return nil, wrapRunRegistrationConfigColumnErr(err)
+		return nil, "", err
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, "", wrapRunRegistrationConfigColumnErr(err)
 	}
 	var out []Run
 	for rows.Next() {
 		var r Run
 		var registrationConfig, warningJSON, commitIntent string
 		if err := rows.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &registrationConfig, &warningJSON, &r.CommitID, &commitIntent, &r.CommitPhase); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if strings.TrimSpace(registrationConfig) != "" {
 			decrypted, err := s.decryptRunRegistrationConfig(r.ID, registrationConfig)
 			if err != nil {
-				return nil, err
+				return nil, "", err
 			}
 			r.RegistrationConfigJSON = decrypted
 		}
@@ -621,22 +652,51 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 			r.CommitIntentJSON = []byte(commitIntent)
 		}
 		if err := decodeRunWarnings(warningJSON, &r); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return nil, err
+		return nil, "", err
 	}
 	if err := rows.Close(); err != nil {
-		return nil, err
+		return nil, "", err
+	}
+	next := ""
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+		last := out[len(out)-1]
+		next = formatEventCursor(last.StartedAt, last.ID)
 	}
 	for i := range out {
 		s.attachCommitReconciliationProjection(ctx, &out[i])
 		s.attachRegistrationProjection(ctx, &out[i])
 	}
-	return out, nil
+	return out, next, nil
+}
+
+// keysetPage orders base newest first by orderColumn then id and, when limit
+// is positive, selects one extra row after cursor to detect a next page.
+func keysetPage(base, orderColumn string, limit int, cursor string) (string, []any, error) {
+	query, args := base, []any{}
+	if strings.TrimSpace(cursor) != "" {
+		if limit <= 0 {
+			return "", nil, fmt.Errorf("cursor requires limit")
+		}
+		ts, id, err := parseEventCursor(cursor)
+		if err != nil {
+			return "", nil, err
+		}
+		query += " WHERE (" + orderColumn + " < ? OR (" + orderColumn + " = ? AND id < ?))"
+		args = append(args, ts, ts, id)
+	}
+	query += " ORDER BY " + orderColumn + " DESC, id DESC"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit+1)
+	}
+	return query, args, nil
 }
 
 func (s *Store) GetRun(ctx context.Context, id string) (Run, error) {

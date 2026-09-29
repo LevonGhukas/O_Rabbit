@@ -26,6 +26,9 @@ func (s *Server) newAuditRecord(r *http.Request, action, resourceType, resourceI
 		return db.AuditRecord{}, err
 	}
 	actorType, actorID := s.auditActor()
+	if isRemoteOpsPath(r.URL.Path) {
+		actorType, actorID = "remote_ops_token", tokenFingerprint(s.remoteOpsToken)
+	}
 	return db.AuditRecord{
 		ActorType:    actorType,
 		ActorID:      actorID,

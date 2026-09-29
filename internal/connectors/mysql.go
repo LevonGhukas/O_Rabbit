@@ -34,7 +34,16 @@ var (
 )
 
 func OpenMySQL(ctx context.Context, dsn string) (*MySQL, error) {
-	db, err := sql.Open("mysql", dsn)
+	return openMySQL(ctx, dsn, "transaction_read_only")
+}
+
+// openMySQL opens a pool whose sessions are read-only through readOnlyVar.
+func openMySQL(ctx context.Context, dsn, readOnlyVar string) (*MySQL, error) {
+	roDSN, err := readOnlyMySQLDSN(dsn, readOnlyVar)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("mysql", roDSN)
 	if err != nil {
 		return nil, err
 	}
