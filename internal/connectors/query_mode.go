@@ -270,8 +270,7 @@ func queryModeCursor(ctx context.Context, db *sql.DB, engine string, q CursorQue
 		rows.Close()
 		return nil, nil, nil, -1, err
 	}
-	cursorIdx := -1
-	cursorIdx = queryResultColumnIndex(cols, q.CursorColumn)
+	cursorIdx := queryResultColumnIndex(cols, q.CursorColumn)
 	return rows, cols, ct, cursorIdx, nil
 }
 

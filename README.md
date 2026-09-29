@@ -384,8 +384,9 @@ make docker-build-master
 make docker-build-worker
 ```
 
-The root `docker-compose.yaml` defines MinIO, PostgreSQL, an Ice REST catalog,
-ClickHouse, one master, and two workers:
+The root `docker-compose.yaml` is the local development stack: MinIO,
+PostgreSQL, an Ice REST catalog, ClickHouse (with the catalog attached as
+database `ice`), one master, and two workers. All ports bind to 127.0.0.1:
 
 ```sh
 export ORABBIT_HTTP_AUTH_TOKEN="$(openssl rand -hex 32)"
@@ -395,16 +396,9 @@ docker compose ps
 docker compose down
 ```
 
-At the current revision it mounts `./docker/postgres/initdb`, but that directory
-is not present in the repository. Create it (it may be empty) or remove that
-mount before using this compose file.
-
 Supporting compose files include:
 
 - `docker-compose.ex-db.yml`: development source databases
-- `docker-compose.ice-rest-catalog.yml`: standalone Ice REST catalog
-- `docker-compose.clickhouse-altinity.yml`: standalone Altinity ClickHouse
-  integration example
 - `docker-compose.master.yml`, `.worker.yml`, and `.minio.yml`: split-host
   deployments driven by environment files
 
@@ -903,27 +897,43 @@ go test ./internal/grpc -run TestName -v
 ```
 
 Tests are package-level unit and integration-style tests using temporary SQLite
-databases and test servers. There is no committed CI workflow and no enforced
-coverage threshold.
+databases and test servers. There is no enforced coverage threshold.
+
+CI (`.github/workflows/orrabit-docker.yml`) runs on every push and pull
+request:
+
+- `go test -race ./...` and `go vet ./...`
+- `golangci-lint` with `.golangci.yml`
+- `scripts/vulncheck.sh`: `govulncheck`, failing on any reachable
+  vulnerability that is not reviewed in `.govulncheck-allow`. Remove an entry
+  as soon as a fixed release exists.
+
+On pushes, images are built, scanned with Trivy (fails on fixable CRITICAL/HIGH
+findings), and pushed as `levonghukas/orabbit:sha-<commit>-<target>`, plus
+`<version>-<target>` and `<major>.<minor>-<target>` for `vX.Y.Z` tags and
+`latest-<target>` for `main`. Deploy by SHA or version tag, not `latest`.
+Release by pushing a semver tag:
+
+```sh
+git tag v1.2.3 && git push origin v1.2.3
+```
 
 The generated files in `internal/grpcpb` correspond to
 `proto/controlplane.proto`; no protobuf generation target or pinned generator
 tooling is currently provided.
 
-Worker/master compatibility is an exact protocol-version contract. See
-[Worker protocol compatibility](docs/WORKER_PROTOCOL_COMPATIBILITY.md) for the
-accepted version, fail-closed matrix, rolling-upgrade order, deprecation
-policy, and protobuf reservation rules.
+Worker/master compatibility is an exact protocol-version contract:
+`WorkerProtocolVersion` in `internal/grpc/server.go`. The master rejects any
+other version, so bump it whenever the worker RPC contract changes, and deploy
+the master and workers together.
 
 For connector fixtures:
 
 ```sh
 docker compose -f docker-compose.ex-db.yml up -d
-./seed-databases.sh
 ```
 
-The seed script covers PostgreSQL, MySQL, MariaDB, Oracle, MongoDB, SQL Server,
-Cassandra, and ClickHouse containers. It does not seed Trino.
+The containers start empty; create test tables with each database's client.
 
 ## Deployment
 
@@ -959,8 +969,51 @@ For production:
 - replace all example MinIO and catalog credentials
 - review cleanup dry-run and retention settings before enabling deletion
 
-The repository does not contain a CI/CD pipeline, Kubernetes manifests,
-Terraform, or an automated release process.
+MinIO no longer publishes container images, and its repository is archived
+(`RELEASE.2025-10-15T17-29-55Z` is the final release). The Compose files use
+`levonghukas/minio` and `levonghukas/mc`, built unmodified from pinned upstream
+tags by `docker/minio/Dockerfile` (AGPL-3.0; the exact source commit is in the
+image labels). The MinIO server runs as uid `10001`. Because MinIO no longer
+receives fixes, prefer managed S3 (or another maintained S3-compatible store)
+for production data. To rebuild or bump the images, see the header of
+`docker/minio/Dockerfile`.
+
+Both images run as the unprivileged user `orabbit` (uid/gid `10001`), and
+`/var/lib/orabbit` is owned by it. New named volumes inherit that ownership.
+Volumes created by older, root-running images must be handed over once, with the
+service stopped:
+
+```sh
+docker run --rm -v orabbit-master_orabbit_master_data:/d debian:bookworm-slim chown -R 10001:10001 /d
+docker run --rm -v orabbit-worker_orabbit_worker_identity:/d debian:bookworm-slim chown -R 10001:10001 /d
+```
+
+Mounted TLS certificates and keys must be readable by uid `10001`.
+
+The repository does not contain Kubernetes manifests or Terraform.
+
+### Observability
+
+`GET /metrics` (Prometheus text format, behind the API token) exposes:
+
+- lifecycle gauges: runs, tasks, leases, registrations, reconciliation, leadership
+- `orabbit_grpc_server_handled_total{method,code}` and
+  `orabbit_grpc_server_handling_seconds{method}`: worker RPC rate, errors, latency
+- `orabbit_http_requests_total{route,code}` and
+  `orabbit_http_request_duration_seconds{route}`: API traffic by route pattern
+  (SSE streams are counted, not timed)
+- `orabbit_task_results_total{status}`, `orabbit_task_rows_read_total`,
+  `orabbit_task_bytes_read_total`, `orabbit_task_bytes_written_total`: task
+  outcomes and throughput (use `rate()`)
+- `orabbit_run_commit_duration_seconds{outcome}`: publication latency
+- Go runtime and process metrics (`go_*`, `process_*`)
+
+Tracing is off by default. Set the standard OpenTelemetry variables on the
+master and workers to export spans over OTLP/gRPC, for example
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317`. Optional:
+`OTEL_TRACES_SAMPLER=parentbased_traceidratio`, `OTEL_TRACES_SAMPLER_ARG=0.1`,
+`OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`. Worker RPCs and HTTP requests
+are traced, and trace context propagates from worker to master.
 
 ## Troubleshooting
 
@@ -984,7 +1037,36 @@ the token.
 ### The master cannot decrypt stored secrets
 
 Restore the exact `ORABBIT_MASTER_KEY` used when the values were written. A new
-key cannot decrypt existing AES-GCM blobs.
+key cannot decrypt existing AES-GCM blobs. To change the key, rotate it
+instead (below).
+
+### Rotating the master key
+
+`orabbit-master rotate-master-key` re-encrypts every stored secret in one
+transaction: connection secrets, remote-server credentials, config versions,
+per-run registration configs, registration retry overrides and the worker CA
+key. If any value does not open with the current key, nothing is changed.
+
+1. Back up the database (see [docs/master-backup-restore.md](docs/master-backup-restore.md)).
+2. Stop the master. The command takes the master's lock and refuses to run while
+   a master holds it.
+3. Run it with both keys:
+
+   ```sh
+   ORABBIT_MASTER_KEY=<current key> ORABBIT_NEW_MASTER_KEY="$(openssl rand -base64 32)" \
+     orabbit-master rotate-master-key -db /var/lib/orabbit/master.sqlite
+   ```
+
+   With Docker Compose:
+
+   ```sh
+   docker compose -f docker-compose.master.yml run --rm -e ORABBIT_NEW_MASTER_KEY=<new key> orabbit-master rotate-master-key
+   ```
+
+4. Replace `ORABBIT_MASTER_KEY` with the new key everywhere it is stored, and
+   start the master. Existing worker certificates stay valid; the CA itself is
+   unchanged.
+5. Older backups still need the old key, so keep it until they expire.
 
 ### Master exit codes
 

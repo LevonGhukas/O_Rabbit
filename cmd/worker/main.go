@@ -26,7 +26,9 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/grpcpb"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
 	"github.com/LevonGhukas/O_Rabbit/internal/sysinfo"
+	"github.com/LevonGhukas/O_Rabbit/internal/telemetry"
 	"github.com/LevonGhukas/O_Rabbit/internal/workerworkspace"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -126,6 +128,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	shutdownTracing, err := telemetry.InitTracing(ctx, "orabbit-worker")
+	if err != nil {
+		log.Error("configure tracing", slog.String("err", err.Error()))
+		os.Exit(2)
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(flushCtx)
+	}()
+
 	// With TLS the worker authenticates with its master-issued identity
 	// certificate, enrolling on first start; the master derives the worker ID
 	// from that certificate. Plaintext (loopback development) keeps the
@@ -213,6 +226,7 @@ func main() {
 		grpc.WithTransportCredentials(transportCreds),
 		grpc.WithUnaryInterceptor(grpcapi.WorkerAuthUnaryClientInterceptor(cfg.WorkerAuthToken)),
 		grpc.WithKeepaliveParams(grpcapi.WorkerKeepaliveParams),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	)
 	if err != nil {
 		log.Error("dial master", slog.String("err", err.Error()))
@@ -1430,7 +1444,6 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 			if err != nil {
 				return res, fmt.Errorf("infer schema: %w", err)
 			}
-			schemaInferred = true
 		}
 		if err := writeMongoDocBatch(alloc, pw, schema, docBuf); err != nil {
 			return res, err

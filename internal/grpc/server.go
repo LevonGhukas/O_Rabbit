@@ -32,9 +32,11 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
+	"github.com/LevonGhukas/O_Rabbit/internal/telemetry"
 	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 	"github.com/LevonGhukas/O_Rabbit/internal/workeridentity"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -744,6 +746,7 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *grpcpb.ReportTaskRes
 	}
 
 	if msg != "already accepted" {
+		telemetry.ObserveTaskResult(finalStatus, req.RowsRead, req.BytesRead, req.BytesWritten)
 		// Emit exactly one logical completion event for an accepted attempt.
 		tid := req.TaskId
 		e := db.Event{ID: newID(), RunID: runID, TaskID: &tid, TS: db.FormatTimestamp(time.Now()), Level: "INFO", Message: fmt.Sprintf("task %s %s", req.TaskId, finalStatus), FieldsJSON: []byte(`{}`)}
@@ -1707,7 +1710,9 @@ func newID() string {
 // serverOptions are the control-plane server options besides credentials.
 func serverOptions(cfg Config, srv *Server) []grpc.ServerOption {
 	return []grpc.ServerOption{
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.ChainUnaryInterceptor(
+			telemetry.UnaryServerInterceptor(),
 			recoveryUnaryServerInterceptor(srv.log),
 			workerAuthUnaryServerInterceptor(cfg.WorkerAuthToken),
 			srv.workerIdentityUnaryInterceptor(!cfg.Insecure),
@@ -1836,7 +1841,7 @@ func datasetPrefixForJob(job db.Job, srcEngine string, opts jobopts.Options, tgt
 
 // defaultFullRunRetainCount is the default number of successful full-refresh runs
 // to keep in S3. Override via ORABBIT_FULL_RUN_RETAIN_COUNT env var.
-const defaultFullRunRetainCount = 1
+const defaultFullRunRetainCount = 1 //nolint:unused // see purgeStaleFullRunsForRun
 
 // purgeStaleFullRunsForRun deletes the S3 objects for obsolete full-refresh run
 // directories after a new full-refresh run has been successfully committed and
@@ -1848,6 +1853,11 @@ const defaultFullRunRetainCount = 1
 //   - Keeps the latest retainCount runs intact.
 //   - Failures are best-effort: logged but never propagated to the caller.
 //   - Idempotent: re-running on already-purged directories is a no-op.
+//
+// It is not called anywhere yet, so ORABBIT_FULL_RUN_RETAIN_COUNT has no
+// effect; enabling it deletes published data and needs a deliberate decision.
+//
+//nolint:unused
 func (s *Server) purgeStaleFullRunsForRun(ctx context.Context, runID string) {
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
