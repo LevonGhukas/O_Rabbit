@@ -91,17 +91,31 @@ Fix: reject the new run with `DatasetBusyError` (that logic already exists) and 
 ## 🟡 Medium: scalability and operations
 
 16. **SQLite with `MaxOpenConns(1)` serializes everything.** Every worker RPC, SSE query, `/metrics` scan and list endpoint shares one connection. On top of that, `RequestTask` runs `AdmitPendingRuns` (a write transaction) on every poll from every worker. Expect contention past a handful of workers.
-17. **The master is a single point of failure with no backup plan.** The leadership lease only protects against two processes on the same file. Document the single-master model, add SQLite backups (litestream or similar), and write a restore runbook.
+   **Status:** DONE
+
+17. **The master is a single point of failure with no backup plan.** The leadership lease only protects against two processes on the same file. Document the single-master model, add SQLite backups (litestream or similar), and write a 
+restore runbook.
+   **Status:** DONE
+
 18. **Nothing is ever cleaned out of the database.** There is no retention for `events`, `task_attempts`, artifacts or registration history, so the DB grows without bound.
+   **Status:** DONE
+
 19. **Timestamp comparisons are inconsistent.** Task leases compare with `julianday()`. Registrations, multipart uploads, canceled objects and commit reconciliation compare RFC3339Nano strings lexically. Those strings have variable-length fractions, so ordering within the same second is wrong. The impact is small, but standardize on one fixed-width format.
+   **Status:** DONE
+
 20. **Hard-coded limits.** The source query timeout is 2 hours ([worker main.go:1066](cmd/worker/main.go:1066)), so big partitions fail. Commit and registration timeouts and retry policies (5 attempts, 30s leases) are also hard-coded rather than configurable.
+   **Status:** DONE
+
 21. **Protocol quirks.**
     - Worker failure and cancel results are sent once, with no timeout or retry, so the task waits out its lease.
     - Multipart lifecycle messages are multiplexed through `ReportTaskProgress` via the magic string `Message == "MULTIPART_LIFECYCLE"`. They should be a real RPC.
     - Worker-supplied `Message`/`FieldsJson` is stored as events with no size cap.
     - The worker hard-codes `ProtocolVersion: 5` instead of using the shared constant.
 22. **Failed runs leave orphaned objects.** Uploaded objects from failed or superseded runs don't appear to enter the canceled-object cleanup path.
+   **Status:** DONE
+
 23. **Cleanup deletion is off by default.** `CANCELED_OBJECT_CLEANUP_DRY_RUN=true` means it never deletes unless someone changes it. Keep the safe default, but document it clearly.
+   **Status:** DONE
 
 ## 🔵 Hygiene
 

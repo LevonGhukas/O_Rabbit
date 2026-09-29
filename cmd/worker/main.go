@@ -112,6 +112,7 @@ func main() {
 	fs.Parse(os.Args[1:])
 
 	cfg.Poll = normalizePollInterval(cfg.Poll)
+	sourceQueryTimeout = cfg.SourceQueryTimeout
 
 	log, normalizedLevel, normalizedFormat, err := newWorkerLogger(cfg.LogLevel, cfg.LogFormat, os.Stdout)
 	if err != nil {
@@ -1043,6 +1044,17 @@ func buildAttemptRunPrefix(datasetPrefix, runID, _, _ string) string {
 }
 
 // extractSQLCursorTask reads an ordered-cursor partition from a SQL source and writes a local Parquet file.
+// sourceQueryTimeout bounds one partition's source query. It is set once from
+// the worker configuration at startup; 0 means no limit.
+var sourceQueryTimeout = 2 * time.Hour
+
+func withSourceQueryTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if sourceQueryTimeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, sourceQueryTimeout)
+}
+
 func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.ControlPlaneClient, workerID string, t *grpcpb.TaskAssignment, ps partitionSpec, clients *clientCache, sourceEngine string) (sourceExtract, error) {
 	res := sourceExtract{}
 
@@ -1080,7 +1092,7 @@ func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 		return res, fmt.Errorf("open %s: %w", sourceEngine, err)
 	}
 
-	qctx, cancel := context.WithTimeout(ctx, 2*time.Hour)
+	qctx, cancel := withSourceQueryTimeout(ctx)
 	defer cancel()
 
 	queryStart := time.Now()
@@ -1164,7 +1176,7 @@ func extractFlightSQLTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 		return res, fmt.Errorf("open flightsql: %w", err)
 	}
 
-	qctx, cancel := context.WithTimeout(ctx, 2*time.Hour)
+	qctx, cancel := withSourceQueryTimeout(ctx)
 	defer cancel()
 
 	pw := newParquetRollingWriterWithContext(ctx, t.TargetFileBytes)
@@ -1225,7 +1237,7 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 		return res, fmt.Errorf("open %s: %w", sourceEngine, err)
 	}
 
-	qctx, cancel := context.WithTimeout(ctx, 2*time.Hour)
+	qctx, cancel := withSourceQueryTimeout(ctx)
 	defer cancel()
 
 	collection := ps.Table

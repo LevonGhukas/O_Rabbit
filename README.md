@@ -227,10 +227,17 @@ split-worker Compose file translates its other connection settings into flags.
 | `ORABBIT_CANCELED_OBJECT_CLEANUP_SCAN_INTERVAL` | `5m` | Canceled-object scan cadence |
 | `ORABBIT_CANCELED_OBJECT_RETENTION` | `168h` | Quarantine before object removal |
 | `ORABBIT_CANCELED_OBJECT_CLEANUP_MAX_ATTEMPTS` | `5` | Object cleanup retry limit |
-| `ORABBIT_CANCELED_OBJECT_CLEANUP_DRY_RUN` | `true` | Report candidates without deletion |
+| `ORABBIT_CANCELED_OBJECT_CLEANUP_DRY_RUN` | `true` | **Nothing is deleted while `true`.** Candidates are verified and marked `WOULD_DELETE`; set `false` to delete (see below) |
 | `ORABBIT_FULL_RUN_RETAIN_COUNT` | `1` | Successful full-refresh datasets retained after Iceberg publication |
 | `ORABBIT_HISTORY_RETENTION` | `720h` | Age after which history of finished runs (events, failed-run attempts, old catalog attempts, leadership history) is pruned; `0` disables |
 | `ORABBIT_HISTORY_PRUNE_INTERVAL` | `1h` | History pruning cadence |
+| `ORABBIT_COMMIT_TIMEOUT` | `30m` | Bound on one publication attempt of a run (also the startup commit-recovery budget) |
+| `ORABBIT_COMMIT_MAX_ATTEMPTS` | `5` | Retries of a failing commit before operator action is required |
+| `ORABBIT_REGISTRATION_TIMEOUT` | `30m` | Bound on one catalog registration |
+| `ORABBIT_REGISTRATION_LEASE_DURATION` | `30s` | Catalog registration attempt lease (min `3s`) |
+| `ORABBIT_REGISTRATION_MAX_ATTEMPTS` | `5` | Catalog registration attempts |
+| `ORABBIT_RECONCILIATION_LEASE_DURATION` | `30s` | Catalog observation attempt lease (min `3s`) |
+| `ORABBIT_RECONCILIATION_MAX_ATTEMPTS` | `5` | Catalog observation attempts |
 | `ORABBIT_DB_READ_CONNS` | `4` | Read-only SQLite connections for list, metrics and SSE queries; writes always use one connection |
 
 Admission limits are layered. `ORABBIT_MAX_ACTIVE_RUNS` counts durable
@@ -285,6 +292,7 @@ These values configure logging and managed temporary storage directly:
 | `ORABBIT_TEMP_MIN_FREE_BYTES` | `1073741824` (1 GiB) |
 | `ORABBIT_TEMP_MAX_MANAGED_BYTES` | `107374182400` (100 GiB) |
 | `ORABBIT_TEMP_DRY_RUN` | `false` |
+| `ORABBIT_SOURCE_QUERY_TIMEOUT` | `2h`; bound on one partition's source query, `0` for no limit (flag `-source-query-timeout`) |
 
 The worker flags `-master`, `-worker-id`, `-worker-addr`, `-insecure`,
 `-tls-ca`, `-tls-server-name`, `-identity-dir`, `-enrollment-token`,
@@ -1017,11 +1025,34 @@ Canceling stops its attempts and quarantines its uploaded objects for cleanup.
 A run left in `PLANNING` without tasks by a master crash is marked `FAILED`
 at the next master startup, which frees its dataset.
 
-### A canceled run leaves objects temporarily
+### A canceled or failed run leaves objects behind
 
-Canceled objects are quarantined and cleanup defaults to dry-run for seven
-days. Review the cleanup records and explicitly change the dry-run setting only
-after validating the target and retention policy.
+Objects that no published dataset will reference enter one cleanup path:
+
+- completed uploads of canceled attempts, when the run is canceled;
+- accepted artifacts of `FAILED` or `CANCELED` runs that never began a commit;
+- completed multipart uploads of attempts that failed, expired or were
+  canceled and were never accepted, in any finished run.
+
+The master discovers them on every cleanup scan once the run has no active
+attempt or open upload. Each object is quarantined for
+`ORABBIT_CANCELED_OBJECT_RETENTION` (7 days), re-checked against run, commit
+and registration state, and its size, SHA-256 and metadata are verified before
+any delete. Runs whose commit started and then failed are not collected
+automatically. Neither are small single-request uploads of failed attempts,
+because the master never learns their keys; both stay under the run's
+`_runs/run-<id>/` prefix.
+
+**Cleanup is dry-run by default: with `ORABBIT_CANCELED_OBJECT_CLEANUP_DRY_RUN=true`
+nothing is ever deleted.** Candidates only get `dry_run_result=WOULD_DELETE`
+and a `canceled object delete scheduled` event. To enable deletion:
+
+1. Review candidates in the `canceled_object_cleanup` field of `GET /runs/{id}` and confirm
+   the listed keys are really unreferenced in your target bucket.
+2. Confirm the retention period gives you enough time to notice mistakes, and
+   ideally enable bucket versioning.
+3. Set `ORABBIT_CANCELED_OBJECT_CLEANUP_DRY_RUN=false` and restart the master.
+   Candidates already marked `WOULD_DELETE` are deleted on their next retry.
 
 ### Root Docker Compose fails on the PostgreSQL mount
 

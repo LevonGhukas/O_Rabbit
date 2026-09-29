@@ -18,8 +18,6 @@ const (
 	// commitClaimLease bounds how long a crashed committer blocks a run; a
 	// live committer renews its claim every third of it.
 	commitClaimLease = 2 * time.Minute
-	// commitTimeout bounds one publication attempt of a run.
-	commitTimeout = 30 * time.Minute
 )
 
 // ReconcileCommittingRuns publishes every eligible COMMITTING run. It is the
@@ -79,7 +77,7 @@ func (s *Server) commitClaimedRun(ctx context.Context, runID string) bool {
 	if !claimed {
 		return false // another committer holds it, or it is not yet eligible
 	}
-	commitCtx, cancel := context.WithTimeout(ctx, commitTimeout)
+	commitCtx, cancel := context.WithTimeout(ctx, s.commitCatalog.CommitTimeout)
 	renewDone := make(chan struct{})
 	go func() {
 		defer close(renewDone)
@@ -132,7 +130,7 @@ func (s *Server) finalizeRunCommit(ctx context.Context, runID string) error {
 		}
 		class, retryable, operator, component := classifyCommitError(err)
 		_ = s.st.RecordCommitReconciliationFailure(ctx, runID, class, err.Error(), retryable, operator, s.nowFn(), db.CommitReconciliationPolicy{
-			MaxAttempts: 5,
+			MaxAttempts: s.commitCatalog.CommitMaxAttempts,
 			BackoffBase: time.Second,
 			BackoffMax:  time.Minute,
 		})
@@ -147,7 +145,7 @@ func (s *Server) finalizeRunCommit(ctx context.Context, runID string) error {
 		s.recordArtifactIntegrityFailure(ctx, runID, err)
 		if run, getErr := s.st.GetRun(ctx, runID); getErr == nil && run.Status == "FAILED" {
 			// Terminal: tell run watchers, which stop on "run FAILED".
-			e := db.Event{ID: "commit-failed-" + runID, RunID: runID, TS: s.nowFn().UTC().Format(time.RFC3339Nano), Level: "ERROR", Message: "run FAILED", FieldsJSON: []byte(`{"event_type":"RUN_COMMIT_FAILED"}`)}
+			e := db.Event{ID: "commit-failed-" + runID, RunID: runID, TS: db.FormatTimestamp(s.nowFn()), Level: "ERROR", Message: "run FAILED", FieldsJSON: []byte(`{"event_type":"RUN_COMMIT_FAILED"}`)}
 			if s.st.InsertEventOnce(ctx, e) == nil && s.bc != nil {
 				s.bc.Publish(e)
 			}
@@ -162,7 +160,7 @@ func (s *Server) finalizeRunCommit(ctx context.Context, runID string) error {
 		_ = s.st.InsertEventOnce(ctx, db.Event{
 			ID:         "commit-completion-pending-" + runID,
 			RunID:      runID,
-			TS:         time.Now().UTC().Format(time.RFC3339Nano),
+			TS:         db.FormatTimestamp(time.Now()),
 			Level:      "WARN",
 			Message:    "run completion pending recovery",
 			FieldsJSON: fields,
@@ -176,7 +174,7 @@ func (s *Server) finalizeRunCommit(ctx context.Context, runID string) error {
 			s.bc.Publish(db.Event{
 				ID:         "commit-" + run.CommitID,
 				RunID:      runID,
-				TS:         time.Now().UTC().Format(time.RFC3339Nano),
+				TS:         db.FormatTimestamp(time.Now()),
 				Level:      "INFO",
 				Message:    "run committed",
 				FieldsJSON: fields,
@@ -216,6 +214,6 @@ func (s *Server) recordArtifactIntegrityFailure(ctx context.Context, runID strin
 		}
 	}
 	fields, _ := json.Marshal(eventFields)
-	e := db.Event{ID: "artifact-integrity-" + hex.EncodeToString(digest[:]), RunID: runID, TS: s.nowFn().UTC().Format(time.RFC3339Nano), Level: "ERROR", Message: "artifact integrity verification failed", FieldsJSON: fields}
+	e := db.Event{ID: "artifact-integrity-" + hex.EncodeToString(digest[:]), RunID: runID, TS: db.FormatTimestamp(s.nowFn()), Level: "ERROR", Message: "artifact integrity verification failed", FieldsJSON: fields}
 	_ = s.st.InsertEvent(ctx, e)
 }

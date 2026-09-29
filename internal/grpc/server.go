@@ -116,6 +116,7 @@ func (s s3CommitObjectStore) ObjectChecksum(ctx context.Context, key string) (in
 
 // Server implements the gRPC control plane server.
 type Server struct {
+	commitCatalog CommitCatalogPolicy
 	grpcpb.UnimplementedControlPlaneServer
 
 	log *slog.Logger
@@ -230,6 +231,7 @@ func NewServer(log *slog.Logger, st *db.Store, bc *httpapi.Broadcaster, k crypto
 		return s3io.New(ctx, cfg)
 	}
 	s.workerCertTTL = 24 * time.Hour
+	s.commitCatalog = DefaultCommitCatalogPolicy()
 	s.assumeRoleFn = assumeRoleWithSTS
 	return s
 }
@@ -242,6 +244,68 @@ func (s *Server) ExpireLeases(ctx context.Context) (int, error) {
 }
 
 func (s *Server) SetLeasePolicy(policy db.LeasePolicy) { s.leasePolicy = policy }
+
+// CommitCatalogPolicy holds the timeouts, leases and retry budgets of run
+// publication and catalog registration/reconciliation.
+type CommitCatalogPolicy struct {
+	// CommitTimeout bounds one publication attempt of a run.
+	CommitTimeout time.Duration
+	// CommitMaxAttempts bounds retries of a failing commit.
+	CommitMaxAttempts int
+	// RegistrationTimeout bounds one catalog registration.
+	RegistrationTimeout time.Duration
+	Registration        db.RegistrationPolicy
+	// ReconciliationLease and ReconciliationMaxAttempts govern catalog
+	// observation after an ambiguous registration.
+	ReconciliationLease       time.Duration
+	ReconciliationMaxAttempts int
+}
+
+// DefaultCommitCatalogPolicy returns the built-in commit and catalog policy.
+func DefaultCommitCatalogPolicy() CommitCatalogPolicy {
+	return CommitCatalogPolicy{
+		CommitTimeout:             30 * time.Minute,
+		CommitMaxAttempts:         5,
+		RegistrationTimeout:       30 * time.Minute,
+		Registration:              db.RegistrationPolicy{LeaseDuration: 30 * time.Second, MaxAttempts: 5, BackoffBase: time.Second, BackoffMax: time.Minute},
+		ReconciliationLease:       30 * time.Second,
+		ReconciliationMaxAttempts: 5,
+	}
+}
+
+// SetCommitCatalogPolicy replaces the commit and catalog policy. Zero fields
+// keep their defaults.
+func (s *Server) SetCommitCatalogPolicy(p CommitCatalogPolicy) {
+	d := DefaultCommitCatalogPolicy()
+	if p.CommitTimeout <= 0 {
+		p.CommitTimeout = d.CommitTimeout
+	}
+	if p.CommitMaxAttempts <= 0 {
+		p.CommitMaxAttempts = d.CommitMaxAttempts
+	}
+	if p.RegistrationTimeout <= 0 {
+		p.RegistrationTimeout = d.RegistrationTimeout
+	}
+	if p.Registration.LeaseDuration <= 0 {
+		p.Registration.LeaseDuration = d.Registration.LeaseDuration
+	}
+	if p.Registration.MaxAttempts <= 0 {
+		p.Registration.MaxAttempts = d.Registration.MaxAttempts
+	}
+	if p.Registration.BackoffBase <= 0 {
+		p.Registration.BackoffBase = d.Registration.BackoffBase
+	}
+	if p.Registration.BackoffMax <= 0 {
+		p.Registration.BackoffMax = d.Registration.BackoffMax
+	}
+	if p.ReconciliationLease <= 0 {
+		p.ReconciliationLease = d.ReconciliationLease
+	}
+	if p.ReconciliationMaxAttempts <= 0 {
+		p.ReconciliationMaxAttempts = d.ReconciliationMaxAttempts
+	}
+	s.commitCatalog = p
+}
 func (s *Server) SetUploadCapacityPolicy(limit int, ttl time.Duration) {
 	if limit > 0 {
 		s.uploadCapacityLimit = limit
@@ -522,7 +586,7 @@ func (s *Server) ReportTaskProgress(ctx context.Context, req *grpcpb.ReportTaskP
 	e := db.Event{
 		ID:         eventID,
 		RunID:      eventRunID,
-		TS:         time.Now().UTC().Format(time.RFC3339Nano),
+		TS:         db.FormatTimestamp(time.Now()),
 		Level:      level,
 		Message:    eventMessage,
 		FieldsJSON: []byte(orJSON(fields)),
@@ -618,7 +682,7 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *grpcpb.ReportTaskRes
 	if msg != "already accepted" {
 		// Emit exactly one logical completion event for an accepted attempt.
 		tid := req.TaskId
-		e := db.Event{ID: newID(), RunID: runID, TaskID: &tid, TS: time.Now().UTC().Format(time.RFC3339Nano), Level: "INFO", Message: fmt.Sprintf("task %s %s", req.TaskId, finalStatus), FieldsJSON: []byte(`{}`)}
+		e := db.Event{ID: newID(), RunID: runID, TaskID: &tid, TS: db.FormatTimestamp(time.Now()), Level: "INFO", Message: fmt.Sprintf("task %s %s", req.TaskId, finalStatus), FieldsJSON: []byte(`{}`)}
 		_ = s.st.InsertEvent(ctx, e)
 		if s.bc != nil {
 			s.bc.Publish(e)
@@ -635,7 +699,7 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *grpcpb.ReportTaskRes
 		// dataset state) can take many minutes, so it never runs inside this
 		// worker's RPC. The run is now COMMITTING; a claimed committer on the
 		// master's own context publishes it and emits "run committed".
-		re := db.Event{ID: newID(), RunID: runID, TS: time.Now().UTC().Format(time.RFC3339Nano), Level: "INFO", Message: fmt.Sprintf("run %s", newStatus), FieldsJSON: []byte(`{}`)}
+		re := db.Event{ID: newID(), RunID: runID, TS: db.FormatTimestamp(time.Now()), Level: "INFO", Message: fmt.Sprintf("run %s", newStatus), FieldsJSON: []byte(`{}`)}
 		_ = s.st.InsertEvent(ctx, re)
 		if s.bc != nil {
 			s.bc.Publish(re)
@@ -667,7 +731,7 @@ func (s *Server) ProcessReconciliationOnce(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	defer release()
-	const reconciliationLease = 30 * time.Second
+	reconciliationLease := s.commitCatalog.ReconciliationLease
 	r, a, ok, err := s.st.ClaimReconciliation(ctx, s.nowFn(), reconciliationLease)
 	if err != nil || !ok {
 		return ok, err
@@ -740,12 +804,12 @@ func (s *Server) ProcessReconciliationOnce(ctx context.Context) (bool, error) {
 				return true, s.st.ApplyReconciliationDecision(ctx, r.ID, a.ID, a.FencingToken, decision.Outcome, decision.EvidenceDigest, obs.MetadataStart, obs.MetadataEnd, decision.SnapshotID, "", decision.MatchedFiles, decision.ExpectedFiles, s.nowFn(), 2)
 			}
 		}
-		return true, s.st.RetryReconciliationObservation(ctx, r.ID, a.ID, a.FencingToken, "CATALOG_OBSERVATION_UNAVAILABLE", err.Error(), s.nowFn(), time.Second, 5)
+		return true, s.st.RetryReconciliationObservation(ctx, r.ID, a.ID, a.FencingToken, "CATALOG_OBSERVATION_UNAVAILABLE", err.Error(), s.nowFn(), time.Second, s.commitCatalog.ReconciliationMaxAttempts)
 	}
 	op := icebergreg.OperationIdentity{RegistrationID: r.ID, RunID: r.RunID, CommitID: r.CommitID, ArtifactSetDigest: r.ArtifactSetDigest, ManifestKey: r.ManifestKey}
 	decision, err := icebergreg.DecideReconciliation(op, expected, obs)
 	if err != nil {
-		return true, s.st.RetryReconciliationObservation(ctx, r.ID, a.ID, a.FencingToken, "INSUFFICIENT_HISTORY", err.Error(), s.nowFn(), time.Second, 5)
+		return true, s.st.RetryReconciliationObservation(ctx, r.ID, a.ID, a.FencingToken, "INSUFFICIENT_HISTORY", err.Error(), s.nowFn(), time.Second, s.commitCatalog.ReconciliationMaxAttempts)
 	}
 	receipt := ""
 	if decision.Outcome == icebergreg.OutcomeExactlyCommitted {
@@ -1366,7 +1430,7 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 	if err := s.st.SetCommitPhase(ctx, runID, "VERIFIED"); err != nil {
 		return err
 	}
-	e := db.Event{ID: "commit-storage-" + commitID, RunID: runID, TS: time.Now().UTC().Format(time.RFC3339Nano), Level: "INFO", Message: "storage publication verified", FieldsJSON: fields}
+	e := db.Event{ID: "commit-storage-" + commitID, RunID: runID, TS: db.FormatTimestamp(time.Now()), Level: "INFO", Message: "storage publication verified", FieldsJSON: fields}
 	_ = s.st.InsertEventOnce(ctx, e)
 	return nil
 }

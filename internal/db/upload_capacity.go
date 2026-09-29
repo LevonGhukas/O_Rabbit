@@ -35,8 +35,8 @@ func (s *Store) AcquireUploadCapacity(ctx context.Context, bootID, taskID, attem
 		tokenFn = func() (string, error) { return secureAttemptValue("") }
 	}
 	now = now.UTC()
-	nowS := now.Format(time.RFC3339Nano)
-	deadline := now.Add(ttl).Format(time.RFC3339Nano)
+	nowS := now.UTC().Format(TimestampLayout)
+	deadline := now.Add(ttl).UTC().Format(TimestampLayout)
 	var out UploadCapacityLease
 	acquired := false
 	err := withBusyRetry(ctx, func() error {
@@ -45,7 +45,7 @@ func (s *Store) AcquireUploadCapacity(ctx context.Context, bootID, taskID, attem
 			return err
 		}
 		defer func() { _ = tx.Rollback() }()
-		if _, err := tx.ExecContext(ctx, `UPDATE upload_capacity_leases SET status='EXPIRED',updated_at=? WHERE status='ACTIVE' AND julianday(lease_deadline)<=julianday(?)`, nowS, nowS); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE upload_capacity_leases SET status='EXPIRED',updated_at=? WHERE status='ACTIVE' AND lease_deadline<=?`, nowS, nowS); err != nil {
 			return err
 		}
 		var owned int
@@ -54,7 +54,7 @@ func (s *Store) AcquireUploadCapacity(ctx context.Context, bootID, taskID, attem
 			FROM task_attempts a JOIN tasks t ON t.id=a.task_id
 			WHERE a.id=? AND a.task_id=? AND a.worker_id=? AND a.worker_boot_id=? AND a.fencing_token=?
 			  AND a.status='ACTIVE' AND t.status='RUNNING' AND t.current_attempt_id=a.id
-			  AND julianday(a.lease_deadline)>julianday(?)`,
+			  AND a.lease_deadline>?`,
 			attemptID, taskID, workerID, bootID, fencingToken, nowS).Scan(&owned)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrUploadCapacityFenced
@@ -79,7 +79,7 @@ func (s *Store) AcquireUploadCapacity(ctx context.Context, bootID, taskID, attem
 		}
 
 		var active int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM upload_capacity_leases WHERE status='ACTIVE' AND julianday(lease_deadline)>julianday(?)`, nowS).Scan(&active); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM upload_capacity_leases WHERE status='ACTIVE' AND lease_deadline>?`, nowS).Scan(&active); err != nil {
 			return err
 		}
 		if active >= limit {
@@ -110,7 +110,7 @@ func (s *Store) AcquireUploadCapacity(ctx context.Context, bootID, taskID, attem
 
 // ReleaseUploadCapacity is idempotent for a matching lease credential.
 func (s *Store) ReleaseUploadCapacity(ctx context.Context, bootID, taskID, attemptID, workerID, leaseID, leaseToken string, now time.Time) error {
-	nowS := now.UTC().Format(time.RFC3339Nano)
+	nowS := now.UTC().Format(TimestampLayout)
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE upload_capacity_leases
 		SET status=CASE WHEN status='ACTIVE' THEN 'RELEASED' ELSE status END,

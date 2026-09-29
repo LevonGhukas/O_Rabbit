@@ -61,7 +61,7 @@ func (s *Store) LoadOrCreateWorkerCA(ctx context.Context, certPEM string, keyEnc
 
 // CreateEnrollmentTokenAudited stores the digest of a new enrollment token.
 func (s *Store) CreateEnrollmentTokenAudited(ctx context.Context, id, tokenSHA256, pool string, maxUses int, expiresAt time.Time, audit AuditRecord) (EnrollmentToken, error) {
-	out := EnrollmentToken{ID: id, Pool: pool, MaxUses: maxUses, ExpiresAt: expiresAt.UTC().Format(time.RFC3339Nano), CreatedAt: nowUTC()}
+	out := EnrollmentToken{ID: id, Pool: pool, MaxUses: maxUses, ExpiresAt: expiresAt.UTC().Format(TimestampLayout), CreatedAt: nowUTC()}
 	err := s.withTx(ctx, nil, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO worker_enrollment_tokens(id,token_sha256,pool,max_uses,use_count,expires_at,created_at) VALUES(?,?,?,?,0,?,?)`, out.ID, tokenSHA256, out.Pool, out.MaxUses, out.ExpiresAt, out.CreatedAt); err != nil {
 			return err
@@ -81,10 +81,10 @@ func (s *Store) CreateEnrollmentTokenAudited(ctx context.Context, id, tokenSHA25
 // pool. The certificate described by id/serial/notAfter must only be handed to
 // the worker if this call succeeds.
 func (s *Store) EnrollWorkerIdentity(ctx context.Context, tokenSHA256, id, name, hostname, certSerial string, certNotAfter, now time.Time) (WorkerIdentity, error) {
-	nowS := now.UTC().Format(time.RFC3339Nano)
-	out := WorkerIdentity{ID: id, Name: name, Hostname: hostname, Status: WorkerIdentityActive, CertSerial: certSerial, CertNotAfter: certNotAfter.UTC().Format(time.RFC3339Nano), EnrolledAt: nowS, UpdatedAt: nowS}
+	nowS := now.UTC().Format(TimestampLayout)
+	out := WorkerIdentity{ID: id, Name: name, Hostname: hostname, Status: WorkerIdentityActive, CertSerial: certSerial, CertNotAfter: certNotAfter.UTC().Format(TimestampLayout), EnrolledAt: nowS, UpdatedAt: nowS}
 	err := s.withTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable}, func(tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, `SELECT id,pool FROM worker_enrollment_tokens WHERE token_sha256=? AND use_count<max_uses AND julianday(expires_at)>julianday(?)`, tokenSHA256, nowS).Scan(&out.EnrollmentTokenID, &out.Pool)
+		err := tx.QueryRowContext(ctx, `SELECT id,pool FROM worker_enrollment_tokens WHERE token_sha256=? AND use_count<max_uses AND expires_at>?`, tokenSHA256, nowS).Scan(&out.EnrollmentTokenID, &out.Pool)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrEnrollmentTokenInvalid
 		}
@@ -134,7 +134,7 @@ func (s *Store) ListWorkerIdentities(ctx context.Context) ([]WorkerIdentity, err
 // active identity.
 func (s *Store) RecordWorkerCertificate(ctx context.Context, id, certSerial string, certNotAfter, now time.Time) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE worker_identities SET cert_serial=?,cert_not_after=?,updated_at=? WHERE id=? AND status=?`,
-		certSerial, certNotAfter.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano), id, WorkerIdentityActive)
+		certSerial, certNotAfter.UTC().Format(TimestampLayout), now.UTC().Format(TimestampLayout), id, WorkerIdentityActive)
 	if err != nil {
 		return err
 	}
@@ -157,7 +157,7 @@ func (s *Store) RevokeWorkerIdentityAudited(ctx context.Context, id string, now 
 		if before.Status == WorkerIdentityRevoked {
 			return nil
 		}
-		nowS := now.UTC().Format(time.RFC3339Nano)
+		nowS := now.UTC().Format(TimestampLayout)
 		if _, err := tx.ExecContext(ctx, `UPDATE worker_identities SET status=?,revoked_at=?,updated_at=? WHERE id=?`, WorkerIdentityRevoked, nowS, nowS, id); err != nil {
 			return err
 		}
@@ -180,8 +180,8 @@ func (s *Store) VerifyTaskAttemptOwner(ctx context.Context, bootID, taskID, atte
 	var runID string
 	err := s.db.QueryRowContext(ctx, `SELECT t.run_id FROM task_attempts a JOIN tasks t ON t.id=a.task_id
 		WHERE a.id=? AND a.task_id=? AND a.fencing_token=? AND a.worker_id=? AND a.worker_boot_id=? AND a.status='ACTIVE'
-		AND julianday(a.lease_deadline)>julianday(?) AND t.status='RUNNING' AND t.current_attempt_id=a.id`,
-		attemptID, taskID, token, workerID, bootID, now.UTC().Format(time.RFC3339Nano)).Scan(&runID)
+		AND a.lease_deadline>? AND t.status='RUNNING' AND t.current_attempt_id=a.id`,
+		attemptID, taskID, token, workerID, bootID, now.UTC().Format(TimestampLayout)).Scan(&runID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrAttemptFenced
 	}

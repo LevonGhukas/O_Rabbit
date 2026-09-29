@@ -685,7 +685,7 @@ func (s *Server) activeWorkerCount(ctx context.Context) int {
 	if s == nil || s.st == nil {
 		return 0
 	}
-	cutoff := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
+	cutoff := db.FormatTimestamp(time.Now().UTC().Add(-30 * time.Second))
 	workers, err := s.st.ListWorkersActive(ctx, cutoff)
 	if err != nil {
 		return 0

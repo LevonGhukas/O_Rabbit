@@ -89,7 +89,7 @@ func TestLeaseAssignmentIsAtomicAndFenced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if deadline != now.Add(31*time.Second).Format(time.RFC3339Nano) {
+	if deadline != FormatTimestamp(now.Add(31*time.Second)) {
 		t.Fatalf("deadline=%s", deadline)
 	}
 }
@@ -313,7 +313,7 @@ func TestAssignmentAbandonmentUsesBackoffBelowRetryLimit(t *testing.T) {
 		t.Fatalf("tasks=%+v err=%v", tasks, err)
 	}
 	task := tasks[0]
-	if task.Status != "PENDING" || task.CurrentAttemptID != nil || task.WorkerID != nil || task.NextEligibleAt == nil || *task.NextEligibleAt != t0.Add(2*time.Second).Format(time.RFC3339Nano) {
+	if task.Status != "PENDING" || task.CurrentAttemptID != nil || task.WorkerID != nil || task.NextEligibleAt == nil || *task.NextEligibleAt != FormatTimestamp(t0.Add(2*time.Second)) {
 		t.Fatalf("requeued task=%+v", task)
 	}
 	if _, ok, err := st.AssignNextPendingTaskWithLease(ctx, "", "early", t0.Add(time.Second), p, fixedGenerator("unused"), fixedGenerator("unused")); err != nil || ok {

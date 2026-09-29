@@ -75,7 +75,7 @@ func (s *Store) DiagnoseRun(ctx context.Context, runID string, now time.Time, ma
 		Status:      run.Status,
 		CommitPhase: run.CommitPhase,
 		TaskCounts:  map[string]int{},
-		GeneratedAt: now.UTC().Format(time.RFC3339Nano),
+		GeneratedAt: now.UTC().Format(TimestampLayout),
 	}
 	if run.Status == "COMMITTING" {
 		if started, parseErr := time.Parse(time.RFC3339Nano, run.StartedAt); parseErr == nil && now.After(started) {
@@ -244,7 +244,7 @@ func (s *Store) LifecycleMetrics(ctx context.Context, now time.Time) (LifecycleM
 	if err := scanMetricCounts(ctx, s.db, `SELECT status,COUNT(*) FROM tasks GROUP BY status`, out.TasksByStatus); err != nil {
 		return LifecycleMetrics{}, err
 	}
-	nowS := now.UTC().Format(time.RFC3339Nano)
+	nowS := now.UTC().Format(TimestampLayout)
 	if err := s.rdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_attempts WHERE status='ACTIVE'`).Scan(&out.LeasedTasks); err != nil {
 		return LifecycleMetrics{}, err
 	}
