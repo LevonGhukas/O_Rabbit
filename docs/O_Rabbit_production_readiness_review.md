@@ -111,6 +111,7 @@ restore runbook.
     - Multipart lifecycle messages are multiplexed through `ReportTaskProgress` via the magic string `Message == "MULTIPART_LIFECYCLE"`. They should be a real RPC.
     - Worker-supplied `Message`/`FieldsJson` is stored as events with no size cap.
     - The worker hard-codes `ProtocolVersion: 5` instead of using the shared constant.
+   **Status:** DONE
 22. **Failed runs leave orphaned objects.** Uploaded objects from failed or superseded runs don't appear to enter the canceled-object cleanup path.
    **Status:** DONE
 
