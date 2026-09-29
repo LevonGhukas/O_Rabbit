@@ -1316,8 +1316,13 @@ type ArtifactIntegrity struct {
 	VerificationStatus string                 `protobuf:"bytes,13,opt,name=verification_status,json=verificationStatus,proto3" json:"verification_status,omitempty"`
 	VerifiedAt         string                 `protobuf:"bytes,14,opt,name=verified_at,json=verifiedAt,proto3" json:"verified_at,omitempty"`
 	MaxHwm             string                 `protobuf:"bytes,15,opt,name=max_hwm,json=maxHwm,proto3" json:"max_hwm,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Checksum the object store computed for the uploaded object
+	// (x-amz-checksum-sha256): base64 SHA-256 of the whole object, or of the
+	// part checksums followed by "-<parts>" for multipart uploads. Empty when
+	// the store does not report checksums.
+	ProviderChecksumSha256 string `protobuf:"bytes,16,opt,name=provider_checksum_sha256,json=providerChecksumSha256,proto3" json:"provider_checksum_sha256,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *ArtifactIntegrity) Reset() {
@@ -1451,6 +1456,13 @@ func (x *ArtifactIntegrity) GetVerifiedAt() string {
 func (x *ArtifactIntegrity) GetMaxHwm() string {
 	if x != nil {
 		return x.MaxHwm
+	}
+	return ""
+}
+
+func (x *ArtifactIntegrity) GetProviderChecksumSha256() string {
+	if x != nil {
+		return x.ProviderChecksumSha256
 	}
 	return ""
 }
@@ -2022,7 +2034,7 @@ const file_controlplane_proto_rawDesc = "" +
 	"\x12uncompressed_bytes\x18\x17 \x01(\x03R\x11uncompressedBytes\x12.\n" +
 	"\x13parquet_object_keys\x18\x1e \x03(\tR\x11parquetObjectKeys\x12\"\n" +
 	"\rmax_hwm_value\x18\x1f \x01(\tR\vmaxHwmValue\x12;\n" +
-	"\tartifacts\x18  \x03(\v2\x1d.orabbit.v1.ArtifactIntegrityR\tartifacts\"\x8b\x04\n" +
+	"\tartifacts\x18  \x03(\v2\x1d.orabbit.v1.ArtifactIntegrityR\tartifacts\"\xc5\x04\n" +
 	"\x11ArtifactIntegrity\x12\x1d\n" +
 	"\n" +
 	"object_key\x18\x01 \x01(\tR\tobjectKey\x12\x1b\n" +
@@ -2043,7 +2055,8 @@ const file_controlplane_proto_rawDesc = "" +
 	"\x13verification_status\x18\r \x01(\tR\x12verificationStatus\x12\x1f\n" +
 	"\vverified_at\x18\x0e \x01(\tR\n" +
 	"verifiedAt\x12\x17\n" +
-	"\amax_hwm\x18\x0f \x01(\tR\x06maxHwm\"\xaa\x01\n" +
+	"\amax_hwm\x18\x0f \x01(\tR\x06maxHwm\x128\n" +
+	"\x18provider_checksum_sha256\x18\x10 \x01(\tR\x16providerChecksumSha256\"\xaa\x01\n" +
 	"\x15RenewTaskLeaseRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x17\n" +
 	"\atask_id\x18\x02 \x01(\tR\x06taskId\x12\x1d\n" +

@@ -82,7 +82,12 @@ The three binaries are:
 Connections contain source or target metadata plus a secret payload. Jobs
 reference connections and describe extraction/planning options. A run snapshots
 one job execution and contains logical tasks; task attempts carry leases and
-fencing credentials. Events, artifact records, high-water marks, registration
+fencing credentials. When a run's tasks are created, the master records the
+job (with the planner's tuned options) and the connections' non-secret
+settings (source engine, target endpoint, region, bucket, prefix). Assignments,
+task credentials, the commit, and cleanup use that snapshot, so editing a job
+or connection affects only later runs. Credentials are always read from the
+connection, so rotating them applies to runs in flight. Events, artifact records, high-water marks, registration
 attempts, and cleanup records provide the durable execution history.
 
 ## Tech stack
@@ -491,10 +496,36 @@ orabbit-client run submit --file ./run.yaml
 orabbit-client run watch <run-id>
 ```
 
+Target metadata must include `endpoint` and `bucket`; invalid or wrongly typed
+metadata is rejected instead of being defaulted. For AWS use the regional
+endpoint, for example `https://s3.eu-west-1.amazonaws.com`. `region` defaults to
+`us-east-1` and `force_path_style` to `true`.
+
 When `auto_tune` is `false`, set `max_in_flight_tasks`, `fetch_limit`, and at
 least one of `planned_tasks` or `chunk_size`. FlightSQL requires `source.sql`,
 `incremental: false`, `auto_tune: false`, no `id_column`, and no manual planning
 fields.
+
+### Incremental cursors and late-arriving rows
+
+An incremental run resumes strictly after the dataset's high-water mark, the
+largest cursor value committed so far. Rows that become visible later with a
+cursor value at or below that mark are then never exported. That happens with
+`updated_at` set when a transaction starts but committed after a run read past
+it, with sequences that commit out of order, and with ties at the boundary.
+
+Set the job option `cursor_lookback` to re-read a window below the mark on
+every run: a count for integer cursors (`"cursor_lookback": "1000"`) or a
+duration for date and timestamp cursors (`"30m"`, `"48h"`). Choose it larger
+than your longest transaction or replication delay. Re-read rows are exported
+again, so deduplicate them downstream, for example with Iceberg upsert on the
+table's key. String, UUID and decimal cursors do not support a lookback. The
+high-water mark never moves backwards.
+
+Parquet artifacts are verified by the worker after upload. When the object
+store reports SHA-256 checksums (`x-amz-checksum-sha256`), the worker records
+the store's checksum and the commit verifies each object with a HEAD request;
+otherwise the master re-reads and hashes the object.
 
 ### Iceberg defaults and per-run options
 

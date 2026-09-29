@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -116,6 +117,23 @@ func (s *scriptedCommitStore) OpenObject(ctx context.Context, key string) (io.Re
 	return io.NopCloser(bytes.NewReader(b)), true, nil
 }
 
+// ObjectChecksum reports a full-object SHA-256 checksum like S3 does for a
+// single-part upload.
+func (s *scriptedCommitStore) ObjectChecksum(_ context.Context, key string) (int64, string, bool, error) {
+	mode := s.operation(faultHead, key, nil)
+	if mode == returnError {
+		return 0, "", false, errors.New("injected HEAD failure")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.objects[key]
+	if !ok {
+		return 0, "", false, nil
+	}
+	sum := sha256.Sum256(b)
+	return int64(len(b)), base64.StdEncoding.EncodeToString(sum[:]), true, nil
+}
+
 func (s *scriptedCommitStore) PutObjectBytes(_ context.Context, key string, b []byte, _ string, _ map[string]string) error {
 	mode := s.operation(faultPut, key, b)
 	if mode == failBefore {
@@ -180,6 +198,13 @@ func newEmptyCommitFixture(t *testing.T, suffix string) *commitFixture {
 
 func newCommitFixtureWithOutput(t *testing.T, suffix string, registrationEnabled, hasOutput bool) *commitFixture {
 	t.Helper()
+	return newCommitFixtureWithChecksum(t, suffix, registrationEnabled, hasOutput, false)
+}
+
+// newCommitFixtureWithChecksum optionally records the object store's
+// checksum on the artifact, as a worker does when the store reports one.
+func newCommitFixtureWithChecksum(t *testing.T, suffix string, registrationEnabled, hasOutput, providerChecksum bool) *commitFixture {
+	t.Helper()
 	ctx := context.Background()
 	st := openGRPCTestStore(t)
 	runID, jobID := "run-"+suffix, "job-"+suffix
@@ -231,6 +256,10 @@ func newCommitFixtureWithOutput(t *testing.T, suffix string, registrationEnabled
 	if hasOutput {
 		digest := sha256.Sum256(parquetBytes)
 		records = []artifact.Record{{ObjectKey: parquetKey, ByteSize: int64(len(parquetBytes)), SHA256: hex.EncodeToString(digest[:]), RowCount: 10, SchemaFingerprint: strings.Repeat("a", 64), RunID: runID, TaskID: taskID, AttemptID: assigned.AttemptID, AttemptNumber: assigned.AttemptNumber, FileIndex: 0, FormatVersion: artifact.FormatVersion, VerificationMethod: artifact.VerificationPortable, VerificationStatus: artifact.VerificationVerified, MaxHWM: "42"}}
+		if providerChecksum {
+			records[0].VerificationMethod = artifact.VerificationProvider
+			records[0].ProviderChecksumSHA256 = base64.StdEncoding.EncodeToString(digest[:])
+		}
 		rows = 10
 		written = int64(len(parquetBytes))
 	}
@@ -951,5 +980,58 @@ func TestVerifiedCommitManifestV2ContainsCanonicalArtifacts(t *testing.T) {
 	record := manifest.Artifacts[0]
 	if record.ObjectKey != f.parquetKey || record.SHA256 == "" || record.ByteSize <= 0 || record.SchemaFingerprint == "" || record.VerificationStatus != artifact.VerificationVerified {
 		t.Fatalf("artifact=%+v", record)
+	}
+}
+
+func TestCommitVerifiesChecksummedArtifactsWithoutReadingThem(t *testing.T) {
+	f := newCommitFixtureWithChecksum(t, "provider-checksum", false, true, true)
+	if err := f.finalize(); err != nil {
+		t.Fatal(err)
+	}
+	f.assertRun("SUCCEEDED", "COMPLETE")
+	for _, call := range f.objects.calls {
+		if call.op == faultGet && call.key == f.parquetKey {
+			t.Fatal("commit must verify a checksummed artifact with HEAD, not download it")
+		}
+	}
+}
+
+func TestCommitRejectsChecksummedArtifactChangedAfterUpload(t *testing.T) {
+	f := newCommitFixtureWithChecksum(t, "provider-checksum-changed", false, true, true)
+	f.objects.objects[f.parquetKey] = []byte("PAR1-evil") // same size, different bytes
+	err := f.finalize()
+	if err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
+		t.Fatalf("expected checksum mismatch, got %v", err)
+	}
+	run, getErr := f.st.GetRun(f.ctx, f.runID)
+	if getErr != nil || run.Status == "SUCCEEDED" {
+		t.Fatalf("changed artifact must not commit: status=%s err=%v", run.Status, getErr)
+	}
+}
+
+func TestCommitNeverMovesHighWaterMarkBackwards(t *testing.T) {
+	f := newCommitFixture(t, "hwm-monotonic")
+	job, err := f.st.GetJob(f.ctx, f.jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.OptionsJSON = []byte(`{"table":"dbo.orders","partition_strategy":"ordered_cursor","cursor_column":"id","cursor_domain":"int64"}`)
+	if err := f.st.UpdateJob(f.ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	// An earlier run already committed up to 100; this run (with a lookback
+	// window) only re-read rows up to 42.
+	f.objects.objects[f.stateKey] = []byte(`{"last_committed_run_id":"run-earlier","committed_at":"2026-07-22T09:00:00Z","max_hwm_value":"100","max_part":0}`)
+	if err := f.finalize(); err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		MaxHWM string `json:"max_hwm_value"`
+	}
+	if err := json.Unmarshal(f.objects.objects[f.stateKey], &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.MaxHWM != "100" {
+		t.Fatalf("committed high-water mark=%q, want it to stay at 100", state.MaxHWM)
 	}
 }
