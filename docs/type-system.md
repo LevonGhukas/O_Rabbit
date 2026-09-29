@@ -39,8 +39,8 @@ PostgreSQL `DATE`, `TIMESTAMP`, and `TIMESTAMPTZ` also support `infinity` and `-
 | `int64` | `int64` | `long` | exact |
 | `int8` / `int16` | native Arrow width | `int` | safe promotion |
 | `uint8` / `uint16` | native Arrow width | `int` | safe promotion |
-| `uint32` | `uint32` | `long` | safe promotion |
-| `uint64` | `decimal128(20,0)` | `decimal(20,0)` | safe promotion |
+| `uint32` | `int64` | `long` | safe promotion |
+| `uint64` | `string`* | `string`* | semantic fallback |
 | `decimal(p,s)`, `p <= 38` | `decimal128(p,s)` | `decimal(p,s)` | exact |
 | `decimal(p,s)`, `p > 38` | `string`* | `string`* | semantic fallback |
 | `timestamp_tz` with a UTC alias | `timestamp[us, UTC]` | `timestamptz` | exact |
@@ -49,7 +49,7 @@ PostgreSQL `DATE`, `TIMESTAMP`, and `TIMESTAMPTZ` also support `infinity` and `-
 | `array<T>` | `list<resolved T>` | `list<resolved T>` | inherited from `T` |
 | `unknown` | `string`* | `string`* | unsupported fallback |
 
-`*` means the storage representation is a fallback. It is deliberately selected on both sides of the current Arrow-to-Iceberg bridge. Arrow alone can express `uint64`, but Iceberg `long` cannot safely hold its complete range, so the resolver stores it losslessly as `decimal(20,0)`. Arrow Decimal256 is likewise not selected because the current bridge accepts Decimal128 only. Although the installed Iceberg library has a native UUID type, the current runtime converter emits UUID text and native Iceberg UUID requires Arrow UUID extension values; UUID therefore remains text until that end-to-end path is implemented.
+`*` means the storage representation is a fallback. It is deliberately selected on both sides of the current Arrow-to-Iceberg bridge. Because Apache Iceberg has no unsigned integer types, `uint32` is safely promoted to Arrow `int64` and Iceberg `long` so values up to 4,294,967,295 do not overflow into negative signed 32-bit integers. Arrow alone can express `uint64`, but Iceberg `long` cannot safely hold its complete range, so the resolver uses `string` instead. Arrow Decimal256 is likewise not selected because the current bridge accepts Decimal128 only. Although the installed Iceberg library has a native UUID type, the current runtime converter emits UUID text and native Iceberg UUID requires Arrow UUID extension values; UUID therefore remains text until that end-to-end path is implemented.
 
 For `timestamp_tz`, an empty logical timezone becomes Arrow `UTC`, matching the canonical conversion output. A non-UTC timezone is preserved by the standalone Arrow mapper, but the resolved storage mapper falls back to string because the current bridge only accepts `UTC`, `+00:00`, `Etc/UTC`, and `Z` for Iceberg `timestamptz`.
 
@@ -91,7 +91,7 @@ The placeholder `source` / `nullable<source>` keeps the inferred source type and
 
 PostgreSQL is the first migrated source engine: PostgreSQL metadata flows through `arrowio.LogicalTypeForPostgresColumn`, `ArrowTypeForLogicalType`, `typesystem.Convert`, and canonical Arrow appenders. Invalid values now return conversion errors rather than wrapping narrow integers, producing zero values, or silently appending nulls. UUID and JSON remain logical `uuid`/`json` and use their explicit storage fallback; unsupported PostgreSQL semantic types (including `INET`, `TIMETZ`, and `VARBIT`) remain `unknown` with their source type name and use lossless-string fallback. Unconstrained `NUMERIC` is also `unknown`; no `decimal(38,10)` constraint is invented. PostgreSQL text arrays permit null elements, so their migrated element type is marked nullable because source column metadata does not expose element nullability.
 
-MySQL/MariaDB now use same migrated path. `BIGINT UNSIGNED` remains logical `uint64` but storage plan uses string, preserving MaxUint64 exactly. JSON is semantic fallback; ENUM, SET, wide BIT, spatial, TIME, unknown, and unconstrained decimal are `unknown` fallback. MySQL TIME remains string fallback because valid MySQL durations exceed KindTime time-of-day range.
+MySQL/MariaDB now use same migrated path. `BIGINT UNSIGNED` remains logical `uint64` but storage plan uses string, preserving MaxUint64 exactly. `INT UNSIGNED`, `INTEGER UNSIGNED`, and `MEDIUMINT UNSIGNED` map to `KindUInt32` and are safely promoted to Arrow `Int64` / Iceberg `long` because Iceberg has no unsigned integer types. JSON is semantic fallback; ENUM, SET, wide BIT, spatial, TIME, unknown, and unconstrained decimal are `unknown` fallback. MySQL TIME remains string fallback because valid MySQL durations exceed KindTime time-of-day range.
 
 ## MSSQL migration
 
@@ -103,7 +103,7 @@ Oracle now follows `LogicalTypeForOracleColumn -> PlanForLogicalType -> Convert 
 
 ## ClickHouse migration
 
-ClickHouse now follows `LogicalTypeForClickHouseColumn -> PlanForLogicalType -> Convert -> canonical Arrow append`. `Nullable(T)` becomes logical nullability and `LowCardinality(T)` has no independent logical semantic; both wrappers compose recursively with arrays. `UInt64` remains logical `uint64` but uses exact decimal text in string storage. Decimal precision is preserved: `Decimal256(s)` is logical `decimal(76,s)` and uses storage fallback. DateTime timezone arguments are parsed and preserved; UTC aliases use native timestamptz, while non-UTC zones use string fallback under the current Iceberg bridge. UUID and JSON are semantic fallbacks. Time/Time64 are conservatively unknown because ClickHouse duration-like values may exceed canonical time-of-day semantics. IPs, enums, structured/dynamic/variant types, wide integers, and geo types are unknown fallback. Migrated ClickHouse dates and timestamps no longer clamp to the legacy 1900–2299 range.
+ClickHouse now follows `LogicalTypeForClickHouseColumn -> PlanForLogicalType -> Convert -> canonical Arrow append`. `Nullable(T)` becomes logical nullability and `LowCardinality(T)` has no independent logical semantic; both wrappers compose recursively with arrays. `UInt32` is safely promoted to Arrow `Int64` / Iceberg `long` (`MappingSafePromotion`) because Iceberg lacks unsigned integer types, preserving values up to 4,294,967,295 without 32-bit signed overflow. `UInt64` remains logical `uint64` but uses exact decimal text in string storage. Decimal precision is preserved: `Decimal256(s)` is logical `decimal(76,s)` and uses storage fallback. DateTime timezone arguments are parsed and preserved; UTC aliases use native timestamptz, while non-UTC zones use string fallback under the current Iceberg bridge. UUID and JSON are semantic fallbacks. Time/Time64 are conservatively unknown because ClickHouse duration-like values may exceed canonical time-of-day semantics. IPs, enums, structured/dynamic/variant types, wide integers, and geo types are unknown fallback. Migrated ClickHouse dates and timestamps no longer clamp to the legacy 1900–2299 range.
 
 ## Trino, Cassandra, and SQLite migration
 

@@ -154,7 +154,7 @@ func ResolveStorageMapping(t typesystem.LogicalType) (StorageMapping, error) {
 		return verifyStorageMapping(resolved)
 	}
 
-	dataType, arrowMapping, err := arrowio.ArrowTypeForLogicalType(t)
+	dataType, arrowMapping, err := arrowio.StorageArrowTypeForLogicalType(t)
 	if err != nil {
 		return StorageMapping{}, err
 	}
