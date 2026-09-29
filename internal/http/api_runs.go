@@ -819,6 +819,11 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 	if icebergTable == "" {
 		icebergTable = icebergreg.DefaultTable(engine, sourceName)
 	}
+	if clause := strings.TrimSpace(req.Source.WhereClause); clause != "" {
+		if err := connectors.ValidateWhereClause(clause); err != nil {
+			return validatedRunSubmitSpec{}, invalidSubmitField("source.where_clause", err.Error(), nil)
+		}
+	}
 	workerPool := strings.TrimSpace(req.WorkerPool)
 	if workerPool != "" && !jobopts.ValidWorkerPool(workerPool) {
 		return validatedRunSubmitSpec{}, invalidSubmitField("worker_pool", "worker_pool must be 1-63 lowercase letters, digits, '-' or '_', starting with a letter or digit", nil)

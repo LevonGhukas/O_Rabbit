@@ -78,12 +78,15 @@ Fix: reject the new run with `DatasetBusyError` (that logic already exists) and 
 12. **Incremental cursors can lose rows.** Using an exclusive lower bound on the last high-water mark ([postgres.go:171](internal/connectors/postgres.go:171)) permanently skips late-committing rows and ties at the boundary (for example `updated_at` set at transaction start, or out-of-order sequences). Add a lookback window with dedupe or upsert, or at least document the limitation.
    **Status:** DONE
 13. **Query mode is only "read-only" by denylist.** Its safety is a keyword denylist ([query_mode.go:518](internal/connectors/query_mode.go:518)). Side-effecting functions pass it (`pg_terminate_backend`, `dblink_exec`, `lo_import`), and so does the raw `WhereClause` interpolation. Enforce it at the database: open read-only transactions and document that a read-only database user is required.
+   **Status:** DONE
 14. **SSH host-key checking is off by default.** An empty `HostKeyFingerprint` accepts any host key ([ssh.go:236](internal/ops/ssh/ssh.go:236)), which allows a man-in-the-middle to capture SSH credentials. More broadly, remote Docker/deploy over SSH makes the ETL master a remote-execution service behind one bearer token. Consider moving it out of the core binary or putting it behind a separate role.
+   **Status:** DONE
 15. **The HTTP server lacks basic hardening.**
     - No `ReadHeaderTimeout`, `ReadTimeout` or `IdleTimeout`, which leaves it open to slow-client (slowloris) attacks.
     - `readJSON` uses `io.ReadAll` with no size limit.
     - `/runs` and `/connections` lists are not paginated.
     - `Shutdown(context.Background())` can hang forever on open SSE streams.
+   **Status:** DONE
 
 ## 🟡 Medium: scalability and operations
 
@@ -113,5 +116,3 @@ Fix: reject the new run with `DatasetBusyError` (that logic already exists) and 
 1. **Security (blockers 1–5, plus 14–15):** fail-closed auth, required TLS and master key, encrypt the registration config, gRPC panic recovery.
 2. **Correctness (6–8, 10):** exit codes, no silent superseding of runs, async single-owner commits, per-run config snapshots.
 3. **Scale (9, 16, 18):** S3 checksums instead of re-hashing, cut per-poll write transactions, add retention.
-
-I can turn this into a shareable page for the team, or start fixing the blockers. I'd begin with 1, 5, 6 and 7, which are small and self-contained.
