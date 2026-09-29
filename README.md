@@ -903,12 +903,19 @@ CI (`.github/workflows/orrabit-docker.yml`) runs on every push and pull
 request:
 
 - `go test -race ./...` and `go vet ./...`
-- `golangci-lint` with `.golangci.yml`
+- connector integration tests against PostgreSQL, MySQL, MariaDB and ClickHouse
+  service containers (`ORABBIT_IT_*_DSN`, see
+  `internal/connectors/readonly_integration_test.go`)
+- `golangci-lint` with `.golangci.yml`, `shellcheck` on the shell scripts, and
+  `docker compose config` on every Compose file
 - `scripts/vulncheck.sh`: `govulncheck`, failing on any reachable
   vulnerability that is not reviewed in `.govulncheck-allow`. Remove an entry
   as soon as a fixed release exists.
 
-On pushes, images are built, scanned with Trivy (fails on fixable CRITICAL/HIGH
+Master and worker images are built, smoke-tested (non-root user, binary
+starts) and scanned on every run; `.github/workflows/minio-images.yml` does the
+same for the MinIO images when `docker/minio/` changes. On pushes, images are
+built, scanned with Trivy (fails on fixable CRITICAL/HIGH
 findings), and pushed as `levonghukas/orabbit:sha-<commit>-<target>`, plus
 `<version>-<target>` and `<major>.<minor>-<target>` for `vX.Y.Z` tags and
 `latest-<target>` for `main`. Deploy by SHA or version tag, not `latest`.

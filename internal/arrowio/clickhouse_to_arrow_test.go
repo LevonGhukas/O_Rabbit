@@ -1,6 +1,8 @@
 package arrowio
 
 import (
+	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -10,6 +12,8 @@ import (
 	icetable "github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/artifact"
+	"github.com/LevonGhukas/O_Rabbit/internal/parquetio"
 	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
 
@@ -46,7 +50,7 @@ func TestClickHouseTypeMapping(t *testing.T) {
 		wantType   arrow.DataType
 	}{
 		{"UInt64", 0, 0, false, &arrow.Decimal128Type{Precision: 20, Scale: 0}},
-		{"UInt32", 0, 0, false, arrow.PrimitiveTypes.Uint32},
+		{"UInt32", 0, 0, false, arrow.PrimitiveTypes.Int64},
 		{"UInt16", 0, 0, false, arrow.PrimitiveTypes.Uint16},
 		{"UInt8", 0, 0, false, arrow.PrimitiveTypes.Uint8},
 		{"Int64", 0, 0, false, arrow.PrimitiveTypes.Int64},
@@ -170,4 +174,43 @@ func TestClickHouseSharedSafetyAndStorage(t *testing.T) {
 	schema, err := icetable.ArrowSchemaToIcebergWithFreshIDs(arrow.NewSchema([]arrow.Field{{Name: "v", Type: uintPlan.DataType}}, nil), false)
 	require.NoError(t, err)
 	require.Equal(t, "decimal(20, 0)", schema.Fields()[0].Type.String())
+}
+
+func TestClickHouseUInt32ParquetRoundTrip(t *testing.T) {
+	plan := PlanForSQLColumn("clickhouse", "unsigned_number", "UInt32", 0, 0, false)
+	require.Equal(t, arrow.PrimitiveTypes.Int64, plan.DataType)
+
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: plan.Name, Type: plan.DataType, Nullable: true},
+	}, nil)
+
+	builder := plan.Builder(memory.DefaultAllocator)
+	defer builder.Release()
+
+	values := []any{
+		uint32(1000),
+		uint32(0),
+		uint32(4294967295),
+		uint32(2147483648),
+		uint32(42),
+	}
+	for _, v := range values {
+		require.NoError(t, plan.Append(builder, v))
+	}
+	arr := builder.NewArray()
+	defer arr.Release()
+
+	rec := array.NewRecordBatch(schema, []arrow.Array{arr}, int64(len(values)))
+	defer rec.Release()
+
+	w, path, err := parquetio.NewTempFileWriter(schema, parquetio.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.Remove(path) })
+
+	require.NoError(t, w.Write(rec))
+	require.NoError(t, w.Close())
+
+	meta, err := artifact.ValidateLocalParquet(context.Background(), path, int64(len(values)), schema)
+	require.NoError(t, err)
+	require.Equal(t, int64(len(values)), meta.RowCount)
 }

@@ -1,0 +1,87 @@
+name: MinIO images
+
+# Rebuilds levonghukas/minio and levonghukas/mc from pinned upstream source
+# (docker/minio/Dockerfile). Pull requests only build; main pushes publish.
+on:
+  push:
+    branches: [main]
+    paths: ["docker/minio/**", ".github/workflows/minio-images.yml"]
+  pull_request:
+    paths: ["docker/minio/**", ".github/workflows/minio-images.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: minio
+            image: levonghukas/minio
+            release_arg: MINIO_RELEASE
+          - target: mc
+            image: levonghukas/mc
+            release_arg: MC_RELEASE
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Read pinned release
+        id: release
+        run: |
+          tag="$(sed -n 's/^ARG ${{ matrix.release_arg }}=//p' docker/minio/Dockerfile)"
+          test -n "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/minio
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          load: true
+          tags: minio-ci:${{ matrix.target }}
+          cache-from: type=gha,scope=minio-${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=minio-${{ matrix.target }}
+
+      - name: Smoke test
+        run: docker run --rm minio-ci:${{ matrix.target }} --version | grep -F "${{ steps.release.outputs.tag }}"
+
+      - name: Scan image
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: minio-ci:${{ matrix.target }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Login to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push (amd64 + arm64)
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/minio
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: true
+          sbom: true
+          tags: ${{ matrix.image }}:${{ steps.release.outputs.tag }}
+          cache-from: type=gha,scope=minio-${{ matrix.target }}
