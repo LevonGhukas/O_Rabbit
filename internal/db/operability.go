@@ -143,7 +143,7 @@ func (s *Store) DiagnoseRun(ctx context.Context, runID string, now time.Time, ma
 		if reg.NextEligibleAt != nil {
 			diag.NextEligibleAt = *reg.NextEligibleAt
 		}
-		_ = s.db.QueryRowContext(ctx, `SELECT phase,lease_deadline FROM iceberg_registration_attempts WHERE registration_id=? ORDER BY attempt_number DESC LIMIT 1`, reg.ID).Scan(&diag.CurrentPhase, &diag.LeaseDeadline)
+		_ = s.rdb.QueryRowContext(ctx, `SELECT phase,lease_deadline FROM iceberg_registration_attempts WHERE registration_id=? ORDER BY attempt_number DESC LIMIT 1`, reg.ID).Scan(&diag.CurrentPhase, &diag.LeaseDeadline)
 		diag.LeaseExpired = deadlineExpired(diag.LeaseDeadline, now)
 		out.Registration = diag
 		if out.LastClassifiedError == "" {
@@ -233,7 +233,7 @@ func (s *Store) LifecycleMetrics(ctx context.Context, now time.Time) (LifecycleM
 		return LifecycleMetrics{}, err
 	}
 	var oldest sql.NullString
-	if err := s.db.QueryRowContext(ctx, `SELECT MIN(started_at) FROM runs WHERE status='COMMITTING'`).Scan(&oldest); err != nil {
+	if err := s.rdb.QueryRowContext(ctx, `SELECT MIN(started_at) FROM runs WHERE status='COMMITTING'`).Scan(&oldest); err != nil {
 		return LifecycleMetrics{}, err
 	}
 	if oldest.Valid {
@@ -245,10 +245,10 @@ func (s *Store) LifecycleMetrics(ctx context.Context, now time.Time) (LifecycleM
 		return LifecycleMetrics{}, err
 	}
 	nowS := now.UTC().Format(time.RFC3339Nano)
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_attempts WHERE status='ACTIVE'`).Scan(&out.LeasedTasks); err != nil {
+	if err := s.rdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_attempts WHERE status='ACTIVE'`).Scan(&out.LeasedTasks); err != nil {
 		return LifecycleMetrics{}, err
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_attempts WHERE status='ACTIVE' AND lease_deadline<=?`, nowS).Scan(&out.ExpiredActiveLeases); err != nil {
+	if err := s.rdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_attempts WHERE status='ACTIVE' AND lease_deadline<=?`, nowS).Scan(&out.ExpiredActiveLeases); err != nil {
 		return LifecycleMetrics{}, err
 	}
 	if err := scanMetricCounts(ctx, s.db, `SELECT status,COUNT(*) FROM iceberg_registrations GROUP BY status`, out.RegistrationsByStatus); err != nil {
@@ -265,10 +265,10 @@ func (s *Store) LifecycleMetrics(ctx context.Context, now time.Time) (LifecycleM
 	}
 	out.RegistrationBlocked = out.RegistrationsByStatus[RegistrationBlocked]
 	out.RegistrationRetryRequired = out.RegistrationsByStatus[RegistrationRetryRequired]
-	if err := s.db.QueryRowContext(ctx, `SELECT CASE WHEN status='ACTIVE' AND lease_deadline_ms>? THEN 1 ELSE 0 END,epoch FROM master_leadership WHERE leadership_name='master'`, now.UnixMilli()).Scan(&out.LeadershipActive, &out.LeadershipEpoch); err != nil {
+	if err := s.rdb.QueryRowContext(ctx, `SELECT CASE WHEN status='ACTIVE' AND lease_deadline_ms>? THEN 1 ELSE 0 END,epoch FROM master_leadership WHERE leadership_name='master'`, now.UnixMilli()).Scan(&out.LeadershipActive, &out.LeadershipEpoch); err != nil {
 		return LifecycleMetrics{}, err
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM master_leadership_history WHERE event_type='MASTER_LEADERSHIP_LOST'`).Scan(&out.LeadershipRenewalFailures); err != nil {
+	if err := s.rdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM master_leadership_history WHERE event_type='MASTER_LEADERSHIP_LOST'`).Scan(&out.LeadershipRenewalFailures); err != nil {
 		return LifecycleMetrics{}, err
 	}
 	return out, nil

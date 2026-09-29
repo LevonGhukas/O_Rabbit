@@ -273,7 +273,7 @@ func (s *Store) CancelReconciliation(ctx context.Context, registrationID string,
 func (s *Store) GetReconciliationProjection(ctx context.Context, id string) (ReconciliationProjection, error) {
 	var p ReconciliationProjection
 	var next sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT reconciliation_status,reconciliation_attempt_count,reconciliation_outcome,reconciliation_error_class,reconciliation_next_eligible_at,observed_snapshot_id,observed_metadata_identity,matched_file_count,expected_file_count,reconciliation_evidence_digest FROM iceberg_registrations WHERE id=?`, id).Scan(&p.Status, &p.Attempt, &p.Outcome, &p.ErrorClass, &next, &p.ObservedSnapshotID, &p.ObservedMetadataIdentity, &p.MatchedFiles, &p.ExpectedFiles, &p.EvidenceDigest)
+	err := s.rdb.QueryRowContext(ctx, `SELECT reconciliation_status,reconciliation_attempt_count,reconciliation_outcome,reconciliation_error_class,reconciliation_next_eligible_at,observed_snapshot_id,observed_metadata_identity,matched_file_count,expected_file_count,reconciliation_evidence_digest FROM iceberg_registrations WHERE id=?`, id).Scan(&p.Status, &p.Attempt, &p.Outcome, &p.ErrorClass, &next, &p.ObservedSnapshotID, &p.ObservedMetadataIdentity, &p.MatchedFiles, &p.ExpectedFiles, &p.EvidenceDigest)
 	if next.Valid {
 		p.NextRetryAt = &next.String
 	}

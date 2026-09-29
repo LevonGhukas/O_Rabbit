@@ -208,7 +208,7 @@ func (s *Store) CreateServer(ctx context.Context, srv Server) (Server, error) {
 }
 
 func (s *Store) ListServers(ctx context.Context) ([]Server, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.rdb.QueryContext(ctx, `
 		SELECT id, name, host, ssh_port, ssh_user, project_dir, role_hints_json, labels_json, created_at, updated_at, last_seen_at, last_error
 		FROM servers
 		ORDER BY created_at DESC, id DESC;`)
@@ -229,7 +229,7 @@ func (s *Store) ListServers(ctx context.Context) ([]Server, error) {
 }
 
 func (s *Store) GetServer(ctx context.Context, id string) (Server, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.rdb.QueryRowContext(ctx, `
 		SELECT id, name, host, ssh_port, ssh_user, project_dir, role_hints_json, labels_json, created_at, updated_at, last_seen_at, last_error
 		FROM servers
 		WHERE id=?;`, id)
@@ -426,7 +426,7 @@ func (s *Store) AppendCommandExecutionOutputTail(ctx context.Context, id string,
 }
 
 func (s *Store) GetCommandExecution(ctx context.Context, id string) (CommandExecution, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.rdb.QueryRowContext(ctx, `
 		SELECT id, server_id, kind, allowlist_id, params_json, status, exit_code, started_at, finished_at, stdout_tail, stderr_tail, error, requested_by
 		FROM command_executions
 		WHERE id=?;`, id)
@@ -437,7 +437,7 @@ func (s *Store) ListCommandExecutionsByServer(ctx context.Context, serverID stri
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.rdb.QueryContext(ctx, `
 		SELECT id, server_id, kind, allowlist_id, params_json, status, exit_code, started_at, finished_at, stdout_tail, stderr_tail, error, requested_by
 		FROM command_executions
 		WHERE server_id=?
@@ -516,7 +516,7 @@ func (s *Store) UpdateDeploymentStatus(ctx context.Context, id string, update De
 }
 
 func (s *Store) GetDeployment(ctx context.Context, id string) (Deployment, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.rdb.QueryRowContext(ctx, `
 		SELECT id, server_id, component, script_id, status, execution_id, started_at, finished_at, error
 		FROM deployments
 		WHERE id=?;`, id)
@@ -535,9 +535,9 @@ func (s *Store) ListDeployments(ctx context.Context, serverID string, limit int)
 		err  error
 	)
 	if strings.TrimSpace(serverID) == "" {
-		rows, err = s.db.QueryContext(ctx, baseQuery+` ORDER BY COALESCE(started_at, finished_at, '') DESC, id DESC LIMIT ?;`, limit)
+		rows, err = s.rdb.QueryContext(ctx, baseQuery+` ORDER BY COALESCE(started_at, finished_at, '') DESC, id DESC LIMIT ?;`, limit)
 	} else {
-		rows, err = s.db.QueryContext(ctx, baseQuery+` WHERE server_id=? ORDER BY COALESCE(started_at, finished_at, '') DESC, id DESC LIMIT ?;`, serverID, limit)
+		rows, err = s.rdb.QueryContext(ctx, baseQuery+` WHERE server_id=? ORDER BY COALESCE(started_at, finished_at, '') DESC, id DESC LIMIT ?;`, serverID, limit)
 	}
 	if err != nil {
 		return nil, err
@@ -582,7 +582,7 @@ func (s *Store) ListConfigVersions(ctx context.Context, serverID string, configI
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.rdb.QueryContext(ctx, `
 		SELECT id, server_id, config_id, version, content_enc, created_at, validation_status, validation_errors_json
 		FROM config_versions
 		WHERE server_id=? AND config_id=?
@@ -604,7 +604,7 @@ func (s *Store) ListConfigVersions(ctx context.Context, serverID string, configI
 }
 
 func (s *Store) GetLatestConfigVersion(ctx context.Context, serverID string, configID string) (ConfigVersion, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.rdb.QueryRowContext(ctx, `
 		SELECT id, server_id, config_id, version, content_enc, created_at, validation_status, validation_errors_json
 		FROM config_versions
 		WHERE server_id=? AND config_id=?

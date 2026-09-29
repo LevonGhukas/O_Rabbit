@@ -533,7 +533,7 @@ func (s *Store) UpdateTaskProgressFencedAt(ctx context.Context, bootID, taskID, 
 }
 
 func (s *Store) ListTaskAttempts(ctx context.Context, taskID string) ([]Attempt, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,task_id,attempt_number,worker_id,fencing_token,status,assigned_at,lease_deadline,last_renewed_at,started_at,finished_at,failure_class,failure_message,result_digest,created_at,updated_at FROM task_attempts WHERE task_id=? ORDER BY attempt_number`, taskID)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT id,task_id,attempt_number,worker_id,fencing_token,status,assigned_at,lease_deadline,last_renewed_at,started_at,finished_at,failure_class,failure_message,result_digest,created_at,updated_at FROM task_attempts WHERE task_id=? ORDER BY attempt_number`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -550,7 +550,7 @@ func (s *Store) ListTaskAttempts(ctx context.Context, taskID string) ([]Attempt,
 }
 
 func (s *Store) ListArtifactsForRun(ctx context.Context, runID string) ([]artifact.Record, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT object_key,byte_size,sha256,row_count,schema_fingerprint,run_id,task_id,attempt_id,attempt_number,file_index,format_version,verification_method,verification_status,verified_at,max_hwm,provider_checksum_sha256 FROM task_artifacts WHERE run_id=? ORDER BY task_id,file_index,object_key`, runID)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT object_key,byte_size,sha256,row_count,schema_fingerprint,run_id,task_id,attempt_id,attempt_number,file_index,format_version,verification_method,verification_status,verified_at,max_hwm,provider_checksum_sha256 FROM task_artifacts WHERE run_id=? ORDER BY task_id,file_index,object_key`, runID)
 	if err != nil {
 		return nil, err
 	}

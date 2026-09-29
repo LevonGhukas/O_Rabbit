@@ -114,7 +114,7 @@ func (s *Store) GetWorkerIdentity(ctx context.Context, id string) (WorkerIdentit
 }
 
 func (s *Store) ListWorkerIdentities(ctx context.Context) ([]WorkerIdentity, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,hostname,pool,status,cert_serial,cert_not_after,enrollment_token_id,enrolled_at,updated_at,revoked_at FROM worker_identities ORDER BY enrolled_at,id`)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT id,name,hostname,pool,status,cert_serial,cert_not_after,enrollment_token_id,enrolled_at,updated_at,revoked_at FROM worker_identities ORDER BY enrolled_at,id`)
 	if err != nil {
 		return nil, err
 	}
