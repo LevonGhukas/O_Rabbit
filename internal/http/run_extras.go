@@ -28,7 +28,7 @@ func (s *Server) handleRunProgress(w http.ResponseWriter, r *http.Request, runID
 		writeInternalError(w, "failed to fetch run tasks")
 		return
 	}
-	cutoff := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
+	cutoff := db.FormatTimestamp(time.Now().UTC().Add(-30 * time.Second))
 	workers, err := s.st.ListWorkersActive(r.Context(), cutoff)
 	if err != nil {
 		writeInternalError(w, "failed to fetch worker status")

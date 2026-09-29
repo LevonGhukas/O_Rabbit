@@ -88,9 +88,9 @@ func (s *Store) RecordCommitReconciliationFailure(ctx context.Context, runID, cl
 					break
 				}
 			}
-			next = now.Add(backoff).UTC().Format(time.RFC3339Nano)
+			next = now.Add(backoff).UTC().Format(TimestampLayout)
 		}
-		ns := now.UTC().Format(time.RFC3339Nano)
+		ns := now.UTC().Format(TimestampLayout)
 		finished := any(nil)
 		commitPhase := "RETRY_REQUIRED"
 		if runStatus == "FAILED" {
@@ -119,15 +119,15 @@ func (s *Store) RecordCommitReconciliationFailure(ctx context.Context, runID, cl
 // COMMITTING run until the claim expires. It succeeds only if the run is
 // eligible for a commit attempt and no other live claim exists.
 func (s *Store) ClaimCommittingRun(ctx context.Context, runID, token string, now time.Time, lease time.Duration) (bool, error) {
-	nowS := now.UTC().Format(time.RFC3339Nano)
+	nowS := now.UTC().Format(TimestampLayout)
 	var claimed bool
 	err := withBusyRetry(ctx, func() error {
 		res, err := s.db.ExecContext(ctx, `UPDATE runs SET commit_claim_token=?,commit_claim_expires_at=?
 			WHERE id=? AND status='COMMITTING'
 			AND commit_reconciliation_status IN ('','PENDING','RETRY_REQUIRED')
-			AND (commit_reconciliation_next_eligible_at IS NULL OR julianday(commit_reconciliation_next_eligible_at)<=julianday(?))
-			AND (commit_claim_token='' OR commit_claim_expires_at IS NULL OR julianday(commit_claim_expires_at)<=julianday(?))`,
-			token, now.Add(lease).UTC().Format(time.RFC3339Nano), runID, nowS, nowS)
+			AND (commit_reconciliation_next_eligible_at IS NULL OR commit_reconciliation_next_eligible_at<=?)
+			AND (commit_claim_token='' OR commit_claim_expires_at IS NULL OR commit_claim_expires_at<=?)`,
+			token, now.Add(lease).UTC().Format(TimestampLayout), runID, nowS, nowS)
 		if err != nil {
 			return err
 		}
@@ -142,8 +142,8 @@ func (s *Store) ClaimCommittingRun(ctx context.Context, runID, token string, now
 // claim expired or the run is no longer committing.
 func (s *Store) RenewCommitClaim(ctx context.Context, runID, token string, now time.Time, lease time.Duration) error {
 	return withBusyRetry(ctx, func() error {
-		res, err := s.db.ExecContext(ctx, `UPDATE runs SET commit_claim_expires_at=? WHERE id=? AND status='COMMITTING' AND commit_claim_token=? AND julianday(commit_claim_expires_at)>julianday(?)`,
-			now.Add(lease).UTC().Format(time.RFC3339Nano), runID, token, now.UTC().Format(time.RFC3339Nano))
+		res, err := s.db.ExecContext(ctx, `UPDATE runs SET commit_claim_expires_at=? WHERE id=? AND status='COMMITTING' AND commit_claim_token=? AND commit_claim_expires_at>?`,
+			now.Add(lease).UTC().Format(TimestampLayout), runID, token, now.UTC().Format(TimestampLayout))
 		if err != nil {
 			return err
 		}

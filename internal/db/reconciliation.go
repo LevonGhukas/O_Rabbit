@@ -36,7 +36,7 @@ func (s *Store) ClaimReconciliation(ctx context.Context, now time.Time, lease ti
 			return e
 		}
 		defer tx.Rollback()
-		row := tx.QueryRowContext(ctx, `SELECT id,run_id,dataset_id,dataset_sequence,target_key,commit_id,manifest_key,artifact_set_digest,backend_type,catalog_namespace,table_identifier,status,attempt_count,current_attempt_id,next_eligible_at,last_error_class,last_error_message,registered_snapshot_or_metadata_id,created_at,updated_at,registered_at,retry_override_config_json FROM iceberg_registrations WHERE status='RECONCILING' AND reconciliation_status IN ('PENDING','RETRY_REQUIRED') AND (reconciliation_next_eligible_at IS NULL OR reconciliation_next_eligible_at<=?) ORDER BY dataset_sequence,id LIMIT 1`, now.UTC().Format(time.RFC3339Nano))
+		row := tx.QueryRowContext(ctx, `SELECT id,run_id,dataset_id,dataset_sequence,target_key,commit_id,manifest_key,artifact_set_digest,backend_type,catalog_namespace,table_identifier,status,attempt_count,current_attempt_id,next_eligible_at,last_error_class,last_error_message,registered_snapshot_or_metadata_id,created_at,updated_at,registered_at,retry_override_config_json FROM iceberg_registrations WHERE status='RECONCILING' AND reconciliation_status IN ('PENDING','RETRY_REQUIRED') AND (reconciliation_next_eligible_at IS NULL OR reconciliation_next_eligible_at<=?) ORDER BY dataset_sequence,id LIMIT 1`, now.UTC().Format(TimestampLayout))
 		r, e := s.scanRegistration(row)
 		if e == sql.ErrNoRows {
 			return tx.Commit()
@@ -53,8 +53,8 @@ func (s *Store) ClaimReconciliation(ctx context.Context, now time.Time, lease ti
 			return e
 		}
 		aid := stableRegistrationID("reconcile", r.ID, fmt.Sprint(n), token)
-		ns := now.UTC().Format(time.RFC3339Nano)
-		dl := now.Add(lease).UTC().Format(time.RFC3339Nano)
+		ns := now.UTC().Format(TimestampLayout)
+		dl := now.Add(lease).UTC().Format(TimestampLayout)
 		res, e := tx.ExecContext(ctx, `UPDATE iceberg_registrations SET reconciliation_status='INSPECTING',reconciliation_attempt_count=?,current_reconciliation_attempt_id=?,reconciliation_next_eligible_at=NULL,updated_at=? WHERE id=? AND status='RECONCILING' AND reconciliation_status IN ('PENDING','RETRY_REQUIRED')`, n, aid, ns, r.ID)
 		if e != nil {
 			return e
@@ -86,7 +86,7 @@ func (s *Store) ApplyReconciliationDecision(ctx context.Context, registrationID,
 			return e
 		}
 		defer tx.Rollback()
-		ns := now.UTC().Format(time.RFC3339Nano)
+		ns := now.UTC().Format(TimestampLayout)
 		var current string
 		var cycles int
 		if e = tx.QueryRowContext(ctx, `SELECT current_reconciliation_attempt_id,ambiguity_retry_count FROM iceberg_registrations WHERE id=? AND status='RECONCILING' AND reconciliation_status='INSPECTING'`, registrationID).Scan(&current, &cycles); e != nil || current != attemptID {
@@ -147,10 +147,10 @@ func (s *Store) RetryReconciliationObservation(ctx context.Context, registration
 		if e = tx.QueryRowContext(ctx, `SELECT attempt_number FROM iceberg_reconciliation_attempts WHERE id=? AND registration_id=? AND fencing_token=? AND status='ACTIVE'`, attemptID, registrationID, token).Scan(&n); e != nil {
 			return ErrRegistrationFenced
 		}
-		ns := now.UTC().Format(time.RFC3339Nano)
+		ns := now.UTC().Format(TimestampLayout)
 		status := "RETRY_REQUIRED"
 		event := "RECONCILIATION_OBSERVATION_RETRY"
-		next := now.Add(backoff).UTC().Format(time.RFC3339Nano)
+		next := now.Add(backoff).UTC().Format(TimestampLayout)
 		if n >= max {
 			status = "FAILED"
 			event = "RECONCILIATION_RETRY_EXHAUSTED"
@@ -169,9 +169,9 @@ func (s *Store) RetryReconciliationObservation(ctx context.Context, registration
 }
 
 func (s *Store) RenewReconciliationLease(ctx context.Context, registrationID, attemptID, token string, now time.Time, lease time.Duration) error {
-	deadline := now.Add(lease).UTC().Format(time.RFC3339Nano)
+	deadline := now.Add(lease).UTC().Format(TimestampLayout)
 	res, err := s.db.ExecContext(ctx, `UPDATE iceberg_reconciliation_attempts SET lease_deadline=?,updated_at=? WHERE id=? AND registration_id=? AND fencing_token=? AND status='ACTIVE' AND EXISTS(SELECT 1 FROM iceberg_registrations WHERE id=? AND status='RECONCILING' AND reconciliation_status='INSPECTING' AND current_reconciliation_attempt_id=?)`,
-		deadline, now.UTC().Format(time.RFC3339Nano), attemptID, registrationID, token, registrationID, attemptID)
+		deadline, now.UTC().Format(TimestampLayout), attemptID, registrationID, token, registrationID, attemptID)
 	if err != nil {
 		return err
 	}
@@ -190,7 +190,7 @@ func (s *Store) ExpireReconciliationAttempts(ctx context.Context, now time.Time,
 			return err
 		}
 		defer tx.Rollback()
-		rows, err := tx.QueryContext(ctx, `SELECT a.id,a.registration_id,a.attempt_number FROM iceberg_reconciliation_attempts a JOIN iceberg_registrations r ON r.id=a.registration_id WHERE a.status='ACTIVE' AND a.lease_deadline<=? AND r.status='RECONCILING' AND r.reconciliation_status='INSPECTING' AND r.current_reconciliation_attempt_id=a.id`, now.UTC().Format(time.RFC3339Nano))
+		rows, err := tx.QueryContext(ctx, `SELECT a.id,a.registration_id,a.attempt_number FROM iceberg_reconciliation_attempts a JOIN iceberg_registrations r ON r.id=a.registration_id WHERE a.status='ACTIVE' AND a.lease_deadline<=? AND r.status='RECONCILING' AND r.reconciliation_status='INSPECTING' AND r.current_reconciliation_attempt_id=a.id`, now.UTC().Format(TimestampLayout))
 		if err != nil {
 			return err
 		}
@@ -210,10 +210,10 @@ func (s *Store) ExpireReconciliationAttempts(ctx context.Context, now time.Time,
 		if err := rows.Close(); err != nil {
 			return err
 		}
-		ns := now.UTC().Format(time.RFC3339Nano)
+		ns := now.UTC().Format(TimestampLayout)
 		for _, a := range attempts {
 			status, event := "RETRY_REQUIRED", "RECONCILIATION_OBSERVATION_RETRY"
-			var next any = now.Add(backoff).UTC().Format(time.RFC3339Nano)
+			var next any = now.Add(backoff).UTC().Format(TimestampLayout)
 			if a.number >= max {
 				status, event, next = "FAILED", "RECONCILIATION_RETRY_EXHAUSTED", nil
 			}
@@ -249,7 +249,7 @@ func (s *Store) CancelReconciliation(ctx context.Context, registrationID string,
 		if err := tx.QueryRowContext(ctx, `SELECT current_reconciliation_attempt_id FROM iceberg_registrations WHERE id=? AND status='RECONCILING' AND reconciliation_status IN ('PENDING','RETRY_REQUIRED','INSPECTING')`, registrationID).Scan(&attempt); err != nil {
 			return err
 		}
-		ns := now.UTC().Format(time.RFC3339Nano)
+		ns := now.UTC().Format(TimestampLayout)
 		if attempt.Valid {
 			if _, err := tx.ExecContext(ctx, `UPDATE iceberg_reconciliation_attempts SET status='CANCELED',error_class='RECONCILIATION_CANCELED',finished_at=?,updated_at=? WHERE id=? AND status='ACTIVE'`, ns, ns, attempt.String); err != nil {
 				return err
@@ -282,6 +282,6 @@ func (s *Store) GetReconciliationProjection(ctx context.Context, id string) (Rec
 }
 
 func ReconciliationReceipt(reg Registration, decision any, now time.Time) (string, error) {
-	body, err := json.Marshal(map[string]any{"version": 1, "resolution": "RECONCILED_COMMITTED", "registration_id": reg.ID, "run_id": reg.RunID, "dataset_id": reg.DatasetID, "commit_id": reg.CommitID, "artifact_set_digest": reg.ArtifactSetDigest, "backend": reg.BackendType, "namespace": reg.CatalogNamespace, "table": reg.TableIdentifier, "reconciled_at": now.UTC().Format(time.RFC3339Nano), "evidence": decision})
+	body, err := json.Marshal(map[string]any{"version": 1, "resolution": "RECONCILED_COMMITTED", "registration_id": reg.ID, "run_id": reg.RunID, "dataset_id": reg.DatasetID, "commit_id": reg.CommitID, "artifact_set_digest": reg.ArtifactSetDigest, "backend": reg.BackendType, "namespace": reg.CatalogNamespace, "table": reg.TableIdentifier, "reconciled_at": now.UTC().Format(TimestampLayout), "evidence": decision})
 	return string(body), err
 }

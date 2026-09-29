@@ -28,7 +28,7 @@ func (s *Server) launchIcebergRegistration(runID string) {
 		if leader, ok := s.leadership.(interface{ WorkContext() context.Context }); ok && leader.WorkContext() != nil {
 			base = leader.WorkContext()
 		}
-		ctx, cancel := context.WithTimeout(base, 30*time.Minute)
+		ctx, cancel := context.WithTimeout(base, s.commitCatalog.RegistrationTimeout)
 		defer cancel()
 		if _, err := s.ProcessRegistrationOnce(ctx); err != nil {
 			if ctx.Err() == nil {
@@ -194,7 +194,7 @@ func (s *Server) ProcessRegistrationOnce(ctx context.Context) (bool, error) {
 	defer release()
 	ctx, cancelLeadership := s.leadershipContext(ctx)
 	defer cancelLeadership()
-	policy := db.RegistrationPolicy{LeaseDuration: 30 * time.Second, MaxAttempts: 5, BackoffBase: time.Second, BackoffMax: time.Minute}
+	policy := s.commitCatalog.Registration
 	r, a, ok, err := s.st.ClaimRegistration(ctx, s.nowFn(), policy)
 	if err != nil || !ok {
 		return ok, err

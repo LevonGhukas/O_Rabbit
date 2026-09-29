@@ -218,7 +218,25 @@ func (s *Store) Ready(ctx context.Context) error {
 	return nil
 }
 
-func nowUTC() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+// TimestampLayout is the one format for every timestamp the store writes: UTC
+// with a fixed nine-digit fraction, so plain string comparison and ORDER BY
+// match chronological order.
+const TimestampLayout = "2006-01-02T15:04:05.000000000Z"
+
+// FormatTimestamp formats t in TimestampLayout.
+func FormatTimestamp(t time.Time) string { return t.UTC().Format(TimestampLayout) }
+
+// normalizeTimestamp rewrites an RFC 3339 string in TimestampLayout. Values
+// that do not parse are returned unchanged.
+func normalizeTimestamp(v string) string {
+	t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(v))
+	if err != nil {
+		return v
+	}
+	return FormatTimestamp(t)
+}
+
+func nowUTC() string { return FormatTimestamp(time.Now()) }
 
 func isSQLiteBusy(err error) bool {
 	if err == nil {
@@ -298,7 +316,7 @@ func (s *Store) FailAbandonedPlanningRuns(ctx context.Context, now time.Time) ([
 			return err
 		}
 		const reason = "run planning was interrupted before tasks were created"
-		ts := now.UTC().Format(time.RFC3339Nano)
+		ts := now.UTC().Format(TimestampLayout)
 		for _, id := range failed {
 			if _, err := tx.ExecContext(ctx, `UPDATE runs SET status='FAILED', finished_at=?, error_summary=? WHERE id=? AND status='PLANNING'`, ts, reason, id); err != nil {
 				return err
@@ -644,7 +662,7 @@ func (s *Store) CreateRun(ctx context.Context, r Run) error {
 	}
 	err = withBusyRetry(ctx, func() error {
 		_, err = s.db.ExecContext(ctx, `INSERT INTO runs(id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-			r.ID, r.JobID, r.DatasetKey, r.Status, r.CorrelationID, r.StartedAt, r.FinishedAt, r.ErrorSummary, r.FailureClass, registrationConfig, string(warnings))
+			r.ID, r.JobID, r.DatasetKey, r.Status, r.CorrelationID, normalizeTimestamp(r.StartedAt), r.FinishedAt, r.ErrorSummary, r.FailureClass, registrationConfig, string(warnings))
 		if err != nil {
 			msg := err.Error()
 			if strings.Contains(msg, "idx_runs_dataset_active") || strings.Contains(msg, "runs.dataset_key") {
@@ -1162,7 +1180,7 @@ func (s *Store) ListWorkersActive(ctx context.Context, activeSince string) ([]Wo
 	if strings.TrimSpace(activeSince) == "" {
 		return s.ListWorkers(ctx)
 	}
-	rows, err := s.rdb.QueryContext(ctx, `SELECT id, addr, status, last_heartbeat, capabilities_json FROM workers WHERE last_heartbeat >= ? ORDER BY last_heartbeat DESC;`, activeSince)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT id, addr, status, last_heartbeat, capabilities_json FROM workers WHERE last_heartbeat >= ? ORDER BY last_heartbeat DESC;`, normalizeTimestamp(activeSince))
 	if err != nil {
 		return nil, err
 	}
@@ -1550,7 +1568,7 @@ func (s *Store) ListCommittingRunIDs(ctx context.Context) ([]string, error) {
 }
 
 func (s *Store) ListCommittingRunIDsAt(ctx context.Context, now time.Time) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM runs WHERE status='COMMITTING' AND commit_reconciliation_status IN ('','PENDING','RETRY_REQUIRED') AND (commit_reconciliation_next_eligible_at IS NULL OR commit_reconciliation_next_eligible_at<=?) ORDER BY started_at;`, now.UTC().Format(time.RFC3339Nano))
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM runs WHERE status='COMMITTING' AND commit_reconciliation_status IN ('','PENDING','RETRY_REQUIRED') AND (commit_reconciliation_next_eligible_at IS NULL OR commit_reconciliation_next_eligible_at<=?) ORDER BY started_at;`, now.UTC().Format(TimestampLayout))
 	if err != nil {
 		return nil, err
 	}
@@ -1575,7 +1593,7 @@ func (s *Store) InsertEvent(ctx context.Context, e Event) error {
 	var err error
 	err = withBusyRetry(ctx, func() error {
 		_, err = s.db.ExecContext(ctx, `INSERT INTO events(id, run_id, task_id, ts, level, message, fields_json) VALUES (?, ?, ?, ?, ?, ?, ?);`,
-			e.ID, e.RunID, e.TaskID, e.TS, e.Level, e.Message, string(e.FieldsJSON))
+			e.ID, e.RunID, e.TaskID, normalizeTimestamp(e.TS), e.Level, e.Message, string(e.FieldsJSON))
 		return err
 	})
 	return err
@@ -1589,7 +1607,7 @@ func (s *Store) InsertEventOnce(ctx context.Context, e Event) error {
 	}
 	return withBusyRetry(ctx, func() error {
 		_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO events(id, run_id, task_id, ts, level, message, fields_json) VALUES (?, ?, ?, ?, ?, ?, ?);`,
-			e.ID, e.RunID, e.TaskID, e.TS, e.Level, e.Message, string(e.FieldsJSON))
+			e.ID, e.RunID, e.TaskID, normalizeTimestamp(e.TS), e.Level, e.Message, string(e.FieldsJSON))
 		return err
 	})
 }

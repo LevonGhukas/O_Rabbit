@@ -352,7 +352,7 @@ func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Default: show only workers that have heartbeated recently.
-	cutoff := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
+	cutoff := db.FormatTimestamp(time.Now().UTC().Add(-30 * time.Second))
 	ws, err := s.st.ListWorkersActive(r.Context(), cutoff)
 	if err != nil {
 		writeInternalError(w, "failed to list workers")
@@ -1049,7 +1049,7 @@ func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request, runID s
 		ev := db.Event{
 			ID:         newID(),
 			RunID:      runID,
-			TS:         time.Now().UTC().Format(time.RFC3339Nano),
+			TS:         db.FormatTimestamp(time.Now()),
 			Level:      "INFO",
 			Message:    "run CANCELED",
 			FieldsJSON: fields,

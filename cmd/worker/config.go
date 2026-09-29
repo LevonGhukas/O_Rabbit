@@ -37,6 +37,9 @@ type workerConfig struct {
 	TempMinFreeBytes     uint64
 	TempMaxManagedBytes  int64
 	TempDryRun           bool
+	// SourceQueryTimeout bounds one partition's source query; 0 means no
+	// limit beyond the task lease and shutdown.
+	SourceQueryTimeout time.Duration
 }
 
 func loadWorkerConfigFromEnv() workerConfig {
@@ -62,6 +65,7 @@ func loadWorkerConfigFromEnv() workerConfig {
 		TempMinFreeBytes:     workerEnvUint("ORABBIT_TEMP_MIN_FREE_BYTES", 1<<30),
 		TempMaxManagedBytes:  int64(workerEnvUint("ORABBIT_TEMP_MAX_MANAGED_BYTES", 100<<30)),
 		TempDryRun:           workerEnvBool("ORABBIT_TEMP_DRY_RUN", false),
+		SourceQueryTimeout:   workerEnvTimeout("ORABBIT_SOURCE_QUERY_TIMEOUT", 2*time.Hour),
 	}
 }
 
@@ -87,6 +91,7 @@ func newWorkerFlagSet(cfg *workerConfig) *flag.FlagSet {
 	fs.Int64Var(&cfg.TempMaxBytesPerScan, "temp-max-bytes-per-scan", cfg.TempMaxBytesPerScan, "Maximum managed bytes reclaimed per scan")
 	fs.Uint64Var(&cfg.TempMinFreeBytes, "temp-min-free-bytes", cfg.TempMinFreeBytes, "Minimum disk bytes required to start local-file work")
 	fs.Int64Var(&cfg.TempMaxManagedBytes, "temp-max-managed-bytes", cfg.TempMaxManagedBytes, "Maximum managed-root bytes before new work pauses")
+	fs.DurationVar(&cfg.SourceQueryTimeout, "source-query-timeout", cfg.SourceQueryTimeout, "Maximum duration of one partition's source query (0 = no limit)")
 	fs.BoolVar(&cfg.TempDryRun, "temp-dry-run", cfg.TempDryRun, "Classify stale workspaces without deleting them")
 	return fs
 }
@@ -97,6 +102,14 @@ func workerEnvDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return value
+}
+
+// workerEnvTimeout is workerEnvDuration that also accepts "0" for no limit.
+func workerEnvTimeout(key string, fallback time.Duration) time.Duration {
+	if strings.TrimSpace(os.Getenv(key)) == "0" {
+		return 0
+	}
+	return workerEnvDuration(key, fallback)
 }
 
 func workerEnvUint(key string, fallback uint64) uint64 {
