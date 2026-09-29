@@ -38,10 +38,10 @@ func TestBuildParquetObjectPayloadsIncludesOptionalFields(t *testing.T) {
 func TestWorkerProtocolCompatibilityFailsClosed(t *testing.T) {
 	st := openGRPCTestStore(t)
 	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, nil)
-	for _, version := range []int32{0, 5, 7} {
+	for _, version := range []int32{0, 5, 6, 8} {
 		_, err := srv.RequestTask(context.Background(), &grpcpb.RequestTaskRequest{WorkerId: "legacy", ProtocolVersion: version})
 		if status.Code(err) != codes.FailedPrecondition ||
-			!strings.Contains(err.Error(), "accepted version=6") ||
+			!strings.Contains(err.Error(), "accepted version=7") ||
 			!strings.Contains(err.Error(), "exact match required") {
 			t.Fatalf("version=%d error=%v", version, err)
 		}
@@ -1126,4 +1126,40 @@ func grpcTestKey(t *testing.T) crypto.Key {
 	}
 
 	return k
+}
+
+func TestReportTaskProgressRejectsOversizedMessage(t *testing.T) {
+	srv := NewServer(nil, openGRPCTestStore(t), nil, testCryptoKey, time.Second, nil)
+
+	_, err := srv.ReportTaskProgress(context.Background(), &grpcpb.ReportTaskProgressRequest{
+		Message: strings.Repeat("x", maxWorkerProgressMessageBytes+1),
+	})
+
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("code=%v want=%v err=%v", status.Code(err), codes.InvalidArgument, err)
+	}
+}
+
+func TestReportTaskProgressRejectsOversizedFields(t *testing.T) {
+	srv := NewServer(nil, openGRPCTestStore(t), nil, testCryptoKey, time.Second, nil)
+
+	_, err := srv.ReportTaskProgress(context.Background(), &grpcpb.ReportTaskProgressRequest{
+		FieldsJson: strings.Repeat("x", maxWorkerProgressFieldsBytes+1),
+	})
+
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("code=%v want=%v err=%v", status.Code(err), codes.InvalidArgument, err)
+	}
+}
+
+func TestReportMultipartLifecycleRejectsOversizedErrorMessage(t *testing.T) {
+	srv := NewServer(nil, openGRPCTestStore(t), nil, testCryptoKey, time.Second, nil)
+
+	_, err := srv.ReportMultipartLifecycle(context.Background(), &grpcpb.ReportMultipartLifecycleRequest{
+		ErrorMessage: strings.Repeat("x", maxMultipartErrorMessageBytes+1),
+	})
+
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("code=%v want=%v err=%v", status.Code(err), codes.InvalidArgument, err)
+	}
 }

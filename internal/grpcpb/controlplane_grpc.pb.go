@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             v7.35.1
-// source: controlplane.proto
+// source: proto/controlplane.proto
 
 package grpcpb
 
@@ -19,17 +19,18 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ControlPlane_RegisterWorker_FullMethodName         = "/orabbit.v1.ControlPlane/RegisterWorker"
-	ControlPlane_Heartbeat_FullMethodName              = "/orabbit.v1.ControlPlane/Heartbeat"
-	ControlPlane_RequestTask_FullMethodName            = "/orabbit.v1.ControlPlane/RequestTask"
-	ControlPlane_RenewTaskLease_FullMethodName         = "/orabbit.v1.ControlPlane/RenewTaskLease"
-	ControlPlane_AcquireUploadCapacity_FullMethodName  = "/orabbit.v1.ControlPlane/AcquireUploadCapacity"
-	ControlPlane_ReleaseUploadCapacity_FullMethodName  = "/orabbit.v1.ControlPlane/ReleaseUploadCapacity"
-	ControlPlane_ReportTaskProgress_FullMethodName     = "/orabbit.v1.ControlPlane/ReportTaskProgress"
-	ControlPlane_ReportTaskResult_FullMethodName       = "/orabbit.v1.ControlPlane/ReportTaskResult"
-	ControlPlane_EnrollWorker_FullMethodName           = "/orabbit.v1.ControlPlane/EnrollWorker"
-	ControlPlane_RenewWorkerCertificate_FullMethodName = "/orabbit.v1.ControlPlane/RenewWorkerCertificate"
-	ControlPlane_GetTaskCredentials_FullMethodName     = "/orabbit.v1.ControlPlane/GetTaskCredentials"
+	ControlPlane_RegisterWorker_FullMethodName           = "/orabbit.v1.ControlPlane/RegisterWorker"
+	ControlPlane_Heartbeat_FullMethodName                = "/orabbit.v1.ControlPlane/Heartbeat"
+	ControlPlane_RequestTask_FullMethodName              = "/orabbit.v1.ControlPlane/RequestTask"
+	ControlPlane_RenewTaskLease_FullMethodName           = "/orabbit.v1.ControlPlane/RenewTaskLease"
+	ControlPlane_AcquireUploadCapacity_FullMethodName    = "/orabbit.v1.ControlPlane/AcquireUploadCapacity"
+	ControlPlane_ReleaseUploadCapacity_FullMethodName    = "/orabbit.v1.ControlPlane/ReleaseUploadCapacity"
+	ControlPlane_ReportTaskProgress_FullMethodName       = "/orabbit.v1.ControlPlane/ReportTaskProgress"
+	ControlPlane_ReportTaskResult_FullMethodName         = "/orabbit.v1.ControlPlane/ReportTaskResult"
+	ControlPlane_EnrollWorker_FullMethodName             = "/orabbit.v1.ControlPlane/EnrollWorker"
+	ControlPlane_RenewWorkerCertificate_FullMethodName   = "/orabbit.v1.ControlPlane/RenewWorkerCertificate"
+	ControlPlane_GetTaskCredentials_FullMethodName       = "/orabbit.v1.ControlPlane/GetTaskCredentials"
+	ControlPlane_ReportMultipartLifecycle_FullMethodName = "/orabbit.v1.ControlPlane/ReportMultipartLifecycle"
 )
 
 // ControlPlaneClient is the client API for ControlPlane service.
@@ -54,6 +55,7 @@ type ControlPlaneClient interface {
 	// Returns the source and target credentials for one task attempt, only to
 	// the authenticated worker that currently holds that attempt's lease.
 	GetTaskCredentials(ctx context.Context, in *GetTaskCredentialsRequest, opts ...grpc.CallOption) (*GetTaskCredentialsResponse, error)
+	ReportMultipartLifecycle(ctx context.Context, in *ReportMultipartLifecycleRequest, opts ...grpc.CallOption) (*ReportMultipartLifecycleResponse, error)
 }
 
 type controlPlaneClient struct {
@@ -174,6 +176,16 @@ func (c *controlPlaneClient) GetTaskCredentials(ctx context.Context, in *GetTask
 	return out, nil
 }
 
+func (c *controlPlaneClient) ReportMultipartLifecycle(ctx context.Context, in *ReportMultipartLifecycleRequest, opts ...grpc.CallOption) (*ReportMultipartLifecycleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReportMultipartLifecycleResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_ReportMultipartLifecycle_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ControlPlaneServer is the server API for ControlPlane service.
 // All implementations must embed UnimplementedControlPlaneServer
 // for forward compatibility.
@@ -196,6 +208,7 @@ type ControlPlaneServer interface {
 	// Returns the source and target credentials for one task attempt, only to
 	// the authenticated worker that currently holds that attempt's lease.
 	GetTaskCredentials(context.Context, *GetTaskCredentialsRequest) (*GetTaskCredentialsResponse, error)
+	ReportMultipartLifecycle(context.Context, *ReportMultipartLifecycleRequest) (*ReportMultipartLifecycleResponse, error)
 	mustEmbedUnimplementedControlPlaneServer()
 }
 
@@ -238,6 +251,9 @@ func (UnimplementedControlPlaneServer) RenewWorkerCertificate(context.Context, *
 }
 func (UnimplementedControlPlaneServer) GetTaskCredentials(context.Context, *GetTaskCredentialsRequest) (*GetTaskCredentialsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetTaskCredentials not implemented")
+}
+func (UnimplementedControlPlaneServer) ReportMultipartLifecycle(context.Context, *ReportMultipartLifecycleRequest) (*ReportMultipartLifecycleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportMultipartLifecycle not implemented")
 }
 func (UnimplementedControlPlaneServer) mustEmbedUnimplementedControlPlaneServer() {}
 func (UnimplementedControlPlaneServer) testEmbeddedByValue()                      {}
@@ -458,6 +474,24 @@ func _ControlPlane_GetTaskCredentials_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlPlane_ReportMultipartLifecycle_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportMultipartLifecycleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).ReportMultipartLifecycle(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_ReportMultipartLifecycle_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).ReportMultipartLifecycle(ctx, req.(*ReportMultipartLifecycleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ControlPlane_ServiceDesc is the grpc.ServiceDesc for ControlPlane service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -509,7 +543,11 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "GetTaskCredentials",
 			Handler:    _ControlPlane_GetTaskCredentials_Handler,
 		},
+		{
+			MethodName: "ReportMultipartLifecycle",
+			Handler:    _ControlPlane_ReportMultipartLifecycle_Handler,
+		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "controlplane.proto",
+	Metadata: "proto/controlplane.proto",
 }

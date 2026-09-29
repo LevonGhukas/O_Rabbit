@@ -29,6 +29,7 @@ service ControlPlane {
   // Returns the source and target credentials for one task attempt, only to
   // the authenticated worker that currently holds that attempt's lease.
   rpc GetTaskCredentials(GetTaskCredentialsRequest) returns (GetTaskCredentialsResponse);
+  rpc ReportMultipartLifecycle(ReportMultipartLifecycleRequest) returns (ReportMultipartLifecycleResponse);
 }
 
 message EnrollWorkerRequest {
@@ -253,3 +254,23 @@ message ReportTaskResultResponse {
   bool accepted = 1;
   string message = 2;
 }
+
+message ReportMultipartLifecycleRequest {
+  string worker_id = 1;
+  string run_id = 2;
+  string task_id = 3;
+  string attempt_id = 4;
+  string fencing_token = 5;
+  string boot_id = 6;
+
+  string event = 10;
+  int32 file_index = 11;
+  string object_key = 12;
+  string provider_upload_id = 13;
+  string sha256 = 14;
+  int64 size = 15;
+  string error_class = 16;
+  string error_message = 17;
+}
+
+message ReportMultipartLifecycleResponse {}
