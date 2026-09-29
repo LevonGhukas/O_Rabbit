@@ -14,6 +14,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
 
 var (
@@ -309,25 +311,11 @@ func planUint16(name string) ColumnPlan {
 }
 
 func planUint32(name string) ColumnPlan {
-	return ColumnPlan{
-		Name:     name,
-		DataType: arrow.PrimitiveTypes.Uint32,
-		Builder:  func(mem memory.Allocator) array.Builder { return array.NewUint32Builder(mem) },
-		Append: func(b array.Builder, v any) error {
-			bb := b.(*array.Uint32Builder)
-			v = dereferenceValue(v)
-			if v == nil {
-				bb.AppendNull()
-				return nil
-			}
-			if u, ok := asUint64(v); ok {
-				bb.Append(uint32(u))
-				return nil
-			}
-			bb.AppendNull()
-			return nil
-		},
+	plan, _, err := PlanForLogicalType(name, typesystem.LogicalType{Kind: typesystem.KindUInt32})
+	if err != nil {
+		panic(fmt.Sprintf("planUint32: %v", err))
 	}
+	return plan
 }
 
 func planUint64(name string) ColumnPlan {

@@ -7,6 +7,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/stretchr/testify/require"
+
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
 
 func TestCurrentPlannerMappingsAndFallbacks(t *testing.T) {
@@ -117,7 +119,6 @@ func TestCurrentUncheckedNarrowIntegerCastsWrap(t *testing.T) {
 		{"int8", planInt8("c"), int64(128), int8(-128)},
 		{"int16", planInt16("c"), int64(32768), int16(-32768)},
 		{"uint8", planUint8("c"), uint64(256), uint8(0)},
-		{"uint32", planUint32("c"), uint64(1 << 32), uint32(0)},
 	}
 
 	for _, tt := range tests {
@@ -140,5 +141,70 @@ func TestCurrentUncheckedNarrowIntegerCastsWrap(t *testing.T) {
 				t.Fatalf("unexpected array type %T", got)
 			}
 		})
+	}
+}
+
+func TestKindUInt32PromotesToInt64ExactValues(t *testing.T) {
+	plan, mapping, err := PlanForLogicalType("uint32_col", typesystem.LogicalType{Kind: typesystem.KindUInt32, Nullable: true})
+	require.NoError(t, err)
+	require.Equal(t, arrow.PrimitiveTypes.Int64, plan.DataType)
+	require.Equal(t, typesystem.MappingSafePromotion, mapping.Class)
+
+	builder := plan.Builder(memory.DefaultAllocator)
+	defer builder.Release()
+
+	values := []struct {
+		input   any
+		wantVal int64
+		isNull  bool
+	}{
+		{input: uint32(0), wantVal: 0, isNull: false},
+		{input: uint32(42), wantVal: 42, isNull: false},
+		{input: uint32(1000), wantVal: 1000, isNull: false},
+		{input: uint32(2147483647), wantVal: 2147483647, isNull: false},
+		{input: uint32(2147483648), wantVal: 2147483648, isNull: false},
+		{input: uint32(4294967295), wantVal: 4294967295, isNull: false},
+		{input: nil, wantVal: 0, isNull: true},
+	}
+
+	for _, tt := range values {
+		require.NoError(t, plan.Append(builder, tt.input))
+	}
+
+	arr := builder.NewArray().(*array.Int64)
+	defer arr.Release()
+
+	require.Equal(t, len(values), arr.Len())
+	for i, tt := range values {
+		if tt.isNull {
+			require.True(t, arr.IsNull(i), "expected index %d to be null", i)
+		} else {
+			require.False(t, arr.IsNull(i), "expected index %d to be non-null", i)
+			require.Equal(t, tt.wantVal, arr.Value(i), "mismatch at index %d", i)
+		}
+	}
+
+	// Also verify that legacy planUint32 produces identical exact int64 values
+	legacyPlan := planUint32("legacy_uint32")
+	require.Equal(t, arrow.PrimitiveTypes.Int64, legacyPlan.DataType)
+
+	legacyBuilder := legacyPlan.Builder(memory.DefaultAllocator)
+	defer legacyBuilder.Release()
+
+	for _, tt := range values {
+		require.NoError(t, legacyPlan.Append(legacyBuilder, tt.input))
+	}
+
+	legacyArr := legacyBuilder.NewArray().(*array.Int64)
+	defer legacyArr.Release()
+
+	require.Equal(t, len(values), legacyArr.Len())
+	for i, tt := range values {
+		if tt.isNull {
+			require.True(t, legacyArr.IsNull(i), "expected legacy index %d to be null", i)
+		} else {
+			require.False(t, legacyArr.IsNull(i), "expected legacy index %d to be non-null", i)
+			require.Equal(t, tt.wantVal, legacyArr.Value(i), "legacy mismatch at index %d", i)
+		}
 	}
 }
