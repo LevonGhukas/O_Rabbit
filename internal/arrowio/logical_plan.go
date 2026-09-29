@@ -49,7 +49,8 @@ func StorageArrowTypeForLogicalType(t typesystem.LogicalType) (arrow.DataType, t
 		return arrow.PrimitiveTypes.Int64, typesystem.MappingFor(t, "long", typesystem.MappingSafePromotion, "Iceberg long preserves the full uint32 range"), nil
 	}
 	if t.Kind == typesystem.KindUInt64 {
-		return arrow.BinaryTypes.String, typesystem.MappingFor(t, "string", typesystem.MappingSemanticFallback, "Iceberg long cannot represent full uint64 range"), nil
+		dec := &arrow.Decimal128Type{Precision: uint64DecimalPrecision, Scale: 0}
+		return dec, typesystem.MappingFor(t, dec.String(), typesystem.MappingSafePromotion, "Iceberg has no unsigned 64-bit integer; stored losslessly as decimal(20,0)"), nil
 	}
 	if t.Kind == typesystem.KindTimestampTZ && !storageUTCAlias(t.Timezone) {
 		return arrow.BinaryTypes.String, typesystem.MappingFor(t, "string", typesystem.MappingSemanticFallback, "current Arrow-to-Iceberg bridge accepts timezone-aware timestamps only for UTC aliases"), nil

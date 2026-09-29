@@ -159,6 +159,10 @@ func (s *Server) runIcebergRegistrationWithHooks(ctx context.Context, runID, reg
 		forcePathStyle = currentDestination.ForcePathStyle
 		datasetPrefix = currentDestination.Prefix
 	}
+	columnTypes := opts.ColumnTypes
+	if runTasks, taskErr := s.st.ListTasksForRun(ctx, runID); taskErr == nil {
+		columnTypes = effectiveColumnTypes(runTasks, opts.ColumnTypes)
+	}
 	req := icebergreg.RunRequest{
 		RunID:         runID,
 		Registration:  regCfg,
@@ -168,7 +172,7 @@ func (s *Server) runIcebergRegistrationWithHooks(ctx context.Context, runID, reg
 		SourceTable:   strings.TrimSpace(opts.Table),
 		SourceQuery:   sourceQuery,
 		QueryHash:     strings.TrimSpace(opts.QueryHash),
-		ColumnTypes:   opts.ColumnTypes,
+		ColumnTypes:   columnTypes,
 		RecordPath:    opts.RecordPath,
 		FileFormat:    opts.FileFormat,
 		SelectColumns: opts.SelectColumns,

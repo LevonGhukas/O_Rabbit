@@ -75,6 +75,18 @@ Legacy compatibility syntax is accepted but is not the preferred API: ClickHouse
 
 Unknown source-database types may still use the documented lossless string fallback. Unknown **explicit target type strings** are configuration errors: `ParseType("FooBar")`, `array<>`, and malformed decimals return errors rather than silently becoming `unknown` or `string`. Decimal precision is retained without a parser limit; for example, `decimal(50,10)` parses successfully and storage resolution later chooses its explicit fallback.
 
+## Column overrides (`column_types`)
+
+User overrides are authoritative. Before creating tasks, the planner (`internal/planner/column_types.go`) checks every override against the source and writes the resulting effective types into each task's partition spec. Iceberg registration reads the same effective types, so the table schema always matches the written Parquet.
+
+- Widening (for example `int32` → `int64`) and conversions that cannot be checked portably, such as text → number, are applied as requested.
+- Numeric narrowing is checked with one aggregate scan (`MIN`, `MAX`, NULL count, values with more decimal places than the target). If the values do not fit, the smallest lossless wider type is used instead (for example `int32` → `int64`). If fractional digits would be dropped, the source type is kept.
+- A `decimal(p,s)` whose scale is below the source scale is widened to keep the source digits.
+- `NOT NULL` on a column that contains NULLs, or whose nullability can't be checked, is kept nullable.
+- Each fallback adds a `user_override_fallback` entry to `runs.type_warnings_json` with a plain-language reason.
+
+The placeholder `source` / `nullable<source>` keeps the inferred source type and changes only nullability. Without overrides, PostgreSQL query results take NOT NULL from the catalog (`pg_attribute.attnotnull`) when the query has no outer join or grouping extension, because pgx does not report result nullability. At write time, a NULL in a NOT NULL column fails the task with a message that names the column.
+
 ## PostgreSQL migration
 
 PostgreSQL is the first migrated source engine: PostgreSQL metadata flows through `arrowio.LogicalTypeForPostgresColumn`, `ArrowTypeForLogicalType`, `typesystem.Convert`, and canonical Arrow appenders. Invalid values now return conversion errors rather than wrapping narrow integers, producing zero values, or silently appending nulls. UUID and JSON remain logical `uuid`/`json` and use their explicit storage fallback; unsupported PostgreSQL semantic types (including `INET`, `TIMETZ`, and `VARBIT`) remain `unknown` with their source type name and use lossless-string fallback. Unconstrained `NUMERIC` is also `unknown`; no `decimal(38,10)` constraint is invented. PostgreSQL text arrays permit null elements, so their migrated element type is marked nullable because source column metadata does not expose element nullability.
