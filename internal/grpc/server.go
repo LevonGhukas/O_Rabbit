@@ -1355,7 +1355,7 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 					sourceQuery = strings.TrimSpace(job.SourceSQL)
 				}
 				var warnings []typesystem.TypeWarning
-				intent.IcebergSchema, warnings, err = icebergreg.InferDurableIcebergSchemaWithWarnings(ctx, srcConn.Engine, sourceDSN, opts.NormalizedSourceMode(), strings.TrimSpace(opts.Table), sourceQuery, opts.RecordPath, opts.FileFormat)
+				intent.IcebergSchema, warnings, err = icebergreg.InferDurableIcebergSchemaWithWarnings(ctx, srcConn.Engine, sourceDSN, opts.NormalizedSourceMode(), strings.TrimSpace(opts.Table), sourceQuery, opts.RecordPath, opts.FileFormat, effectiveColumnTypes(tasks, opts.ColumnTypes))
 				if err != nil {
 					return &classifiedCommitError{class: commitFailureValidation, component: "source_schema", err: fmt.Errorf("empty dataset source schema is unavailable: %w", err)}
 				}
@@ -1472,6 +1472,21 @@ func collectParquetObjectInfos(tasks []db.Task) []map[string]any {
 }
 
 // collectParquetKeys extracts the unique Parquet object keys from the completed tasks of the run.
+// effectiveColumnTypes returns the column types the planner verified and
+// handed to workers (see planner.resolveEffectiveColumnTypes). Registration
+// must use the same types so the Iceberg schema matches the written Parquet.
+func effectiveColumnTypes(tasks []db.Task, fallback map[string]string) map[string]string {
+	for _, t := range tasks {
+		var spec struct {
+			ColumnTypes map[string]string `json:"column_types"`
+		}
+		if json.Unmarshal(t.PartitionSpec, &spec) == nil && spec.ColumnTypes != nil {
+			return spec.ColumnTypes
+		}
+	}
+	return fallback
+}
+
 func collectParquetKeys(tasks []db.Task) []string {
 	seen := make(map[string]struct{})
 	var out []string

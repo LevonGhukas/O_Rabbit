@@ -366,7 +366,7 @@ func (s *Server) handleRunValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for column, target := range spec.ColumnTypes {
-		if _, err := typesystem.ParseType(target); err != nil {
+		if err := typesystem.ValidateOverride(target); err != nil {
 			writeInvalidInput(w, "invalid column_types", map[string]any{"column": column, "error": err.Error()})
 			return
 		}
@@ -457,23 +457,12 @@ func validationTypeMappingsFromDescription(spec validatedRunSubmitSpec, cols []s
 		return out, warnings
 	}
 	for i, col := range cols {
-		var dbType string
-		var p, s int64
-		var dec bool
-		if types[i] != nil {
-			dbType = types[i].DatabaseTypeName()
-			if pp, ss, ok := types[i].DecimalSize(); ok {
-				p = int64(pp)
-				s = int64(ss)
-				dec = true
-			}
-		}
-		logical, e := arrowio.LogicalTypeForSQLColumn(spec.SourceEngine, dbType, p, s, dec)
+		logical, _, e := arrowio.SourceLogicalTypeForSQLColumn(spec.SourceEngine, types[i])
 		if e != nil {
 			continue
 		}
 		if raw, ok := spec.ColumnTypes[col]; ok {
-			if parsed, e := typesystem.ParseType(raw); e == nil {
+			if parsed, e := typesystem.ResolveOverride(raw, logical); e == nil {
 				logical = parsed
 			}
 		}
@@ -826,90 +815,9 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 	if icebergTable == "" {
 		icebergTable = icebergreg.DefaultTable(engine, sourceName)
 	}
-	if icebergEnabled {
-		switch icebergEngine {
-		case "rest-go", "ice":
-		default:
-			return validatedRunSubmitSpec{}, invalidSubmitField("iceberg.engine", fmt.Sprintf("iceberg.engine %q is not supported", icebergEngine), map[string]any{
-				"supported_engines": []string{"rest-go", "ice"},
-			})
-		}
-		if !icebergTableValid(icebergTable) {
-			return validatedRunSubmitSpec{}, invalidSubmitField("iceberg.table", "iceberg.table must use namespace.table format", nil)
-		}
-		rawYAML := strings.TrimSpace(req.Iceberg.ConfigYAML)
-		iceCfg := icebergreg.IceYAML{}
-		if rawYAML != "" {
-			var err error
-			iceCfg, err = icebergreg.ParseIceYAMLBytes([]byte(rawYAML))
-			if err != nil {
-				return validatedRunSubmitSpec{}, invalidSubmitField("iceberg.config_yaml", "iceberg.config_yaml is not valid YAML", map[string]any{"cause": err.Error()})
-			}
-		}
-		runCfg, err := icebergreg.ResolveRunConfigWithOptions(true, icebergEngine, icebergTable, s3io.Config{
-			Endpoint:        targetEndpoint,
-			Region:          targetRegion,
-			Bucket:          targetBucket,
-			ForcePathStyle:  targetForcePathStyle,
-			AccessKeyID:     targetAccessKeyID,
-			SecretAccessKey: targetSecretAccessKey,
-		}, iceCfg, req.Iceberg.Options)
-		if err != nil {
-			return validatedRunSubmitSpec{}, invalidSubmitField("iceberg.options", "iceberg run options are invalid", map[string]any{"cause": err.Error()})
-		}
-		if icebergEngine == "ice" && rawYAML != "" {
-			runCfg.ConfigYAML = rawYAML
-		}
-		targetFileBytes := req.Performance.TargetFileBytes
-		if targetFileBytes == 0 && runCfg.TargetFileSize > 0 {
-			targetFileBytes = runCfg.TargetFileSize
-		}
-		return validatedRunSubmitSpec{
-			SourceEngine:            engine,
-			SourceDSN:               sourceDSN,
-			SourceMode:              sourceMode,
-			SourceTable:             sourceTable,
-			SourceQuery:             sourceQuery,
-			QueryHash:               queryHash,
-			WhereClause:             strings.TrimSpace(req.Source.WhereClause),
-			SelectColumns:           req.Source.SelectColumns,
-			RecordPath:              strings.TrimSpace(req.Source.RecordPath),
-			FileFormat:              strings.TrimSpace(req.Source.FileFormat),
-			SourceName:              sourceName,
-			CursorColumn:            cursorColumn,
-			Incremental:             req.Source.Incremental,
-			TargetEndpoint:          targetEndpoint,
-			TargetRegion:            targetRegion,
-			TargetBucket:            targetBucket,
-			TargetPrefixOverride:    strings.TrimSpace(req.Target.S3Prefix),
-			TargetPrefix:            dataset.Prefix(req.Target.S3Prefix, engine, sourceName),
-			TargetForcePathStyle:    targetForcePathStyle,
-			TargetAccessKeyID:       targetAccessKeyID,
-			TargetSecretAccessKey:   targetSecretAccessKey,
-			AutoTune:                autoTune,
-			MaxInFlightTasks:        req.Performance.MaxInFlightTasks,
-			PlannedTasks:            req.Performance.PlannedTasks,
-			TargetRowsPerTask:       req.Performance.TargetRowsPerTask,
-			TargetFileBytes:         targetFileBytes,
-			SourceConnectionName:    frontendSourceConnectionName(engine),
-			TargetConnectionName:    defaultFrontendTargetConnectionName,
-			JobName:                 frontendDefaultJobName(engine, sourceName),
-			TargetNamespace:         defaultFrontendTargetNamespace,
-			TargetTable:             defaultFrontendTargetTable,
-			WriteMode:               resolveFrontendWriteMode(req.Source.Incremental),
-			IcebergEnabled:          true,
-			IcebergEngine:           icebergEngine,
-			IcebergTable:            icebergTable,
-			IcebergPartitionKeys:    req.Iceberg.PartitionKeys,
-			IcebergRunConfig:        runCfg,
-			ConsistencyMode:         consistencyMode,
-			OrderedCursorSupported:  true,
-			QuerySupported:          connectors.SupportsQueryMode(engine),
-			FrontendSubmitSupported: true,
-		}, nil
-	}
-
-	return validatedRunSubmitSpec{
+	// Build the spec once so every submit path carries the same source
+	// options (e.g. column_types); Iceberg only adds its own fields below.
+	spec := validatedRunSubmitSpec{
 		SourceEngine:            engine,
 		SourceDSN:               sourceDSN,
 		SourceMode:              sourceMode,
@@ -950,7 +858,52 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 		OrderedCursorSupported:  true,
 		QuerySupported:          connectors.SupportsQueryMode(engine),
 		FrontendSubmitSupported: true,
-	}, nil
+	}
+
+	if icebergEnabled {
+		switch icebergEngine {
+		case "rest-go", "ice":
+		default:
+			return validatedRunSubmitSpec{}, invalidSubmitField("iceberg.engine", fmt.Sprintf("iceberg.engine %q is not supported", icebergEngine), map[string]any{
+				"supported_engines": []string{"rest-go", "ice"},
+			})
+		}
+		if !icebergTableValid(icebergTable) {
+			return validatedRunSubmitSpec{}, invalidSubmitField("iceberg.table", "iceberg.table must use namespace.table format", nil)
+		}
+		rawYAML := strings.TrimSpace(req.Iceberg.ConfigYAML)
+		iceCfg := icebergreg.IceYAML{}
+		if rawYAML != "" {
+			var err error
+			iceCfg, err = icebergreg.ParseIceYAMLBytes([]byte(rawYAML))
+			if err != nil {
+				return validatedRunSubmitSpec{}, invalidSubmitField("iceberg.config_yaml", "iceberg.config_yaml is not valid YAML", map[string]any{"cause": err.Error()})
+			}
+		}
+		runCfg, err := icebergreg.ResolveRunConfigWithOptions(true, icebergEngine, icebergTable, s3io.Config{
+			Endpoint:        targetEndpoint,
+			Region:          targetRegion,
+			Bucket:          targetBucket,
+			ForcePathStyle:  targetForcePathStyle,
+			AccessKeyID:     targetAccessKeyID,
+			SecretAccessKey: targetSecretAccessKey,
+		}, iceCfg, req.Iceberg.Options)
+		if err != nil {
+			return validatedRunSubmitSpec{}, invalidSubmitField("iceberg.options", "iceberg run options are invalid", map[string]any{"cause": err.Error()})
+		}
+		if icebergEngine == "ice" && rawYAML != "" {
+			runCfg.ConfigYAML = rawYAML
+		}
+		targetFileBytes := req.Performance.TargetFileBytes
+		if targetFileBytes == 0 && runCfg.TargetFileSize > 0 {
+			targetFileBytes = runCfg.TargetFileSize
+		}
+		spec.TargetFileBytes = targetFileBytes
+		spec.IcebergEnabled = true
+		spec.IcebergPartitionKeys = req.Iceberg.PartitionKeys
+		spec.IcebergRunConfig = runCfg
+	}
+	return spec, nil
 }
 
 func buildFrontendSourceConnectionRequest(spec validatedRunSubmitSpec) (connectionCreateRequest, error) {

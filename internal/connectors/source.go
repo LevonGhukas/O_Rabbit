@@ -364,6 +364,24 @@ func (w *errorWrappedSourceQueryReader) ValidateQueryCursorColumn(ctx context.Co
 	return v, ClassifyConnectorError(err)
 }
 
+func (w *errorWrappedSourceQueryReader) ProbeQueryColumns(ctx context.Context, query string, probes []ColumnProbe) ([]ColumnProbeResult, error) {
+	p, ok := w.inner.(QueryColumnProber)
+	if !ok {
+		return nil, fmt.Errorf("column probing is not supported for this source")
+	}
+	r, err := p.ProbeQueryColumns(ctx, query, probes)
+	return r, ClassifyConnectorError(err)
+}
+
+func (w *errorWrappedSourceQueryReader) DescribeQueryNotNull(ctx context.Context, query string) (map[string]bool, error) {
+	d, ok := w.inner.(QueryNotNullDescriber)
+	if !ok {
+		return map[string]bool{}, nil
+	}
+	r, err := d.DescribeQueryNotNull(ctx, query)
+	return r, ClassifyConnectorError(err)
+}
+
 type errorWrappedDocumentReader struct {
 	inner DocumentReader
 }

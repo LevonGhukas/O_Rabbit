@@ -58,23 +58,16 @@ func PlansFromSQLEngineResult(engine string, cols []string, colTypes []*sql.Colu
 	}
 	warnings := make([]typesystem.TypeWarning, 0)
 	for i, col := range cols {
-		var dbType string
-		var p, s int64
-		var dec bool
-		if colTypes != nil && i < len(colTypes) && colTypes[i] != nil {
-			dbType = colTypes[i].DatabaseTypeName()
-			if pp, ss, ok := colTypes[i].DecimalSize(); ok {
-				p = int64(pp)
-				s = int64(ss)
-				dec = true
-			}
+		var ct *sql.ColumnType
+		if colTypes != nil && i < len(colTypes) {
+			ct = colTypes[i]
 		}
-		logical, err := LogicalTypeForSQLColumn(engine, dbType, p, s, dec)
+		logical, _, err := SourceLogicalTypeForSQLColumn(engine, ct)
 		if err != nil {
 			continue
 		}
-		if raw, ok := targetTypes[col]; ok && strings.TrimSpace(raw) != "" {
-			if parsed, parseErr := typesystem.ParseType(raw); parseErr == nil {
+		if raw, ok := lookupColumnOverride(targetTypes, col); ok {
+			if parsed, parseErr := typesystem.ResolveOverride(raw, logical); parseErr == nil {
 				logical = parsed
 			}
 		}
@@ -86,6 +79,47 @@ func PlansFromSQLEngineResult(engine string, cols []string, colTypes []*sql.Colu
 		}
 	}
 	return SQLPlanResult{Plans: plans, Schema: schema, Warnings: typesystem.DeduplicateTypeWarnings(warnings)}, nil
+}
+
+// SourceLogicalTypeForSQLColumn infers the logical type of a result column and
+// reports whether the driver knows its nullability (nullableKnown) — the
+// returned type's Nullable flag is true whenever nullability is unknown.
+func SourceLogicalTypeForSQLColumn(engine string, ct *sql.ColumnType) (typesystem.LogicalType, bool, error) {
+	var dbType string
+	var p, s int64
+	var dec bool
+	nullable, nullableKnown := true, false
+	if ct != nil {
+		dbType = ct.DatabaseTypeName()
+		if pp, ss, ok := ct.DecimalSize(); ok {
+			p = pp
+			s = ss
+			dec = true
+		}
+		if n, ok := ct.Nullable(); ok {
+			nullable, nullableKnown = n, true
+		}
+	}
+	logical, err := LogicalTypeForSQLColumn(engine, dbType, p, s, dec)
+	if err != nil {
+		return typesystem.LogicalType{}, false, err
+	}
+	logical.Nullable = nullable
+	return logical, nullableKnown, nil
+}
+
+// lookupColumnOverride finds a column override by exact, then case-insensitive, name.
+func lookupColumnOverride(targetTypes map[string]string, col string) (string, bool) {
+	if raw, ok := targetTypes[col]; ok && strings.TrimSpace(raw) != "" {
+		return raw, true
+	}
+	want := strings.ToLower(strings.TrimSpace(col))
+	for k, v := range targetTypes {
+		if strings.ToLower(strings.TrimSpace(k)) == want && strings.TrimSpace(v) != "" {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // schemaFromPlans handles schema from plans behavior.
@@ -479,6 +513,9 @@ func RowsToRecordBatchesEngineWithOverrides(engine string, rows *sql.Rows, cols 
 			return rowsTotal, maxCursor, err
 		}
 		for i, p := range plans {
+			if vals[i] == nil && !schema.Field(i).Nullable {
+				return rowsTotal, maxCursor, fmt.Errorf("column %q is declared NOT NULL in the target schema but the source returned NULL; mark the column as nullable or filter out NULL rows", p.Name)
+			}
 			if err := appendPlannedValue(p, builders[i], vals[i]); err != nil {
 				return rowsTotal, maxCursor, err
 			}
@@ -530,32 +567,30 @@ func PlansFromSQLEngineWithOverrides(engine string, cols []string, colTypes []*s
 		return plans, schema, err
 	}
 
-	targetTypesLower := make(map[string]string, len(targetTypes))
-	for k, v := range targetTypes {
-		targetTypesLower[strings.ToLower(strings.TrimSpace(k))] = v
-	}
-
 	fields := schema.Fields()
 	newFields := make([]arrow.Field, len(fields))
 	copy(newFields, fields)
 
 	for i, f := range fields {
-		targetTypeStr, ok := targetTypes[f.Name]
+		targetTypeStr, ok := lookupColumnOverride(targetTypes, f.Name)
 		if !ok {
-			targetTypeStr, ok = targetTypesLower[strings.ToLower(strings.TrimSpace(f.Name))]
+			continue
 		}
-		if ok && strings.TrimSpace(targetTypeStr) != "" {
-			logical, parseErr := typesystem.ParseType(strings.TrimSpace(targetTypeStr))
-			if parseErr != nil {
-				return nil, nil, fmt.Errorf("column %s target type: %w", f.Name, parseErr)
-			}
-			newPlan, _, planErr := PlanForLogicalType(f.Name, logical)
-			if planErr != nil {
-				return nil, nil, fmt.Errorf("column %s target plan: %w", f.Name, planErr)
-			}
-			plans[i] = newPlan
-			newFields[i] = arrow.Field{Name: f.Name, Type: newPlan.DataType, Nullable: logical.Nullable}
+		var ct *sql.ColumnType
+		if colTypes != nil && i < len(colTypes) {
+			ct = colTypes[i]
 		}
+		source, _, _ := SourceLogicalTypeForSQLColumn(engine, ct)
+		logical, parseErr := typesystem.ResolveOverride(targetTypeStr, source)
+		if parseErr != nil {
+			return nil, nil, fmt.Errorf("column %s target type: %w", f.Name, parseErr)
+		}
+		newPlan, _, planErr := PlanForLogicalType(f.Name, logical)
+		if planErr != nil {
+			return nil, nil, fmt.Errorf("column %s target plan: %w", f.Name, planErr)
+		}
+		plans[i] = newPlan
+		newFields[i] = arrow.Field{Name: f.Name, Type: newPlan.DataType, Nullable: logical.Nullable}
 	}
 
 	return plans, arrow.NewSchema(newFields, nil), nil

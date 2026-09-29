@@ -1240,13 +1240,13 @@ func inferRunIcebergSchema(ctx context.Context, req RunRequest, tableName string
 // stable JSON representation before a zero-artifact run enters its durable
 // commit boundary.
 func InferDurableIcebergSchema(ctx context.Context, engine, dsn, mode, table, query, recordPath, fileFormat string) (json.RawMessage, error) {
-	schema, _, err := InferDurableIcebergSchemaWithWarnings(ctx, engine, dsn, mode, table, query, recordPath, fileFormat)
+	schema, _, err := InferDurableIcebergSchemaWithWarnings(ctx, engine, dsn, mode, table, query, recordPath, fileFormat, nil)
 	return schema, err
 }
 
 // InferDurableIcebergSchemaWithWarnings snapshots the durable source schema and
 // returns the document inference warnings produced by that same sample.
-func InferDurableIcebergSchemaWithWarnings(ctx context.Context, engine, dsn, mode, table, query, recordPath, fileFormat string) (json.RawMessage, []typesystem.TypeWarning, error) {
+func InferDurableIcebergSchemaWithWarnings(ctx context.Context, engine, dsn, mode, table, query, recordPath, fileFormat string, columnTypes map[string]string) (json.RawMessage, []typesystem.TypeWarning, error) {
 	if connectors.SupportsDocumentReader(engine) {
 		reader, err := connectors.OpenDocumentReader(ctx, engine, dsn)
 		if err != nil {
@@ -1273,14 +1273,14 @@ func InferDurableIcebergSchemaWithWarnings(ctx context.Context, engine, dsn, mod
 	}
 	defer reader.Close()
 	req := RunRequest{SourceEngine: engine, SourceMode: mode, SourceTable: table, SourceQuery: query}
-	cols, columnTypes, err := describeSourceSchemaForAutoCreate(ctx, reader, req)
+	cols, sqlTypes, err := describeSourceSchemaForAutoCreate(ctx, reader, req)
 	if err != nil {
 		return nil, nil, err
 	}
 	if len(cols) == 0 {
 		return nil, nil, fmt.Errorf("durable source schema has no columns")
 	}
-	_, arrSchema, err := arrowio.PlansFromSQLEngine(engine, cols, columnTypes)
+	_, arrSchema, err := arrowio.PlansFromSQLEngineWithOverrides(engine, cols, sqlTypes, columnTypes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sql->arrow durable schema: %w", err)
 	}

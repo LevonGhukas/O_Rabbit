@@ -963,7 +963,7 @@ func TestValidationTypeMappingsReportsFallbacksAndOverrides(t *testing.T) {
 
 	spec.ColumnTypes = map[string]string{"id": "uint64"}
 	mappings, warnings = validationTypeMappingsFromDescription(spec, []string{"id"}, columnTypes[:1])
-	if len(mappings) != 1 || mappings[0]["storage_type"] != "string" || mappings[0]["class"] != typesystem.MappingSemanticFallback || len(warnings) != 1 || warnings[0].Class != "semantic_fallback" {
+	if len(mappings) != 1 || mappings[0]["storage_type"] != "decimal(20, 0)" || mappings[0]["class"] != typesystem.MappingSafePromotion || len(warnings) != 0 {
 		t.Fatalf("uint64 override mappings=%v warnings=%v", mappings, warnings)
 	}
 }
@@ -1681,5 +1681,50 @@ func seedExistingJobRunFixture(t *testing.T, st *db.Store, jobID string, increme
 		OptionsJSON:        optionsJSON,
 	}); err != nil {
 		t.Fatalf("create job: %v", err)
+	}
+}
+
+// Regression: the Iceberg-enabled submit path used to drop source.column_types.
+func TestAPIRunSubmitPersistsColumnTypes(t *testing.T) {
+	st := openTestStore(t)
+	srv := newSubmitTestServer(st)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/submit", strings.NewReader(`{
+		"source": {
+			"engine": "postgres",
+			"dsn": "postgresql://user:pass@db:5432/app?sslmode=disable",
+			"mode": "query",
+			"query": "SELECT id, user_id FROM public.orders",
+			"cursor_column": "id",
+			"incremental": true,
+			"column_types": {"id": "int32", "user_id": "nullable<source>"}
+		},
+		"target": {
+			"s3_endpoint": "http://minio:9000",
+			"s3_bucket": "bucket1",
+			"s3_access_key_id": "minioadmin",
+			"s3_secret_access_key": "miniosecret"
+		},
+		"iceberg": {"enabled": true, "engine": "rest-go", "table": "ice.orders", "config_yaml": "uri: http://ice-rest:5000"}
+	}`))
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		JobID string `json:"job_id"`
+	}
+	decodeJSONBody(t, rec, &resp)
+	job, err := st.GetJob(context.Background(), resp.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts, err := jobopts.Parse(job.OptionsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.ColumnTypes["id"] != "int32" || opts.ColumnTypes["user_id"] != "nullable<source>" {
+		t.Fatalf("column_types not persisted: %s", job.OptionsJSON)
 	}
 }
