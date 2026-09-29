@@ -166,10 +166,33 @@ type canceledObjectCleaner interface {
 }
 
 // WorkerProtocolVersion is the worker/master protocol revision. Version 6
-// moved task secrets from TaskAssignment to GetTaskCredentials.
-const WorkerProtocolVersion = 6
+// moved task secrets from TaskAssignment to GetTaskCredentials; version 7
+// moved multipart lifecycle reports to ReportMultipartLifecycle.
+const WorkerProtocolVersion = 7
 
 const workerProtocolVersion = WorkerProtocolVersion
+
+// ListenAndServe starts the gRPC server and listens for incoming connections.
+const (
+	// maxRecvMsgBytes bounds each worker request. Results and progress
+	// payloads are far smaller; the limit caps worker-supplied data.
+	maxRecvMsgBytes = 4 << 20
+	maxSendMsgBytes = 16 << 20
+
+	// gracefulStopTimeout bounds shutdown: a long commit running inside
+	// ReportTaskResult must not keep a stopping master alive indefinitely.
+	// Its run stays COMMITTING and is resumed by the next leader.
+	gracefulStopTimeout = 30 * time.Second
+)
+
+const (
+	maxWorkerProgressMessageBytes = 4 << 10
+	maxWorkerProgressFieldsBytes  = 64 << 10
+	maxMultipartErrorMessageBytes = 4 << 10
+	maxMultipartObjectKeyBytes    = 4 << 10
+	maxMultipartUploadIDBytes     = 2 << 10
+	maxMultipartErrorClassBytes   = 256
+)
 
 // buildParquetObjectPayloads constructs the task's Parquet object metadata in one pass.
 // rows and bytes remain task totals copied onto each object, not per-object metrics.
@@ -491,31 +514,15 @@ func (s *Server) ReleaseUploadCapacity(ctx context.Context, req *grpcpb.ReleaseU
 
 // ReportTaskProgress is best-effort and does not return an error if the task is not found (e.g. late progress after task completion).
 func (s *Server) ReportTaskProgress(ctx context.Context, req *grpcpb.ReportTaskProgressRequest) (*grpcpb.ReportTaskProgressResponse, error) {
+	if len(req.Message) > maxWorkerProgressMessageBytes {
+		return nil, grpcstatus.Error(codes.InvalidArgument, "progress message too large")
+	}
+
+	if len(req.FieldsJson) > maxWorkerProgressFieldsBytes {
+		return nil, grpcstatus.Error(codes.InvalidArgument, "progress fields too large")
+	}
 	if err := s.requireLeadership(ctx); err != nil {
 		return nil, err
-	}
-	if req.Message == "MULTIPART_LIFECYCLE" {
-		var lifecycle struct {
-			Event        string `json:"event"`
-			FileIndex    int    `json:"file_index"`
-			ObjectKey    string `json:"object_key"`
-			UploadID     string `json:"provider_upload_id"`
-			SHA256       string `json:"sha256"`
-			Size         int64  `json:"size"`
-			ErrorClass   string `json:"error_class"`
-			ErrorMessage string `json:"error_message"`
-		}
-		if err := json.Unmarshal([]byte(req.FieldsJson), &lifecycle); err != nil {
-			return nil, grpcstatus.Error(codes.InvalidArgument, "invalid multipart lifecycle payload")
-		}
-		_, err := s.st.ApplyMultipartLifecycle(ctx, db.MultipartLifecycleUpdate{Event: lifecycle.Event, RunID: req.RunId, TaskID: req.TaskId, AttemptID: req.AttemptId, WorkerID: req.WorkerId, FencingToken: req.FencingToken, FileIndex: lifecycle.FileIndex, ObjectKey: lifecycle.ObjectKey, UploadID: lifecycle.UploadID, SHA256: lifecycle.SHA256, Size: lifecycle.Size, ErrorClass: lifecycle.ErrorClass, ErrorMessage: lifecycle.ErrorMessage}, s.nowFn())
-		if errors.Is(err, db.ErrMultipartFenced) {
-			return nil, grpcstatus.Error(codes.FailedPrecondition, "multipart lifecycle ownership lost")
-		}
-		if err != nil {
-			return nil, err
-		}
-		return &grpcpb.ReportTaskProgressResponse{}, nil
 	}
 	if strings.TrimSpace(req.AttemptId) == "" || strings.TrimSpace(req.FencingToken) == "" {
 		return nil, grpcstatus.Error(codes.FailedPrecondition, "fenced task protocol required")
@@ -600,6 +607,63 @@ func (s *Server) ReportTaskProgress(ctx context.Context, req *grpcpb.ReportTaskP
 		s.bc.Publish(e)
 	}
 	return &grpcpb.ReportTaskProgressResponse{}, nil
+}
+
+func (s *Server) ReportMultipartLifecycle(
+	ctx context.Context,
+	req *grpcpb.ReportMultipartLifecycleRequest,
+) (*grpcpb.ReportMultipartLifecycleResponse, error) {
+	if err := s.requireLeadership(ctx); err != nil {
+		return nil, err
+	}
+	if len(req.ObjectKey) > maxMultipartObjectKeyBytes {
+		return nil, grpcstatus.Error(codes.InvalidArgument, "multipart object key too large")
+	}
+	if len(req.ProviderUploadId) > maxMultipartUploadIDBytes {
+		return nil, grpcstatus.Error(codes.InvalidArgument, "multipart upload id too large")
+	}
+	if len(req.ErrorClass) > maxMultipartErrorClassBytes {
+		return nil, grpcstatus.Error(codes.InvalidArgument, "multipart error class too large")
+	}
+	if len(req.ErrorMessage) > maxMultipartErrorMessageBytes {
+		return nil, grpcstatus.Error(codes.InvalidArgument, "multipart error message too large")
+	}
+	if strings.TrimSpace(req.AttemptId) == "" ||
+		strings.TrimSpace(req.FencingToken) == "" {
+		return nil, grpcstatus.Error(
+			codes.FailedPrecondition,
+			"fenced task protocol required",
+		)
+	}
+	_, err := s.st.ApplyMultipartLifecycle(
+		ctx,
+		db.MultipartLifecycleUpdate{
+			Event:        req.Event,
+			RunID:        req.RunId,
+			TaskID:       req.TaskId,
+			AttemptID:    req.AttemptId,
+			WorkerID:     req.WorkerId,
+			FencingToken: req.FencingToken,
+			FileIndex:    int(req.FileIndex),
+			ObjectKey:    req.ObjectKey,
+			UploadID:     req.ProviderUploadId,
+			SHA256:       req.Sha256,
+			Size:         req.Size,
+			ErrorClass:   req.ErrorClass,
+			ErrorMessage: req.ErrorMessage,
+		},
+		s.nowFn(),
+	)
+	if errors.Is(err, db.ErrMultipartFenced) {
+		return nil, grpcstatus.Error(
+			codes.FailedPrecondition,
+			"multipart lifecycle ownership lost",
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &grpcpb.ReportMultipartLifecycleResponse{}, nil
 }
 
 // ReportTaskResult updates the task status and emits a task event.
@@ -1639,19 +1703,6 @@ func newID() string {
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
-
-// ListenAndServe starts the gRPC server and listens for incoming connections.
-const (
-	// maxRecvMsgBytes bounds each worker request. Results and progress
-	// payloads are far smaller; the limit caps worker-supplied data.
-	maxRecvMsgBytes = 4 << 20
-	maxSendMsgBytes = 16 << 20
-
-	// gracefulStopTimeout bounds shutdown: a long commit running inside
-	// ReportTaskResult must not keep a stopping master alive indefinitely.
-	// Its run stays COMMITTING and is resumed by the next leader.
-	gracefulStopTimeout = 30 * time.Second
-)
 
 // serverOptions are the control-plane server options besides credentials.
 func serverOptions(cfg Config, srv *Server) []grpc.ServerOption {

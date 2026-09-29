@@ -373,53 +373,109 @@ func main() {
 
 		log.Info("task assigned", slog.String("task_id", t.TaskId), slog.String("run_id", t.RunId), slog.Int("task_index", int(t.TaskIndex)))
 
-		err = executeTaskManaged(ctx, log, cp, cfg.WorkerID, workerInstanceID, t, clients, workspaceManager)
+		err = executeTaskManaged(
+			ctx,
+			log,
+			cp,
+			cfg.WorkerID,
+			workerInstanceID,
+			t,
+			clients,
+			workspaceManager,
+		)
 		if err != nil {
 			var ownershipLost *taskOwnershipLostError
 			if errors.As(err, &ownershipLost) {
-				log.Warn("task ownership lost; result suppressed", slog.String("task_id", t.TaskId), slog.String("err", err.Error()))
+				log.Warn(
+					"task ownership lost; result suppressed",
+					slog.String("task_id", t.TaskId),
+					slog.String("err", err.Error()),
+				)
 				continue
 			}
 			var transientSuccess *transientSuccessReportError
 			if errors.As(err, &transientSuccess) {
-				log.Warn("successful task result remains unreported after transient outage; failure suppressed", slog.String("task_id", t.TaskId), slog.String("err", err.Error()))
+				log.Warn(
+					"successful task result remains unreported after transient outage; failure suppressed",
+					slog.String("task_id", t.TaskId),
+					slog.String("err", err.Error()),
+				)
 				continue
 			}
 			if cancelErr, ok := asTaskCanceledError(err); ok {
-				_, _ = cp.ReportTaskResult(ctx, &grpcpb.ReportTaskResultRequest{
-					WorkerId:     cfg.WorkerID,
-					TaskId:       t.TaskId,
-					RunId:        t.RunId,
-					AttemptId:    t.AttemptId,
-					FencingToken: t.FencingToken,
-					Status:       "CANCELED",
-					ErrorMessage: cancelErr.Error(),
-					FailureClass: string(failure.FailureCanceled),
-				})
-				log.Info("task canceled", slog.String("task_id", t.TaskId), slog.String("reason", cancelErr.Error()))
+				reportErr := reportResultWithRetry(
+					ctx,
+					log,
+					cp,
+					&grpcpb.ReportTaskResultRequest{
+						WorkerId:     cfg.WorkerID,
+						BootId:       workerInstanceID,
+						TaskId:       t.TaskId,
+						RunId:        t.RunId,
+						AttemptId:    t.AttemptId,
+						FencingToken: t.FencingToken,
+						Status:       "CANCELED",
+						ErrorMessage: cancelErr.Error(),
+						FailureClass: string(failure.FailureCanceled),
+					},
+				)
+				if reportErr != nil {
+					log.Warn(
+						"failed to report canceled task result",
+						slog.String("task_id", t.TaskId),
+						slog.String("err", reportErr.Error()),
+					)
+				}
+				log.Info(
+					"task canceled",
+					slog.String("task_id", t.TaskId),
+					slog.String("reason", cancelErr.Error()),
+				)
 				continue
 			}
-			if failure, ok := artifact.AsFailure(err); ok {
-				reportArtifactFailureBestEffort(ctx, log, cp, cfg.WorkerID, t, failure)
+			if artifactFailure, ok := artifact.AsFailure(err); ok {
+				reportArtifactFailureBestEffort(
+					ctx,
+					log,
+					cp,
+					cfg.WorkerID,
+					t,
+					artifactFailure,
+				)
 			}
 			failureClass := ""
 			var fErr *failure.Failure
 			if errors.As(err, &fErr) {
 				failureClass = string(fErr.Class)
 			}
-
-			// Best-effort report failure.
-			_, _ = cp.ReportTaskResult(ctx, &grpcpb.ReportTaskResultRequest{
-				WorkerId:     cfg.WorkerID,
-				TaskId:       t.TaskId,
-				RunId:        t.RunId,
-				AttemptId:    t.AttemptId,
-				FencingToken: t.FencingToken,
-				Status:       "FAILED",
-				ErrorMessage: err.Error(),
-				FailureClass: failureClass,
-			})
-			log.Error("task failed", slog.String("task_id", t.TaskId), slog.String("err", err.Error()))
+			reportErr := reportResultWithRetry(
+				ctx,
+				log,
+				cp,
+				&grpcpb.ReportTaskResultRequest{
+					WorkerId:     cfg.WorkerID,
+					BootId:       workerInstanceID,
+					TaskId:       t.TaskId,
+					RunId:        t.RunId,
+					AttemptId:    t.AttemptId,
+					FencingToken: t.FencingToken,
+					Status:       "FAILED",
+					ErrorMessage: err.Error(),
+					FailureClass: failureClass,
+				},
+			)
+			if reportErr != nil {
+				log.Warn(
+					"failed to report task failure",
+					slog.String("task_id", t.TaskId),
+					slog.String("err", reportErr.Error()),
+				)
+			}
+			log.Error(
+				"task failed",
+				slog.String("task_id", t.TaskId),
+				slog.String("err", err.Error()),
+			)
 			continue
 		}
 	}
@@ -910,8 +966,24 @@ func executeTaskBody(ctx context.Context, log *slog.Logger, cp grpcpb.ControlPla
 				"verification_method": record.VerificationMethod,
 			}
 			multipartObserver := func(eventCtx context.Context, event s3io.MultipartEvent) error {
-				fields, _ := json.Marshal(map[string]any{"event": event.Event, "file_index": event.FileIndex, "object_key": event.ObjectKey, "provider_upload_id": event.ProviderUploadID, "sha256": event.SHA256, "size": event.Size, "error_class": event.ErrorClass})
-				_, err := cp.ReportTaskProgress(eventCtx, &grpcpb.ReportTaskProgressRequest{WorkerId: workerID, TaskId: t.TaskId, RunId: t.RunId, AttemptId: t.AttemptId, FencingToken: t.FencingToken, Message: "MULTIPART_LIFECYCLE", FieldsJson: string(fields)})
+				_, err := cp.ReportMultipartLifecycle(
+					eventCtx,
+					&grpcpb.ReportMultipartLifecycleRequest{
+						WorkerId:         workerID,
+						RunId:            t.RunId,
+						TaskId:           t.TaskId,
+						AttemptId:        t.AttemptId,
+						FencingToken:     t.FencingToken,
+						Event:            event.Event,
+						FileIndex:        int32(event.FileIndex),
+						ObjectKey:        event.ObjectKey,
+						ProviderUploadId: event.ProviderUploadID,
+						Sha256:           event.SHA256,
+						Size:             event.Size,
+						ErrorClass:       event.ErrorClass,
+						ErrorMessage:     event.ErrorMessage,
+					},
+				)
 				return taskCanceledErrorFromRPC(err)
 			}
 			upRes, err := u.UploadFileVerifiedTracked(uploadCtx, objectKeys[idx], path, meta, record.ByteSize, record.Sha256, idx, multipartObserver)

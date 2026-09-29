@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v7.35.1
-// source: controlplane.proto
+// source: proto/controlplane.proto
 
 package grpcpb
 
@@ -33,7 +33,7 @@ type EnrollWorkerRequest struct {
 
 func (x *EnrollWorkerRequest) Reset() {
 	*x = EnrollWorkerRequest{}
-	mi := &file_controlplane_proto_msgTypes[0]
+	mi := &file_proto_controlplane_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -45,7 +45,7 @@ func (x *EnrollWorkerRequest) String() string {
 func (*EnrollWorkerRequest) ProtoMessage() {}
 
 func (x *EnrollWorkerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[0]
+	mi := &file_proto_controlplane_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -58,7 +58,7 @@ func (x *EnrollWorkerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollWorkerRequest.ProtoReflect.Descriptor instead.
 func (*EnrollWorkerRequest) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{0}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *EnrollWorkerRequest) GetEnrollmentToken() string {
@@ -102,7 +102,7 @@ type EnrollWorkerResponse struct {
 
 func (x *EnrollWorkerResponse) Reset() {
 	*x = EnrollWorkerResponse{}
-	mi := &file_controlplane_proto_msgTypes[1]
+	mi := &file_proto_controlplane_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -114,7 +114,7 @@ func (x *EnrollWorkerResponse) String() string {
 func (*EnrollWorkerResponse) ProtoMessage() {}
 
 func (x *EnrollWorkerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[1]
+	mi := &file_proto_controlplane_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -127,7 +127,7 @@ func (x *EnrollWorkerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollWorkerResponse.ProtoReflect.Descriptor instead.
 func (*EnrollWorkerResponse) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{1}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *EnrollWorkerResponse) GetWorkerId() string {
@@ -175,7 +175,7 @@ type RenewWorkerCertificateRequest struct {
 
 func (x *RenewWorkerCertificateRequest) Reset() {
 	*x = RenewWorkerCertificateRequest{}
-	mi := &file_controlplane_proto_msgTypes[2]
+	mi := &file_proto_controlplane_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -187,7 +187,7 @@ func (x *RenewWorkerCertificateRequest) String() string {
 func (*RenewWorkerCertificateRequest) ProtoMessage() {}
 
 func (x *RenewWorkerCertificateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[2]
+	mi := &file_proto_controlplane_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -200,7 +200,7 @@ func (x *RenewWorkerCertificateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewWorkerCertificateRequest.ProtoReflect.Descriptor instead.
 func (*RenewWorkerCertificateRequest) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{2}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *RenewWorkerCertificateRequest) GetWorkerId() string {
@@ -227,7 +227,7 @@ type RenewWorkerCertificateResponse struct {
 
 func (x *RenewWorkerCertificateResponse) Reset() {
 	*x = RenewWorkerCertificateResponse{}
-	mi := &file_controlplane_proto_msgTypes[3]
+	mi := &file_proto_controlplane_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -239,7 +239,7 @@ func (x *RenewWorkerCertificateResponse) String() string {
 func (*RenewWorkerCertificateResponse) ProtoMessage() {}
 
 func (x *RenewWorkerCertificateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[3]
+	mi := &file_proto_controlplane_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -252,7 +252,7 @@ func (x *RenewWorkerCertificateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewWorkerCertificateResponse.ProtoReflect.Descriptor instead.
 func (*RenewWorkerCertificateResponse) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{3}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *RenewWorkerCertificateResponse) GetCertificatePem() string {
@@ -282,7 +282,7 @@ type GetTaskCredentialsRequest struct {
 
 func (x *GetTaskCredentialsRequest) Reset() {
 	*x = GetTaskCredentialsRequest{}
-	mi := &file_controlplane_proto_msgTypes[4]
+	mi := &file_proto_controlplane_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -294,7 +294,7 @@ func (x *GetTaskCredentialsRequest) String() string {
 func (*GetTaskCredentialsRequest) ProtoMessage() {}
 
 func (x *GetTaskCredentialsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[4]
+	mi := &file_proto_controlplane_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -307,7 +307,7 @@ func (x *GetTaskCredentialsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetTaskCredentialsRequest.ProtoReflect.Descriptor instead.
 func (*GetTaskCredentialsRequest) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{4}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *GetTaskCredentialsRequest) GetWorkerId() string {
@@ -358,7 +358,7 @@ type GetTaskCredentialsResponse struct {
 
 func (x *GetTaskCredentialsResponse) Reset() {
 	*x = GetTaskCredentialsResponse{}
-	mi := &file_controlplane_proto_msgTypes[5]
+	mi := &file_proto_controlplane_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -370,7 +370,7 @@ func (x *GetTaskCredentialsResponse) String() string {
 func (*GetTaskCredentialsResponse) ProtoMessage() {}
 
 func (x *GetTaskCredentialsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[5]
+	mi := &file_proto_controlplane_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -383,7 +383,7 @@ func (x *GetTaskCredentialsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetTaskCredentialsResponse.ProtoReflect.Descriptor instead.
 func (*GetTaskCredentialsResponse) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{5}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *GetTaskCredentialsResponse) GetSourceDsn() string {
@@ -436,7 +436,7 @@ type RegisterWorkerRequest struct {
 
 func (x *RegisterWorkerRequest) Reset() {
 	*x = RegisterWorkerRequest{}
-	mi := &file_controlplane_proto_msgTypes[6]
+	mi := &file_proto_controlplane_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -448,7 +448,7 @@ func (x *RegisterWorkerRequest) String() string {
 func (*RegisterWorkerRequest) ProtoMessage() {}
 
 func (x *RegisterWorkerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[6]
+	mi := &file_proto_controlplane_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -461,7 +461,7 @@ func (x *RegisterWorkerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterWorkerRequest.ProtoReflect.Descriptor instead.
 func (*RegisterWorkerRequest) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{6}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *RegisterWorkerRequest) GetWorkerId() string {
@@ -523,7 +523,7 @@ type RegisterWorkerResponse struct {
 
 func (x *RegisterWorkerResponse) Reset() {
 	*x = RegisterWorkerResponse{}
-	mi := &file_controlplane_proto_msgTypes[7]
+	mi := &file_proto_controlplane_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -535,7 +535,7 @@ func (x *RegisterWorkerResponse) String() string {
 func (*RegisterWorkerResponse) ProtoMessage() {}
 
 func (x *RegisterWorkerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[7]
+	mi := &file_proto_controlplane_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -548,7 +548,7 @@ func (x *RegisterWorkerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterWorkerResponse.ProtoReflect.Descriptor instead.
 func (*RegisterWorkerResponse) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{7}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *RegisterWorkerResponse) GetWorkerId() string {
@@ -576,7 +576,7 @@ type HeartbeatRequest struct {
 
 func (x *HeartbeatRequest) Reset() {
 	*x = HeartbeatRequest{}
-	mi := &file_controlplane_proto_msgTypes[8]
+	mi := &file_proto_controlplane_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -588,7 +588,7 @@ func (x *HeartbeatRequest) String() string {
 func (*HeartbeatRequest) ProtoMessage() {}
 
 func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[8]
+	mi := &file_proto_controlplane_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -601,7 +601,7 @@ func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatRequest.ProtoReflect.Descriptor instead.
 func (*HeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{8}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *HeartbeatRequest) GetWorkerId() string {
@@ -633,7 +633,7 @@ type HeartbeatResponse struct {
 
 func (x *HeartbeatResponse) Reset() {
 	*x = HeartbeatResponse{}
-	mi := &file_controlplane_proto_msgTypes[9]
+	mi := &file_proto_controlplane_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -645,7 +645,7 @@ func (x *HeartbeatResponse) String() string {
 func (*HeartbeatResponse) ProtoMessage() {}
 
 func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[9]
+	mi := &file_proto_controlplane_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -658,7 +658,7 @@ func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*HeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{9}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{9}
 }
 
 type RequestTaskRequest struct {
@@ -675,7 +675,7 @@ type RequestTaskRequest struct {
 
 func (x *RequestTaskRequest) Reset() {
 	*x = RequestTaskRequest{}
-	mi := &file_controlplane_proto_msgTypes[10]
+	mi := &file_proto_controlplane_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -687,7 +687,7 @@ func (x *RequestTaskRequest) String() string {
 func (*RequestTaskRequest) ProtoMessage() {}
 
 func (x *RequestTaskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[10]
+	mi := &file_proto_controlplane_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -700,7 +700,7 @@ func (x *RequestTaskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestTaskRequest.ProtoReflect.Descriptor instead.
 func (*RequestTaskRequest) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{10}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *RequestTaskRequest) GetWorkerId() string {
@@ -740,7 +740,7 @@ type RequestTaskResponse struct {
 
 func (x *RequestTaskResponse) Reset() {
 	*x = RequestTaskResponse{}
-	mi := &file_controlplane_proto_msgTypes[11]
+	mi := &file_proto_controlplane_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -752,7 +752,7 @@ func (x *RequestTaskResponse) String() string {
 func (*RequestTaskResponse) ProtoMessage() {}
 
 func (x *RequestTaskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[11]
+	mi := &file_proto_controlplane_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -765,7 +765,7 @@ func (x *RequestTaskResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestTaskResponse.ProtoReflect.Descriptor instead.
 func (*RequestTaskResponse) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{11}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *RequestTaskResponse) GetTask() *TaskAssignment {
@@ -806,7 +806,7 @@ type TaskAssignment struct {
 
 func (x *TaskAssignment) Reset() {
 	*x = TaskAssignment{}
-	mi := &file_controlplane_proto_msgTypes[12]
+	mi := &file_proto_controlplane_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -818,7 +818,7 @@ func (x *TaskAssignment) String() string {
 func (*TaskAssignment) ProtoMessage() {}
 
 func (x *TaskAssignment) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[12]
+	mi := &file_proto_controlplane_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -831,7 +831,7 @@ func (x *TaskAssignment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskAssignment.ProtoReflect.Descriptor instead.
 func (*TaskAssignment) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{12}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *TaskAssignment) GetTaskId() string {
@@ -987,7 +987,7 @@ type ReportTaskProgressRequest struct {
 
 func (x *ReportTaskProgressRequest) Reset() {
 	*x = ReportTaskProgressRequest{}
-	mi := &file_controlplane_proto_msgTypes[13]
+	mi := &file_proto_controlplane_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -999,7 +999,7 @@ func (x *ReportTaskProgressRequest) String() string {
 func (*ReportTaskProgressRequest) ProtoMessage() {}
 
 func (x *ReportTaskProgressRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[13]
+	mi := &file_proto_controlplane_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1012,7 +1012,7 @@ func (x *ReportTaskProgressRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportTaskProgressRequest.ProtoReflect.Descriptor instead.
 func (*ReportTaskProgressRequest) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{13}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ReportTaskProgressRequest) GetWorkerId() string {
@@ -1107,7 +1107,7 @@ type ReportTaskProgressResponse struct {
 
 func (x *ReportTaskProgressResponse) Reset() {
 	*x = ReportTaskProgressResponse{}
-	mi := &file_controlplane_proto_msgTypes[14]
+	mi := &file_proto_controlplane_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1119,7 +1119,7 @@ func (x *ReportTaskProgressResponse) String() string {
 func (*ReportTaskProgressResponse) ProtoMessage() {}
 
 func (x *ReportTaskProgressResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[14]
+	mi := &file_proto_controlplane_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1132,7 +1132,7 @@ func (x *ReportTaskProgressResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportTaskProgressResponse.ProtoReflect.Descriptor instead.
 func (*ReportTaskProgressResponse) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{14}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{14}
 }
 
 type ReportTaskResultRequest struct {
@@ -1159,7 +1159,7 @@ type ReportTaskResultRequest struct {
 
 func (x *ReportTaskResultRequest) Reset() {
 	*x = ReportTaskResultRequest{}
-	mi := &file_controlplane_proto_msgTypes[15]
+	mi := &file_proto_controlplane_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1171,7 +1171,7 @@ func (x *ReportTaskResultRequest) String() string {
 func (*ReportTaskResultRequest) ProtoMessage() {}
 
 func (x *ReportTaskResultRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[15]
+	mi := &file_proto_controlplane_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1184,7 +1184,7 @@ func (x *ReportTaskResultRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportTaskResultRequest.ProtoReflect.Descriptor instead.
 func (*ReportTaskResultRequest) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{15}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ReportTaskResultRequest) GetWorkerId() string {
@@ -1327,7 +1327,7 @@ type ArtifactIntegrity struct {
 
 func (x *ArtifactIntegrity) Reset() {
 	*x = ArtifactIntegrity{}
-	mi := &file_controlplane_proto_msgTypes[16]
+	mi := &file_proto_controlplane_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1339,7 +1339,7 @@ func (x *ArtifactIntegrity) String() string {
 func (*ArtifactIntegrity) ProtoMessage() {}
 
 func (x *ArtifactIntegrity) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[16]
+	mi := &file_proto_controlplane_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1352,7 +1352,7 @@ func (x *ArtifactIntegrity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactIntegrity.ProtoReflect.Descriptor instead.
 func (*ArtifactIntegrity) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{16}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ArtifactIntegrity) GetObjectKey() string {
@@ -1480,7 +1480,7 @@ type RenewTaskLeaseRequest struct {
 
 func (x *RenewTaskLeaseRequest) Reset() {
 	*x = RenewTaskLeaseRequest{}
-	mi := &file_controlplane_proto_msgTypes[17]
+	mi := &file_proto_controlplane_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1492,7 +1492,7 @@ func (x *RenewTaskLeaseRequest) String() string {
 func (*RenewTaskLeaseRequest) ProtoMessage() {}
 
 func (x *RenewTaskLeaseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[17]
+	mi := &file_proto_controlplane_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1505,7 +1505,7 @@ func (x *RenewTaskLeaseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewTaskLeaseRequest.ProtoReflect.Descriptor instead.
 func (*RenewTaskLeaseRequest) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{17}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *RenewTaskLeaseRequest) GetWorkerId() string {
@@ -1552,7 +1552,7 @@ type RenewTaskLeaseResponse struct {
 
 func (x *RenewTaskLeaseResponse) Reset() {
 	*x = RenewTaskLeaseResponse{}
-	mi := &file_controlplane_proto_msgTypes[18]
+	mi := &file_proto_controlplane_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1564,7 +1564,7 @@ func (x *RenewTaskLeaseResponse) String() string {
 func (*RenewTaskLeaseResponse) ProtoMessage() {}
 
 func (x *RenewTaskLeaseResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[18]
+	mi := &file_proto_controlplane_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1577,7 +1577,7 @@ func (x *RenewTaskLeaseResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewTaskLeaseResponse.ProtoReflect.Descriptor instead.
 func (*RenewTaskLeaseResponse) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{18}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *RenewTaskLeaseResponse) GetLeaseDeadlineUnixMs() int64 {
@@ -1600,7 +1600,7 @@ type AcquireUploadCapacityRequest struct {
 
 func (x *AcquireUploadCapacityRequest) Reset() {
 	*x = AcquireUploadCapacityRequest{}
-	mi := &file_controlplane_proto_msgTypes[19]
+	mi := &file_proto_controlplane_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1612,7 +1612,7 @@ func (x *AcquireUploadCapacityRequest) String() string {
 func (*AcquireUploadCapacityRequest) ProtoMessage() {}
 
 func (x *AcquireUploadCapacityRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[19]
+	mi := &file_proto_controlplane_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1625,7 +1625,7 @@ func (x *AcquireUploadCapacityRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AcquireUploadCapacityRequest.ProtoReflect.Descriptor instead.
 func (*AcquireUploadCapacityRequest) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{19}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *AcquireUploadCapacityRequest) GetWorkerId() string {
@@ -1676,7 +1676,7 @@ type AcquireUploadCapacityResponse struct {
 
 func (x *AcquireUploadCapacityResponse) Reset() {
 	*x = AcquireUploadCapacityResponse{}
-	mi := &file_controlplane_proto_msgTypes[20]
+	mi := &file_proto_controlplane_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1688,7 +1688,7 @@ func (x *AcquireUploadCapacityResponse) String() string {
 func (*AcquireUploadCapacityResponse) ProtoMessage() {}
 
 func (x *AcquireUploadCapacityResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[20]
+	mi := &file_proto_controlplane_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1701,7 +1701,7 @@ func (x *AcquireUploadCapacityResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AcquireUploadCapacityResponse.ProtoReflect.Descriptor instead.
 func (*AcquireUploadCapacityResponse) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{20}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *AcquireUploadCapacityResponse) GetAcquired() bool {
@@ -1753,7 +1753,7 @@ type ReleaseUploadCapacityRequest struct {
 
 func (x *ReleaseUploadCapacityRequest) Reset() {
 	*x = ReleaseUploadCapacityRequest{}
-	mi := &file_controlplane_proto_msgTypes[21]
+	mi := &file_proto_controlplane_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1765,7 +1765,7 @@ func (x *ReleaseUploadCapacityRequest) String() string {
 func (*ReleaseUploadCapacityRequest) ProtoMessage() {}
 
 func (x *ReleaseUploadCapacityRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[21]
+	mi := &file_proto_controlplane_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1778,7 +1778,7 @@ func (x *ReleaseUploadCapacityRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseUploadCapacityRequest.ProtoReflect.Descriptor instead.
 func (*ReleaseUploadCapacityRequest) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{21}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ReleaseUploadCapacityRequest) GetWorkerId() string {
@@ -1831,7 +1831,7 @@ type ReleaseUploadCapacityResponse struct {
 
 func (x *ReleaseUploadCapacityResponse) Reset() {
 	*x = ReleaseUploadCapacityResponse{}
-	mi := &file_controlplane_proto_msgTypes[22]
+	mi := &file_proto_controlplane_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1843,7 +1843,7 @@ func (x *ReleaseUploadCapacityResponse) String() string {
 func (*ReleaseUploadCapacityResponse) ProtoMessage() {}
 
 func (x *ReleaseUploadCapacityResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[22]
+	mi := &file_proto_controlplane_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1856,7 +1856,7 @@ func (x *ReleaseUploadCapacityResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseUploadCapacityResponse.ProtoReflect.Descriptor instead.
 func (*ReleaseUploadCapacityResponse) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{22}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{22}
 }
 
 type ReportTaskResultResponse struct {
@@ -1869,7 +1869,7 @@ type ReportTaskResultResponse struct {
 
 func (x *ReportTaskResultResponse) Reset() {
 	*x = ReportTaskResultResponse{}
-	mi := &file_controlplane_proto_msgTypes[23]
+	mi := &file_proto_controlplane_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1881,7 +1881,7 @@ func (x *ReportTaskResultResponse) String() string {
 func (*ReportTaskResultResponse) ProtoMessage() {}
 
 func (x *ReportTaskResultResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_proto_msgTypes[23]
+	mi := &file_proto_controlplane_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1894,7 +1894,7 @@ func (x *ReportTaskResultResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportTaskResultResponse.ProtoReflect.Descriptor instead.
 func (*ReportTaskResultResponse) Descriptor() ([]byte, []int) {
-	return file_controlplane_proto_rawDescGZIP(), []int{23}
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ReportTaskResultResponse) GetAccepted() bool {
@@ -1911,11 +1911,195 @@ func (x *ReportTaskResultResponse) GetMessage() string {
 	return ""
 }
 
-var File_controlplane_proto protoreflect.FileDescriptor
+type ReportMultipartLifecycleRequest struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	WorkerId         string                 `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	RunId            string                 `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	TaskId           string                 `protobuf:"bytes,3,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	AttemptId        string                 `protobuf:"bytes,4,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
+	FencingToken     string                 `protobuf:"bytes,5,opt,name=fencing_token,json=fencingToken,proto3" json:"fencing_token,omitempty"`
+	BootId           string                 `protobuf:"bytes,6,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
+	Event            string                 `protobuf:"bytes,10,opt,name=event,proto3" json:"event,omitempty"`
+	FileIndex        int32                  `protobuf:"varint,11,opt,name=file_index,json=fileIndex,proto3" json:"file_index,omitempty"`
+	ObjectKey        string                 `protobuf:"bytes,12,opt,name=object_key,json=objectKey,proto3" json:"object_key,omitempty"`
+	ProviderUploadId string                 `protobuf:"bytes,13,opt,name=provider_upload_id,json=providerUploadId,proto3" json:"provider_upload_id,omitempty"`
+	Sha256           string                 `protobuf:"bytes,14,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	Size             int64                  `protobuf:"varint,15,opt,name=size,proto3" json:"size,omitempty"`
+	ErrorClass       string                 `protobuf:"bytes,16,opt,name=error_class,json=errorClass,proto3" json:"error_class,omitempty"`
+	ErrorMessage     string                 `protobuf:"bytes,17,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
 
-const file_controlplane_proto_rawDesc = "" +
+func (x *ReportMultipartLifecycleRequest) Reset() {
+	*x = ReportMultipartLifecycleRequest{}
+	mi := &file_proto_controlplane_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReportMultipartLifecycleRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReportMultipartLifecycleRequest) ProtoMessage() {}
+
+func (x *ReportMultipartLifecycleRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_controlplane_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReportMultipartLifecycleRequest.ProtoReflect.Descriptor instead.
+func (*ReportMultipartLifecycleRequest) Descriptor() ([]byte, []int) {
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *ReportMultipartLifecycleRequest) GetWorkerId() string {
+	if x != nil {
+		return x.WorkerId
+	}
+	return ""
+}
+
+func (x *ReportMultipartLifecycleRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *ReportMultipartLifecycleRequest) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *ReportMultipartLifecycleRequest) GetAttemptId() string {
+	if x != nil {
+		return x.AttemptId
+	}
+	return ""
+}
+
+func (x *ReportMultipartLifecycleRequest) GetFencingToken() string {
+	if x != nil {
+		return x.FencingToken
+	}
+	return ""
+}
+
+func (x *ReportMultipartLifecycleRequest) GetBootId() string {
+	if x != nil {
+		return x.BootId
+	}
+	return ""
+}
+
+func (x *ReportMultipartLifecycleRequest) GetEvent() string {
+	if x != nil {
+		return x.Event
+	}
+	return ""
+}
+
+func (x *ReportMultipartLifecycleRequest) GetFileIndex() int32 {
+	if x != nil {
+		return x.FileIndex
+	}
+	return 0
+}
+
+func (x *ReportMultipartLifecycleRequest) GetObjectKey() string {
+	if x != nil {
+		return x.ObjectKey
+	}
+	return ""
+}
+
+func (x *ReportMultipartLifecycleRequest) GetProviderUploadId() string {
+	if x != nil {
+		return x.ProviderUploadId
+	}
+	return ""
+}
+
+func (x *ReportMultipartLifecycleRequest) GetSha256() string {
+	if x != nil {
+		return x.Sha256
+	}
+	return ""
+}
+
+func (x *ReportMultipartLifecycleRequest) GetSize() int64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+func (x *ReportMultipartLifecycleRequest) GetErrorClass() string {
+	if x != nil {
+		return x.ErrorClass
+	}
+	return ""
+}
+
+func (x *ReportMultipartLifecycleRequest) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
+type ReportMultipartLifecycleResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReportMultipartLifecycleResponse) Reset() {
+	*x = ReportMultipartLifecycleResponse{}
+	mi := &file_proto_controlplane_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReportMultipartLifecycleResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReportMultipartLifecycleResponse) ProtoMessage() {}
+
+func (x *ReportMultipartLifecycleResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_controlplane_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReportMultipartLifecycleResponse.ProtoReflect.Descriptor instead.
+func (*ReportMultipartLifecycleResponse) Descriptor() ([]byte, []int) {
+	return file_proto_controlplane_proto_rawDescGZIP(), []int{25}
+}
+
+var File_proto_controlplane_proto protoreflect.FileDescriptor
+
+const file_proto_controlplane_proto_rawDesc = "" +
 	"\n" +
-	"\x12controlplane.proto\x12\n" +
+	"\x18proto/controlplane.proto\x12\n" +
 	"orabbit.v1\"\x89\x01\n" +
 	"\x13EnrollWorkerRequest\x12)\n" +
 	"\x10enrollment_token\x18\x01 \x01(\tR\x0fenrollmentToken\x12\x17\n" +
@@ -2092,7 +2276,28 @@ const file_controlplane_proto_rawDesc = "" +
 	"\x1dReleaseUploadCapacityResponse\"P\n" +
 	"\x18ReportTaskResultResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage2\xa3\b\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\xbf\x03\n" +
+	"\x1fReportMultipartLifecycleRequest\x12\x1b\n" +
+	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x15\n" +
+	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x17\n" +
+	"\atask_id\x18\x03 \x01(\tR\x06taskId\x12\x1d\n" +
+	"\n" +
+	"attempt_id\x18\x04 \x01(\tR\tattemptId\x12#\n" +
+	"\rfencing_token\x18\x05 \x01(\tR\ffencingToken\x12\x17\n" +
+	"\aboot_id\x18\x06 \x01(\tR\x06bootId\x12\x14\n" +
+	"\x05event\x18\n" +
+	" \x01(\tR\x05event\x12\x1d\n" +
+	"\n" +
+	"file_index\x18\v \x01(\x05R\tfileIndex\x12\x1d\n" +
+	"\n" +
+	"object_key\x18\f \x01(\tR\tobjectKey\x12,\n" +
+	"\x12provider_upload_id\x18\r \x01(\tR\x10providerUploadId\x12\x16\n" +
+	"\x06sha256\x18\x0e \x01(\tR\x06sha256\x12\x12\n" +
+	"\x04size\x18\x0f \x01(\x03R\x04size\x12\x1f\n" +
+	"\verror_class\x18\x10 \x01(\tR\n" +
+	"errorClass\x12#\n" +
+	"\rerror_message\x18\x11 \x01(\tR\ferrorMessage\"\"\n" +
+	" ReportMultipartLifecycleResponse2\x9a\t\n" +
 	"\fControlPlane\x12W\n" +
 	"\x0eRegisterWorker\x12!.orabbit.v1.RegisterWorkerRequest\x1a\".orabbit.v1.RegisterWorkerResponse\x12H\n" +
 	"\tHeartbeat\x12\x1c.orabbit.v1.HeartbeatRequest\x1a\x1d.orabbit.v1.HeartbeatResponse\x12N\n" +
@@ -2104,48 +2309,51 @@ const file_controlplane_proto_rawDesc = "" +
 	"\x10ReportTaskResult\x12#.orabbit.v1.ReportTaskResultRequest\x1a$.orabbit.v1.ReportTaskResultResponse\x12Q\n" +
 	"\fEnrollWorker\x12\x1f.orabbit.v1.EnrollWorkerRequest\x1a .orabbit.v1.EnrollWorkerResponse\x12o\n" +
 	"\x16RenewWorkerCertificate\x12).orabbit.v1.RenewWorkerCertificateRequest\x1a*.orabbit.v1.RenewWorkerCertificateResponse\x12c\n" +
-	"\x12GetTaskCredentials\x12%.orabbit.v1.GetTaskCredentialsRequest\x1a&.orabbit.v1.GetTaskCredentialsResponseB8Z6github.com/LevonGhukas/O_Rabbit/internal/grpcpb;grpcpbb\x06proto3"
+	"\x12GetTaskCredentials\x12%.orabbit.v1.GetTaskCredentialsRequest\x1a&.orabbit.v1.GetTaskCredentialsResponse\x12u\n" +
+	"\x18ReportMultipartLifecycle\x12+.orabbit.v1.ReportMultipartLifecycleRequest\x1a,.orabbit.v1.ReportMultipartLifecycleResponseB8Z6github.com/LevonGhukas/O_Rabbit/internal/grpcpb;grpcpbb\x06proto3"
 
 var (
-	file_controlplane_proto_rawDescOnce sync.Once
-	file_controlplane_proto_rawDescData []byte
+	file_proto_controlplane_proto_rawDescOnce sync.Once
+	file_proto_controlplane_proto_rawDescData []byte
 )
 
-func file_controlplane_proto_rawDescGZIP() []byte {
-	file_controlplane_proto_rawDescOnce.Do(func() {
-		file_controlplane_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_controlplane_proto_rawDesc), len(file_controlplane_proto_rawDesc)))
+func file_proto_controlplane_proto_rawDescGZIP() []byte {
+	file_proto_controlplane_proto_rawDescOnce.Do(func() {
+		file_proto_controlplane_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_controlplane_proto_rawDesc), len(file_proto_controlplane_proto_rawDesc)))
 	})
-	return file_controlplane_proto_rawDescData
+	return file_proto_controlplane_proto_rawDescData
 }
 
-var file_controlplane_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
-var file_controlplane_proto_goTypes = []any{
-	(*EnrollWorkerRequest)(nil),            // 0: orabbit.v1.EnrollWorkerRequest
-	(*EnrollWorkerResponse)(nil),           // 1: orabbit.v1.EnrollWorkerResponse
-	(*RenewWorkerCertificateRequest)(nil),  // 2: orabbit.v1.RenewWorkerCertificateRequest
-	(*RenewWorkerCertificateResponse)(nil), // 3: orabbit.v1.RenewWorkerCertificateResponse
-	(*GetTaskCredentialsRequest)(nil),      // 4: orabbit.v1.GetTaskCredentialsRequest
-	(*GetTaskCredentialsResponse)(nil),     // 5: orabbit.v1.GetTaskCredentialsResponse
-	(*RegisterWorkerRequest)(nil),          // 6: orabbit.v1.RegisterWorkerRequest
-	(*RegisterWorkerResponse)(nil),         // 7: orabbit.v1.RegisterWorkerResponse
-	(*HeartbeatRequest)(nil),               // 8: orabbit.v1.HeartbeatRequest
-	(*HeartbeatResponse)(nil),              // 9: orabbit.v1.HeartbeatResponse
-	(*RequestTaskRequest)(nil),             // 10: orabbit.v1.RequestTaskRequest
-	(*RequestTaskResponse)(nil),            // 11: orabbit.v1.RequestTaskResponse
-	(*TaskAssignment)(nil),                 // 12: orabbit.v1.TaskAssignment
-	(*ReportTaskProgressRequest)(nil),      // 13: orabbit.v1.ReportTaskProgressRequest
-	(*ReportTaskProgressResponse)(nil),     // 14: orabbit.v1.ReportTaskProgressResponse
-	(*ReportTaskResultRequest)(nil),        // 15: orabbit.v1.ReportTaskResultRequest
-	(*ArtifactIntegrity)(nil),              // 16: orabbit.v1.ArtifactIntegrity
-	(*RenewTaskLeaseRequest)(nil),          // 17: orabbit.v1.RenewTaskLeaseRequest
-	(*RenewTaskLeaseResponse)(nil),         // 18: orabbit.v1.RenewTaskLeaseResponse
-	(*AcquireUploadCapacityRequest)(nil),   // 19: orabbit.v1.AcquireUploadCapacityRequest
-	(*AcquireUploadCapacityResponse)(nil),  // 20: orabbit.v1.AcquireUploadCapacityResponse
-	(*ReleaseUploadCapacityRequest)(nil),   // 21: orabbit.v1.ReleaseUploadCapacityRequest
-	(*ReleaseUploadCapacityResponse)(nil),  // 22: orabbit.v1.ReleaseUploadCapacityResponse
-	(*ReportTaskResultResponse)(nil),       // 23: orabbit.v1.ReportTaskResultResponse
+var file_proto_controlplane_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
+var file_proto_controlplane_proto_goTypes = []any{
+	(*EnrollWorkerRequest)(nil),              // 0: orabbit.v1.EnrollWorkerRequest
+	(*EnrollWorkerResponse)(nil),             // 1: orabbit.v1.EnrollWorkerResponse
+	(*RenewWorkerCertificateRequest)(nil),    // 2: orabbit.v1.RenewWorkerCertificateRequest
+	(*RenewWorkerCertificateResponse)(nil),   // 3: orabbit.v1.RenewWorkerCertificateResponse
+	(*GetTaskCredentialsRequest)(nil),        // 4: orabbit.v1.GetTaskCredentialsRequest
+	(*GetTaskCredentialsResponse)(nil),       // 5: orabbit.v1.GetTaskCredentialsResponse
+	(*RegisterWorkerRequest)(nil),            // 6: orabbit.v1.RegisterWorkerRequest
+	(*RegisterWorkerResponse)(nil),           // 7: orabbit.v1.RegisterWorkerResponse
+	(*HeartbeatRequest)(nil),                 // 8: orabbit.v1.HeartbeatRequest
+	(*HeartbeatResponse)(nil),                // 9: orabbit.v1.HeartbeatResponse
+	(*RequestTaskRequest)(nil),               // 10: orabbit.v1.RequestTaskRequest
+	(*RequestTaskResponse)(nil),              // 11: orabbit.v1.RequestTaskResponse
+	(*TaskAssignment)(nil),                   // 12: orabbit.v1.TaskAssignment
+	(*ReportTaskProgressRequest)(nil),        // 13: orabbit.v1.ReportTaskProgressRequest
+	(*ReportTaskProgressResponse)(nil),       // 14: orabbit.v1.ReportTaskProgressResponse
+	(*ReportTaskResultRequest)(nil),          // 15: orabbit.v1.ReportTaskResultRequest
+	(*ArtifactIntegrity)(nil),                // 16: orabbit.v1.ArtifactIntegrity
+	(*RenewTaskLeaseRequest)(nil),            // 17: orabbit.v1.RenewTaskLeaseRequest
+	(*RenewTaskLeaseResponse)(nil),           // 18: orabbit.v1.RenewTaskLeaseResponse
+	(*AcquireUploadCapacityRequest)(nil),     // 19: orabbit.v1.AcquireUploadCapacityRequest
+	(*AcquireUploadCapacityResponse)(nil),    // 20: orabbit.v1.AcquireUploadCapacityResponse
+	(*ReleaseUploadCapacityRequest)(nil),     // 21: orabbit.v1.ReleaseUploadCapacityRequest
+	(*ReleaseUploadCapacityResponse)(nil),    // 22: orabbit.v1.ReleaseUploadCapacityResponse
+	(*ReportTaskResultResponse)(nil),         // 23: orabbit.v1.ReportTaskResultResponse
+	(*ReportMultipartLifecycleRequest)(nil),  // 24: orabbit.v1.ReportMultipartLifecycleRequest
+	(*ReportMultipartLifecycleResponse)(nil), // 25: orabbit.v1.ReportMultipartLifecycleResponse
 }
-var file_controlplane_proto_depIdxs = []int32{
+var file_proto_controlplane_proto_depIdxs = []int32{
 	12, // 0: orabbit.v1.RequestTaskResponse.task:type_name -> orabbit.v1.TaskAssignment
 	16, // 1: orabbit.v1.ReportTaskResultRequest.artifacts:type_name -> orabbit.v1.ArtifactIntegrity
 	6,  // 2: orabbit.v1.ControlPlane.RegisterWorker:input_type -> orabbit.v1.RegisterWorkerRequest
@@ -2159,44 +2367,46 @@ var file_controlplane_proto_depIdxs = []int32{
 	0,  // 10: orabbit.v1.ControlPlane.EnrollWorker:input_type -> orabbit.v1.EnrollWorkerRequest
 	2,  // 11: orabbit.v1.ControlPlane.RenewWorkerCertificate:input_type -> orabbit.v1.RenewWorkerCertificateRequest
 	4,  // 12: orabbit.v1.ControlPlane.GetTaskCredentials:input_type -> orabbit.v1.GetTaskCredentialsRequest
-	7,  // 13: orabbit.v1.ControlPlane.RegisterWorker:output_type -> orabbit.v1.RegisterWorkerResponse
-	9,  // 14: orabbit.v1.ControlPlane.Heartbeat:output_type -> orabbit.v1.HeartbeatResponse
-	11, // 15: orabbit.v1.ControlPlane.RequestTask:output_type -> orabbit.v1.RequestTaskResponse
-	18, // 16: orabbit.v1.ControlPlane.RenewTaskLease:output_type -> orabbit.v1.RenewTaskLeaseResponse
-	20, // 17: orabbit.v1.ControlPlane.AcquireUploadCapacity:output_type -> orabbit.v1.AcquireUploadCapacityResponse
-	22, // 18: orabbit.v1.ControlPlane.ReleaseUploadCapacity:output_type -> orabbit.v1.ReleaseUploadCapacityResponse
-	14, // 19: orabbit.v1.ControlPlane.ReportTaskProgress:output_type -> orabbit.v1.ReportTaskProgressResponse
-	23, // 20: orabbit.v1.ControlPlane.ReportTaskResult:output_type -> orabbit.v1.ReportTaskResultResponse
-	1,  // 21: orabbit.v1.ControlPlane.EnrollWorker:output_type -> orabbit.v1.EnrollWorkerResponse
-	3,  // 22: orabbit.v1.ControlPlane.RenewWorkerCertificate:output_type -> orabbit.v1.RenewWorkerCertificateResponse
-	5,  // 23: orabbit.v1.ControlPlane.GetTaskCredentials:output_type -> orabbit.v1.GetTaskCredentialsResponse
-	13, // [13:24] is the sub-list for method output_type
-	2,  // [2:13] is the sub-list for method input_type
+	24, // 13: orabbit.v1.ControlPlane.ReportMultipartLifecycle:input_type -> orabbit.v1.ReportMultipartLifecycleRequest
+	7,  // 14: orabbit.v1.ControlPlane.RegisterWorker:output_type -> orabbit.v1.RegisterWorkerResponse
+	9,  // 15: orabbit.v1.ControlPlane.Heartbeat:output_type -> orabbit.v1.HeartbeatResponse
+	11, // 16: orabbit.v1.ControlPlane.RequestTask:output_type -> orabbit.v1.RequestTaskResponse
+	18, // 17: orabbit.v1.ControlPlane.RenewTaskLease:output_type -> orabbit.v1.RenewTaskLeaseResponse
+	20, // 18: orabbit.v1.ControlPlane.AcquireUploadCapacity:output_type -> orabbit.v1.AcquireUploadCapacityResponse
+	22, // 19: orabbit.v1.ControlPlane.ReleaseUploadCapacity:output_type -> orabbit.v1.ReleaseUploadCapacityResponse
+	14, // 20: orabbit.v1.ControlPlane.ReportTaskProgress:output_type -> orabbit.v1.ReportTaskProgressResponse
+	23, // 21: orabbit.v1.ControlPlane.ReportTaskResult:output_type -> orabbit.v1.ReportTaskResultResponse
+	1,  // 22: orabbit.v1.ControlPlane.EnrollWorker:output_type -> orabbit.v1.EnrollWorkerResponse
+	3,  // 23: orabbit.v1.ControlPlane.RenewWorkerCertificate:output_type -> orabbit.v1.RenewWorkerCertificateResponse
+	5,  // 24: orabbit.v1.ControlPlane.GetTaskCredentials:output_type -> orabbit.v1.GetTaskCredentialsResponse
+	25, // 25: orabbit.v1.ControlPlane.ReportMultipartLifecycle:output_type -> orabbit.v1.ReportMultipartLifecycleResponse
+	14, // [14:26] is the sub-list for method output_type
+	2,  // [2:14] is the sub-list for method input_type
 	2,  // [2:2] is the sub-list for extension type_name
 	2,  // [2:2] is the sub-list for extension extendee
 	0,  // [0:2] is the sub-list for field type_name
 }
 
-func init() { file_controlplane_proto_init() }
-func file_controlplane_proto_init() {
-	if File_controlplane_proto != nil {
+func init() { file_proto_controlplane_proto_init() }
+func file_proto_controlplane_proto_init() {
+	if File_proto_controlplane_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_controlplane_proto_rawDesc), len(file_controlplane_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_controlplane_proto_rawDesc), len(file_proto_controlplane_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   24,
+			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_controlplane_proto_goTypes,
-		DependencyIndexes: file_controlplane_proto_depIdxs,
-		MessageInfos:      file_controlplane_proto_msgTypes,
+		GoTypes:           file_proto_controlplane_proto_goTypes,
+		DependencyIndexes: file_proto_controlplane_proto_depIdxs,
+		MessageInfos:      file_proto_controlplane_proto_msgTypes,
 	}.Build()
-	File_controlplane_proto = out.File
-	file_controlplane_proto_goTypes = nil
-	file_controlplane_proto_depIdxs = nil
+	File_proto_controlplane_proto = out.File
+	file_proto_controlplane_proto_goTypes = nil
+	file_proto_controlplane_proto_depIdxs = nil
 }
