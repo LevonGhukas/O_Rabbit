@@ -243,6 +243,7 @@ func run() int {
 	httpErr := make(chan error, 1)
 	httpSrv := httpapi.NewServer(log, st, bc, k, httpapi.StatusInfo{PID: os.Getpid(), HTTPAddr: cfg.HTTPAddr, GRPCAddr: cfg.GRPCAddr, DBPath: processLock.Identity}, cfg.HTTPAuthToken)
 	httpSrv.SetLeadershipGuard(leadership)
+	httpSrv.SetRemoteOpsToken(cfg.RemoteOpsAuthToken)
 	httpSrv.SetOperability(cfg.TaskMaxAttempts, grpcSrv)
 	// The servers stop when serveCtx ends: on shutdown, on lost leadership,
 	// or when the other server fails.
@@ -265,6 +266,7 @@ func run() int {
 		slog.Bool("worker_auth", strings.TrimSpace(cfg.WorkerAuthToken) != ""),
 		slog.Bool("insecure", cfg.Insecure),
 		slog.Bool("worker_identity", !cfg.Insecure),
+		slog.Bool("remote_ops", cfg.RemoteOpsAuthToken != ""),
 		slog.String("iceberg_registration", "persisted-run-snapshot"),
 		slog.String("ice_binary", cfg.IceBin),
 		slog.String("log_level", cfg.LogLevel),

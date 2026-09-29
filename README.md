@@ -197,7 +197,8 @@ split-worker Compose file translates its other connection settings into flags.
 | `ORABBIT_DB_PATH` | `./master.sqlite` | SQLite database path |
 | `ORABBIT_HTTP_ADDR` | `127.0.0.1:9100` | HTTP listen address |
 | `ORABBIT_GRPC_ADDR` | `127.0.0.1:9102` | gRPC listen address |
-| `ORABBIT_HTTP_AUTH_TOKEN` | empty | Bearer token for known API and SSE routes |
+| `ORABBIT_HTTP_AUTH_TOKEN` | empty | Bearer token for the HTTP API and SSE |
+| `ORABBIT_REMOTE_OPS_AUTH_TOKEN` | empty | Enables the remote operations API (SSH, Docker, deployments) and is the only token it accepts; must differ from the API token. Empty disables it |
 | `ORABBIT_WORKER_AUTH_TOKEN` | empty | Shared bearer token for worker control-plane RPCs; required for non-loopback gRPC |
 | `ORABBIT_MASTER_KEY` | required | Base64 or hex encoded 32-byte AES-256 key |
 | `ORABBIT_ICE_BIN` | `ice` | `ice` CLI executable used by `engine=ice` registration |
@@ -708,6 +709,33 @@ stored keys are delivered to the leaseholder as before. Source databases have
 no portable temporary-credential mechanism; give each source connection a
 read-only database user.
 
+### Source database access
+
+Give every source connection a **read-only database user**. It is the only
+control that holds on every engine; the checks below are defense in depth:
+
+- Postgres, MySQL, MariaDB and ClickHouse sessions are opened read-only
+  (`default_transaction_read_only`, `transaction_read_only` / `tx_read_only`,
+  `readonly=2`), so writes and DDL are refused by the database.
+- SQL Server, Oracle, Trino, Cassandra and MongoDB have no session-level
+  read-only mode that O_Rabbit can set; for them the read-only user is the
+  only enforcement.
+- Query mode accepts a single `SELECT`/`WITH` statement and rejects write
+  keywords. `where_clause` must be one boolean expression: no `;`, no
+  comments, balanced parentheses, and no write keywords.
+
+A read-only session does not stop functions with side effects outside the
+data, such as `pg_terminate_backend` or `dblink`; only database privileges do.
+
+### HTTP limits and pagination
+
+Request bodies are limited to 4 MiB. The server bounds slow clients (10 s to
+send headers, 60 s to send a request, 2 min idle); responses have no write
+timeout so SSE streams can stay open. `GET /runs` and `GET /connections`
+accept `limit` (1-1000) and `cursor`; the next page's cursor is returned in
+the `X-Next-Cursor` response header, and the body stays a JSON array. Without
+`limit` the full list is returned.
+
 ### Core routes
 
 | Method | Route | Purpose |
@@ -786,15 +814,28 @@ The master also exposes a control-panel API for registered SSH servers:
 - `GET /deployments/{id}` and `/deployments/{id}/stream`
 - `GET /executions/{id}` and `/executions/{id}/stream`
 
-These operations execute allowlisted actions on remote hosts. SSH credentials
-and stored configuration versions require `ORABBIT_MASTER_KEY`.
+These operations execute allowlisted actions on remote hosts, so they are
+separated from the data API:
+
+- They are disabled (404) unless `ORABBIT_REMOTE_OPS_AUTH_TOKEN` is set, and
+  then accept only that token. The API token cannot reach them, and the
+  remote-operations token cannot reach the data API. Audit records identify
+  which token was used.
+- Every server must have a pinned SSH host key (`host_key_fingerprint`, for
+  example `SHA256:...`). An unpinned or mismatching host key is refused before
+  credentials are sent; the error shows the key the server presented so you
+  can verify it out of band (`ssh-keyscan <host> | ssh-keygen -lf -`) and pin
+  it.
+
+SSH credentials and stored configuration versions require `ORABBIT_MASTER_KEY`.
 
 ### gRPC service
 
 Workers use the `orabbit.v1.ControlPlane` service on port 9102:
 `RegisterWorker`, `Heartbeat`, `RequestTask`, `RenewTaskLease`,
-`AcquireUploadCapacity`, `ReleaseUploadCapacity`, `ReportTaskProgress`, and
-`ReportTaskResult`. When configured, the worker sends
+`AcquireUploadCapacity`, `ReleaseUploadCapacity`, `ReportTaskProgress`,
+`ReportTaskResult`, `EnrollWorker`, `RenewWorkerCertificate`, and
+`GetTaskCredentials`. When configured, the worker sends
 `ORABBIT_WORKER_AUTH_TOKEN` as gRPC `authorization: Bearer ...` metadata on
 every call. See
 [proto/controlplane.proto](proto/controlplane.proto) for the wire contract.

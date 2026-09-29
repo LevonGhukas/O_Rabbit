@@ -135,3 +135,14 @@ func TestValidateAuthentication(t *testing.T) {
 		})
 	}
 }
+
+func TestRemoteOpsTokenMustDifferFromAPIToken(t *testing.T) {
+	cfg := masterConfig{HTTPAddr: "127.0.0.1:9100", GRPCAddr: "127.0.0.1:9102", Insecure: true, HTTPAuthToken: "same", RemoteOpsAuthToken: "same"}
+	if err := cfg.validateAuthentication(); err == nil || !strings.Contains(err.Error(), "must differ") {
+		t.Fatalf("err=%v, want tokens-must-differ error", err)
+	}
+	cfg.RemoteOpsAuthToken = "different"
+	if err := cfg.validateAuthentication(); err != nil {
+		t.Fatal(err)
+	}
+}

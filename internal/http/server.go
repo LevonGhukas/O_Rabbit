@@ -19,11 +19,13 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
+	"github.com/LevonGhukas/O_Rabbit/internal/httperr"
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 	sshops "github.com/LevonGhukas/O_Rabbit/internal/ops/ssh"
 	"github.com/LevonGhukas/O_Rabbit/internal/planner"
@@ -37,6 +39,7 @@ type Server struct {
 	bc               *Broadcaster
 	k                crypto.Key
 	authToken        string
+	remoteOpsToken   string
 	status           StatusInfo
 	streams          *StreamHub
 	runPlanner       runPlannerFunc
@@ -168,7 +171,7 @@ func (s *Server) Handler() http.Handler {
 		writeUnknownRoute(w, r.URL.Path)
 	})
 
-	handler := http.Handler(mux)
+	handler := s.withRemoteOpsGuard(withBodyLimit(mux))
 	if s.leadership != nil {
 		handler = s.withLeadership(handler)
 	}
@@ -193,7 +196,16 @@ func (s *Server) withLeadership(next http.Handler) http.Handler {
 // Serve starts the HTTP server on the specified address and listens for incoming requests.
 // It also handles graceful shutdown when the context is canceled.
 func (s *Server) Serve(ctx context.Context, addr string) error {
-	srv := &http.Server{Addr: addr, Handler: s.Handler()}
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: s.Handler(),
+		// Bound slow clients (slowloris). There is deliberately no
+		// WriteTimeout: SSE streams stay open for as long as a client watches.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    64 << 10,
+	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
 	select {
@@ -216,12 +228,90 @@ func (s *Server) Serve(ctx context.Context, addr string) error {
 
 func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || r.URL.Path == "/ready" {
+		// Remote operations are authenticated by their own token in
+		// withRemoteOpsGuard, never by the API token.
+		if r.URL.Path == "/healthz" || r.URL.Path == "/ready" || isRemoteOpsPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
 		if !constantTimeBearerMatch(r.Header.Get("Authorization"), s.authToken) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="orabbit"`)
+			writeUnauthorized(w)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// maxRequestBodyBytes bounds every request body; the largest legitimate
+// bodies (run submissions, Iceberg YAML, remote config files) are far smaller.
+const maxRequestBodyBytes = 4 << 20
+
+// withBodyLimit rejects request bodies larger than maxRequestBodyBytes
+// instead of reading them into memory.
+func withBodyLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// pageParams reads optional keyset pagination parameters. Without limit the
+// whole list is returned, as before.
+func pageParams(r *http.Request) (int, string, error) {
+	q := r.URL.Query()
+	cursor := strings.TrimSpace(q.Get("cursor"))
+	raw := strings.TrimSpace(q.Get("limit"))
+	if raw == "" {
+		if cursor != "" {
+			return 0, "", fmt.Errorf("cursor requires limit")
+		}
+		return 0, "", nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit < 1 || limit > maxPageLimit {
+		return 0, "", fmt.Errorf("limit must be between 1 and %d", maxPageLimit)
+	}
+	return limit, cursor, nil
+}
+
+const maxPageLimit = 1000
+
+// SetRemoteOpsToken enables remote operations (SSH servers, Docker
+// containers, deployments, command executions) and sets the separate bearer
+// token they require. With an empty token those routes are disabled.
+func (s *Server) SetRemoteOpsToken(token string) {
+	s.remoteOpsToken = strings.TrimSpace(token)
+}
+
+// isRemoteOpsPath reports whether path belongs to the remote operations API,
+// which runs commands on other hosts over SSH.
+func isRemoteOpsPath(path string) bool {
+	for _, prefix := range []string{"/servers", "/deployments", "/executions"} {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// withRemoteOpsGuard keeps remote operations separate from the data API: they
+// are unavailable unless enabled, and then accept only their own token, so a
+// leaked API token cannot execute commands on remote hosts.
+func (s *Server) withRemoteOpsGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isRemoteOpsPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if s.remoteOpsToken == "" {
+			writeAPIError(w, http.StatusNotFound, httperr.CodeNotFound, "remote operations are disabled; set ORABBIT_REMOTE_OPS_AUTH_TOKEN to enable them", nil)
+			return
+		}
+		if !constantTimeBearerMatch(r.Header.Get("Authorization"), s.remoteOpsToken) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="orabbit-remote-ops"`)
 			writeUnauthorized(w)
 			return
 		}
@@ -370,10 +460,22 @@ type connectionCreateRequest struct {
 func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		cs, err := s.st.ListConnections(r.Context())
+		limit, cursor, err := pageParams(r)
 		if err != nil {
+			writeInvalidInput(w, err.Error(), nil)
+			return
+		}
+		cs, next, err := s.st.ListConnectionsPage(r.Context(), limit, cursor)
+		if err != nil {
+			if strings.Contains(err.Error(), "invalid cursor") {
+				writeInvalidInput(w, "invalid cursor", nil)
+				return
+			}
 			writeInternalError(w, "failed to list connections")
 			return
+		}
+		if next != "" {
+			w.Header().Set("X-Next-Cursor", next)
 		}
 		writeJSON(w, http.StatusOK, cs)
 
@@ -722,10 +824,22 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 		writeMethodNotAllowed(w, r.Method, http.MethodGet)
 		return
 	}
-	rs, err := s.st.ListRuns(r.Context())
+	limit, cursor, err := pageParams(r)
 	if err != nil {
+		writeInvalidInput(w, err.Error(), nil)
+		return
+	}
+	rs, next, err := s.st.ListRunsPage(r.Context(), limit, cursor)
+	if err != nil {
+		if strings.Contains(err.Error(), "invalid cursor") {
+			writeInvalidInput(w, "invalid cursor", nil)
+			return
+		}
 		writeInternalError(w, "failed to list runs")
 		return
+	}
+	if next != "" {
+		w.Header().Set("X-Next-Cursor", next)
 	}
 	writeJSON(w, http.StatusOK, rs)
 }

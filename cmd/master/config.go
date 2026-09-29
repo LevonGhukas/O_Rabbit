@@ -78,6 +78,10 @@ func (c masterConfig) validateAuthentication() error {
 		}
 	}
 
+	if remote := strings.TrimSpace(c.RemoteOpsAuthToken); remote != "" && remote == strings.TrimSpace(c.HTTPAuthToken) {
+		return fmt.Errorf("ORABBIT_REMOTE_OPS_AUTH_TOKEN must differ from ORABBIT_HTTP_AUTH_TOKEN")
+	}
+
 	if !isLoopbackListenAddress(c.HTTPAddr) && strings.TrimSpace(c.HTTPAuthToken) == "" {
 		return fmt.Errorf(
 			"remote HTTP listen address %q requires ORABBIT_HTTP_AUTH_TOKEN",
@@ -102,12 +106,15 @@ func isLoopbackListenAddress(addr string) bool {
 }
 
 type masterConfig struct {
-	DBPath          string
-	GRPCAddr        string
-	HTTPAddr        string
-	HTTPAuthToken   string
-	WorkerAuthToken string
-	IceBin          string
+	DBPath        string
+	GRPCAddr      string
+	HTTPAddr      string
+	HTTPAuthToken string
+	// RemoteOpsAuthToken enables the remote operations API (SSH, Docker,
+	// deployments) and is the only token it accepts. Empty disables it.
+	RemoteOpsAuthToken string
+	WorkerAuthToken    string
+	IceBin             string
 
 	Insecure bool
 	// WorkerCertTTL is the lifetime of master-issued worker certificates.
@@ -150,6 +157,7 @@ func loadMasterConfigFromEnv() masterConfig {
 		GRPCAddr:                          envutil.EnvOrDefault("ORABBIT_GRPC_ADDR", "127.0.0.1:9102"),
 		HTTPAddr:                          envutil.EnvOrDefault("ORABBIT_HTTP_ADDR", "127.0.0.1:9100"),
 		HTTPAuthToken:                     strings.TrimSpace(os.Getenv("ORABBIT_HTTP_AUTH_TOKEN")),
+		RemoteOpsAuthToken:                strings.TrimSpace(os.Getenv("ORABBIT_REMOTE_OPS_AUTH_TOKEN")),
 		WorkerAuthToken:                   strings.TrimSpace(os.Getenv("ORABBIT_WORKER_AUTH_TOKEN")),
 		IceBin:                            envutil.EnvOrDefault("ORABBIT_ICE_BIN", "ice"),
 		Insecure:                          envBoolDefault("ORABBIT_GRPC_INSECURE", false),

@@ -28,7 +28,7 @@ const (
 var clickHouseIdentPartRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 
 func OpenClickHouse(ctx context.Context, dsn string) (*ClickHouse, error) {
-	db, err := sql.Open("clickhouse", dsn)
+	db, err := openReadOnlyClickHouse(dsn)
 	if err != nil {
 		return nil, err
 	}
