@@ -3,7 +3,7 @@
 ARG ICE_VERSION=0.17.0
 
 
-FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS source
+FROM --platform=$BUILDPLATFORM golang:1.26.6-bookworm AS source
 
 WORKDIR /src
 
@@ -70,6 +70,12 @@ RUN apt-get update \
         tzdata \
     && rm -rf /var/lib/apt/lists/*
 
+# Unprivileged runtime user. Directories that become volumes are created here
+# so new named volumes inherit this ownership.
+RUN groupadd --system --gid 10001 orabbit \
+    && useradd --system --uid 10001 --gid orabbit --home-dir /var/lib/orabbit --shell /usr/sbin/nologin orabbit \
+    && install -d -o orabbit -g orabbit -m 0700 /var/lib/orabbit /var/lib/orabbit/identity
+
 WORKDIR /var/lib/orabbit
 
 
@@ -96,7 +102,11 @@ RUN apt-get update \
 
 COPY --from=ice-bin /usr/local/bin/ice /usr/local/bin/ice
 
-RUN chmod +x /usr/local/bin/ice
+RUN chmod 0755 /usr/local/bin/ice
+
+RUN groupadd --system --gid 10001 orabbit \
+    && useradd --system --uid 10001 --gid orabbit --home-dir /var/lib/orabbit --shell /usr/sbin/nologin orabbit \
+    && install -d -o orabbit -g orabbit -m 0700 /var/lib/orabbit
 
 WORKDIR /var/lib/orabbit
 
@@ -109,6 +119,8 @@ FROM master-runtime-base AS master
 
 COPY --from=build-master /out/orabbit-master /usr/local/bin/orabbit-master
 
+USER 10001:10001
+
 ENTRYPOINT ["/usr/local/bin/orabbit-master"]
 
 
@@ -119,5 +131,7 @@ ENTRYPOINT ["/usr/local/bin/orabbit-master"]
 FROM runtime-base AS worker
 
 COPY --from=build-worker /out/orabbit-worker /usr/local/bin/orabbit-worker
+
+USER 10001:10001
 
 ENTRYPOINT ["/usr/local/bin/orabbit-worker"]

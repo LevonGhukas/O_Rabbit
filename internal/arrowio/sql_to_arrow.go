@@ -122,15 +122,6 @@ func lookupColumnOverride(targetTypes map[string]string, col string) (string, bo
 	return "", false
 }
 
-// schemaFromPlans handles schema from plans behavior.
-func schemaFromPlans(plans []ColumnPlan) *arrow.Schema {
-	fields := make([]arrow.Field, 0, len(plans))
-	for _, p := range plans {
-		fields = append(fields, arrow.Field{Name: p.Name, Type: p.DataType, Nullable: true})
-	}
-	return arrow.NewSchema(fields, nil)
-}
-
 // PlansFromSQL converts sql column types to ColumnPlans and an Arrow Schema.
 func PlansFromSQL(cols []string, colTypes []*sql.ColumnType) ([]ColumnPlan, *arrow.Schema, error) {
 	return PlansFromSQLEngine("", cols, colTypes)

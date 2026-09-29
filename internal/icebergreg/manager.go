@@ -48,18 +48,18 @@ type RunRequest struct {
 	RunID        string
 	Registration RunConfig
 
-	SourceEngine string
-	SourceDSN    string
-	SourceMode   string
-	SourceTable  string
-	SourceQuery  string
-	ColumnTypes  map[string]string
-	RecordPath   string
-	FileFormat   string
+	SourceEngine  string
+	SourceDSN     string
+	SourceMode    string
+	SourceTable   string
+	SourceQuery   string
+	ColumnTypes   map[string]string
+	RecordPath    string
+	FileFormat    string
 	SelectColumns []string
-	QueryHash    string
-	Incremental  bool
-	WriteMode    string
+	QueryHash     string
+	Incremental   bool
+	WriteMode     string
 
 	DatasetPrefix            string
 	DatasetS3                s3io.Config
