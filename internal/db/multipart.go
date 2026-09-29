@@ -81,7 +81,7 @@ func (s *Store) ApplyMultipartLifecycle(ctx context.Context, u MultipartLifecycl
 		if err != nil || !lease.After(now) {
 			return ErrMultipartFenced
 		}
-		ns := now.UTC().Format(time.RFC3339Nano)
+		ns := now.UTC().Format(TimestampLayout)
 		id := MultipartRecordID(u.AttemptID, u.FileIndex, u.ObjectKey)
 		switch u.Event {
 		case "PREPARED":
@@ -179,8 +179,8 @@ func (s *Store) ClaimMultipartCleanup(ctx context.Context, now time.Time, grace,
 			return err
 		}
 		defer tx.Rollback()
-		cutoff := now.Add(-grace).UTC().Format(time.RFC3339Nano)
-		row := tx.QueryRowContext(ctx, multipartSelect+` m WHERE m.status IN ('PREPARED','ACTIVE','COMPLETING','COMPLETION_AMBIGUOUS','ABORT_PENDING','ABORT_FAILED') AND m.last_activity_at<=? AND (m.next_cleanup_at IS NULL OR m.next_cleanup_at<=?) AND NOT EXISTS(SELECT 1 FROM task_artifacts ar WHERE ar.object_key=m.object_key AND ar.verification_status='VERIFIED') AND NOT EXISTS(SELECT 1 FROM task_attempts a WHERE a.id=m.attempt_id AND a.status='ACTIVE' AND a.lease_deadline>?) ORDER BY m.last_activity_at,m.id LIMIT 1`, cutoff, now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano))
+		cutoff := now.Add(-grace).UTC().Format(TimestampLayout)
+		row := tx.QueryRowContext(ctx, multipartSelect+` m WHERE m.status IN ('PREPARED','ACTIVE','COMPLETING','COMPLETION_AMBIGUOUS','ABORT_PENDING','ABORT_FAILED') AND m.last_activity_at<=? AND (m.next_cleanup_at IS NULL OR m.next_cleanup_at<=?) AND NOT EXISTS(SELECT 1 FROM task_artifacts ar WHERE ar.object_key=m.object_key AND ar.verification_status='VERIFIED') AND NOT EXISTS(SELECT 1 FROM task_attempts a WHERE a.id=m.attempt_id AND a.status='ACTIVE' AND a.lease_deadline>?) ORDER BY m.last_activity_at,m.id LIMIT 1`, cutoff, now.UTC().Format(TimestampLayout), now.UTC().Format(TimestampLayout))
 		if err := scanMultipart(row, &out); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return tx.Commit()
@@ -201,8 +201,8 @@ func (s *Store) ClaimMultipartCleanup(ctx context.Context, now time.Time, grace,
 		if err != nil {
 			return err
 		}
-		deadline := now.Add(lease).UTC().Format(time.RFC3339Nano)
-		res, err := tx.ExecContext(ctx, `UPDATE multipart_uploads SET status='ABORTING',cleanup_token=?,cleanup_lease_deadline=?,cleanup_attempt_count=cleanup_attempt_count+1,leader_epoch=(SELECT epoch FROM master_leadership WHERE leadership_name='master' AND status='ACTIVE'),updated_at=? WHERE id=? AND status=?`, token, deadline, now.UTC().Format(time.RFC3339Nano), out.ID, out.Status)
+		deadline := now.Add(lease).UTC().Format(TimestampLayout)
+		res, err := tx.ExecContext(ctx, `UPDATE multipart_uploads SET status='ABORTING',cleanup_token=?,cleanup_lease_deadline=?,cleanup_attempt_count=cleanup_attempt_count+1,leader_epoch=(SELECT epoch FROM master_leadership WHERE leadership_name='master' AND status='ACTIVE'),updated_at=? WHERE id=? AND status=?`, token, deadline, now.UTC().Format(TimestampLayout), out.ID, out.Status)
 		if err != nil {
 			return err
 		}
@@ -212,7 +212,7 @@ func (s *Store) ClaimMultipartCleanup(ctx context.Context, now time.Time, grace,
 		out.Status, out.CleanupToken, out.CleanupLease = "ABORTING", token, deadline
 		out.CleanupAttemptCount++
 		fields, _ := json.Marshal(map[string]any{"multipart_id": out.ID, "event_type": "MULTIPART_ABORT_SCHEDULED", "task_id": out.TaskID, "attempt_id": out.AttemptID, "object_key": out.ObjectKey, "cleanup_attempt": out.CleanupAttemptCount})
-		_, _ = tx.ExecContext(ctx, `INSERT OR IGNORE INTO events(id,run_id,ts,level,message,fields_json) VALUES(?,?,?,?,?,?)`, fmt.Sprintf("multipart-event-%s-abort-scheduled-%d", out.ID, out.CleanupAttemptCount), out.RunID, now.UTC().Format(time.RFC3339Nano), "WARN", "multipart abort scheduled", string(fields))
+		_, _ = tx.ExecContext(ctx, `INSERT OR IGNORE INTO events(id,run_id,ts,level,message,fields_json) VALUES(?,?,?,?,?,?)`, fmt.Sprintf("multipart-event-%s-abort-scheduled-%d", out.ID, out.CleanupAttemptCount), out.RunID, now.UTC().Format(TimestampLayout), "WARN", "multipart abort scheduled", string(fields))
 		ok = true
 		return tx.Commit()
 	})
@@ -220,7 +220,7 @@ func (s *Store) ClaimMultipartCleanup(ctx context.Context, now time.Time, grace,
 }
 
 func (s *Store) ExpireMultipartCleanupClaims(ctx context.Context, now time.Time) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `UPDATE multipart_uploads SET status='ABORT_FAILED',cleanup_token=NULL,cleanup_lease_deadline=NULL,next_cleanup_at=?,last_error_class='MULTIPART_ABORT_AMBIGUOUS',updated_at=? WHERE status='ABORTING' AND cleanup_lease_deadline<=?`, now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano))
+	res, err := s.db.ExecContext(ctx, `UPDATE multipart_uploads SET status='ABORT_FAILED',cleanup_token=NULL,cleanup_lease_deadline=NULL,next_cleanup_at=?,last_error_class='MULTIPART_ABORT_AMBIGUOUS',updated_at=? WHERE status='ABORTING' AND cleanup_lease_deadline<=?`, now.UTC().Format(TimestampLayout), now.UTC().Format(TimestampLayout), now.UTC().Format(TimestampLayout))
 	if err != nil {
 		return 0, err
 	}
@@ -246,12 +246,12 @@ func (s *Store) FinishMultipartCleanup(ctx context.Context, id, token, outcome, 
 			status, event = "UNKNOWN_REVIEW", "MULTIPART_OPERATOR_REVIEW_REQUIRED"
 		} else if outcome != "ABORTED" {
 			status, event = "ABORT_FAILED", "MULTIPART_ABORT_FAILED"
-			next = now.Add(retry).UTC().Format(time.RFC3339Nano)
+			next = now.Add(retry).UTC().Format(TimestampLayout)
 			if attempts >= max {
 				status, event, next = "UNKNOWN_REVIEW", "MULTIPART_CLEANUP_EXHAUSTED", nil
 			}
 		}
-		ns := now.UTC().Format(time.RFC3339Nano)
+		ns := now.UTC().Format(TimestampLayout)
 		res, err := tx.ExecContext(ctx, `UPDATE multipart_uploads SET status=?,cleanup_token=NULL,cleanup_lease_deadline=NULL,next_cleanup_at=?,last_error_class=?,last_error_message=?,aborted_at=CASE WHEN ?='ABORTED' THEN ? ELSE aborted_at END,completed_at=CASE WHEN ?='COMPLETED' THEN ? ELSE completed_at END,updated_at=? WHERE id=? AND status='ABORTING' AND cleanup_token=?`, status, next, class, safeError(message), status, ns, status, ns, ns, id, token)
 		if err != nil {
 			return err
@@ -266,7 +266,7 @@ func (s *Store) FinishMultipartCleanup(ctx context.Context, id, token, outcome, 
 }
 
 func (s *Store) AdoptMultipartUploadForCleanup(ctx context.Context, id, token, uploadID string, now time.Time) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE multipart_uploads SET provider_upload_id=?,updated_at=? WHERE id=? AND status='ABORTING' AND cleanup_token=? AND provider_upload_id IS NULL`, uploadID, now.UTC().Format(time.RFC3339Nano), id, token)
+	res, err := s.db.ExecContext(ctx, `UPDATE multipart_uploads SET provider_upload_id=?,updated_at=? WHERE id=? AND status='ABORTING' AND cleanup_token=? AND provider_upload_id IS NULL`, uploadID, now.UTC().Format(TimestampLayout), id, token)
 	if err != nil {
 		return err
 	}

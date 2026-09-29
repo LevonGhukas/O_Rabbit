@@ -42,7 +42,7 @@ func emitPlanEvent(ctx context.Context, st *db.Store, runID, level, message stri
 	_ = st.InsertEvent(ctx, db.Event{
 		ID:         newID(),
 		RunID:      runID,
-		TS:         time.Now().UTC().Format(time.RFC3339Nano),
+		TS:         db.FormatTimestamp(time.Now()),
 		Level:      level,
 		Message:    message,
 		FieldsJSON: payload,
@@ -178,7 +178,7 @@ func activeWorkerCountBestEffort(ctx context.Context, st *db.Store) int {
 	if st == nil {
 		return 0
 	}
-	cutoff := time.Now().UTC().Add(-activeWorkerHeartbeatWindow).Format(time.RFC3339Nano)
+	cutoff := db.FormatTimestamp(time.Now().UTC().Add(-activeWorkerHeartbeatWindow))
 	workers, err := st.ListWorkersActive(ctx, cutoff)
 	if err != nil {
 		return 0
@@ -251,7 +251,7 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 		DatasetKey:             datasetKey,
 		Status:                 "PLANNING",
 		CorrelationID:          newID(),
-		StartedAt:              time.Now().UTC().Format(time.RFC3339Nano),
+		StartedAt:              db.FormatTimestamp(time.Now()),
 		RegistrationConfigJSON: append(json.RawMessage(nil), registrationConfig...),
 	}
 	if err := st.CreateRun(ctx, run); err != nil {

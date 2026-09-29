@@ -116,8 +116,8 @@ func (s *Store) AssignNextPendingTaskInPool(ctx context.Context, bootID, workerI
 		return Task{}, false, err
 	}
 	now = now.UTC()
-	nowS := now.Format(time.RFC3339Nano)
-	deadline := now.Add(policy.Duration).Format(time.RFC3339Nano)
+	nowS := now.UTC().Format(TimestampLayout)
+	deadline := now.Add(policy.Duration).UTC().Format(TimestampLayout)
 	var out Task
 	ok := false
 	err = withBusyRetry(ctx, func() error {
@@ -132,7 +132,7 @@ func (s *Store) AssignNextPendingTaskInPool(ctx context.Context, bootID, workerI
 					   COALESCE((SELECT a.id FROM task_attempts a WHERE a.task_id=t.id ORDER BY a.attempt_number DESC LIMIT 1),''),
 					   COALESCE((SELECT a.worker_id FROM task_attempts a WHERE a.task_id=t.id ORDER BY a.attempt_number DESC LIMIT 1),'')
 				FROM tasks t JOIN runs r ON r.id=t.run_id JOIN jobs j ON j.id=r.job_id LEFT JOIN running rn ON rn.run_id=r.id
-				WHERE t.status='PENDING' AND r.status='RUNNING' AND (t.next_eligible_at IS NULL OR julianday(t.next_eligible_at)<=julianday(?))
+				WHERE t.status='PENDING' AND r.status='RUNNING' AND (t.next_eligible_at IS NULL OR t.next_eligible_at<=?)
 				AND t.attempt_count<? AND (COALESCE(CAST(json_extract(j.options_json,'$.max_in_flight_tasks') AS INTEGER),0)<=0 OR COALESCE(rn.cnt,0)<COALESCE(CAST(json_extract(j.options_json,'$.max_in_flight_tasks') AS INTEGER),0))
 				AND (?<=0 OR (SELECT COUNT(*) FROM tasks WHERE status='RUNNING')<?)
 				AND (?='' OR COALESCE(NULLIF(json_extract(j.options_json,'$.worker_pool'),''),'`+DefaultWorkerPool+`')=?)
@@ -192,8 +192,8 @@ func (s *Store) RenewTaskLease(ctx context.Context, bootID, taskID, attemptID, t
 		duration = 30 * time.Second
 	}
 	now = now.UTC()
-	deadline := now.Add(duration).Format(time.RFC3339Nano)
-	res, err := s.db.ExecContext(ctx, `UPDATE task_attempts SET lease_deadline=?,last_renewed_at=?,updated_at=? WHERE id=? AND task_id=? AND fencing_token=? AND worker_id=? AND worker_boot_id=? AND status='ACTIVE' AND julianday(lease_deadline)>julianday(?) AND EXISTS(SELECT 1 FROM tasks WHERE id=? AND status='RUNNING' AND current_attempt_id=?)`, deadline, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), attemptID, taskID, token, workerID, bootID, now.Format(time.RFC3339Nano), taskID, attemptID)
+	deadline := now.Add(duration).UTC().Format(TimestampLayout)
+	res, err := s.db.ExecContext(ctx, `UPDATE task_attempts SET lease_deadline=?,last_renewed_at=?,updated_at=? WHERE id=? AND task_id=? AND fencing_token=? AND worker_id=? AND worker_boot_id=? AND status='ACTIVE' AND lease_deadline>? AND EXISTS(SELECT 1 FROM tasks WHERE id=? AND status='RUNNING' AND current_attempt_id=?)`, deadline, now.UTC().Format(TimestampLayout), now.UTC().Format(TimestampLayout), attemptID, taskID, token, workerID, bootID, now.UTC().Format(TimestampLayout), taskID, attemptID)
 	if err != nil {
 		return "", err
 	}
@@ -219,7 +219,7 @@ func retryBackoff(p LeasePolicy, attempt int) time.Duration {
 func (s *Store) ExpireTaskAttempts(ctx context.Context, now time.Time, policy LeasePolicy) (int, error) {
 	policy = policy.normalized()
 	now = now.UTC()
-	nowS := now.Format(time.RFC3339Nano)
+	nowS := now.UTC().Format(TimestampLayout)
 	expired := 0
 	err := withBusyRetry(ctx, func() error {
 		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
@@ -227,7 +227,7 @@ func (s *Store) ExpireTaskAttempts(ctx context.Context, now time.Time, policy Le
 			return err
 		}
 		defer tx.Rollback()
-		rows, err := tx.QueryContext(ctx, `SELECT a.id,a.task_id,a.attempt_number,a.worker_id,a.lease_deadline,t.run_id FROM task_attempts a JOIN tasks t ON t.id=a.task_id JOIN runs r ON r.id=t.run_id WHERE a.status='ACTIVE' AND julianday(a.lease_deadline)<=julianday(?) AND t.status='RUNNING' AND t.current_attempt_id=a.id AND r.status='RUNNING'`, nowS)
+		rows, err := tx.QueryContext(ctx, `SELECT a.id,a.task_id,a.attempt_number,a.worker_id,a.lease_deadline,t.run_id FROM task_attempts a JOIN tasks t ON t.id=a.task_id JOIN runs r ON r.id=t.run_id WHERE a.status='ACTIVE' AND a.lease_deadline<=? AND t.status='RUNNING' AND t.current_attempt_id=a.id AND r.status='RUNNING'`, nowS)
 		if err != nil {
 			return err
 		}
@@ -266,7 +266,7 @@ func (s *Store) ExpireTaskAttempts(ctx context.Context, now time.Time, policy Le
 					err = insertAttemptEventTx(ctx, tx, x.run, x.task, x.id, x.num, x.worker, "TASK_QUARANTINED", "RETRY_LIMIT_EXHAUSTED", nowS, map[string]any{"max_attempts": policy.MaxAttempts})
 				}
 			} else {
-				next := now.Add(retryBackoff(policy, x.num)).Format(time.RFC3339Nano)
+				next := now.Add(retryBackoff(policy, x.num)).UTC().Format(TimestampLayout)
 				_, err = tx.ExecContext(ctx, `UPDATE tasks SET status='PENDING',worker_id=NULL,current_attempt_id=NULL,next_eligible_at=?,error_message='lease expired' WHERE id=? AND current_attempt_id=?`, next, x.task, x.id)
 				if err == nil {
 					err = insertAttemptEventTx(ctx, tx, x.run, x.task, x.id, x.num, x.worker, "TASK_RETRY_SCHEDULED", "LEASE_EXPIRED", nowS, map[string]any{"next_eligible_at": next})
@@ -300,7 +300,7 @@ func (s *Store) InsertAttemptRejectionEvent(ctx context.Context, taskID, attempt
 			return err
 		}
 		defer tx.Rollback()
-		if err := insertAttemptEventTx(ctx, tx, runID, taskID, attemptID, num, workerID, eventType, classification, now.UTC().Format(time.RFC3339Nano), nil); err != nil {
+		if err := insertAttemptEventTx(ctx, tx, runID, taskID, attemptID, num, workerID, eventType, classification, now.UTC().Format(TimestampLayout), nil); err != nil {
 			return err
 		}
 		return tx.Commit()
@@ -407,7 +407,7 @@ func (s *Store) completeTaskAttemptAt(ctx context.Context, bootID, taskID, attem
 					return fmt.Errorf("artifact durable identity mismatch")
 				}
 				id := attemptEventID("ARTIFACT", attemptID, fmt.Sprintf("%06d", record.FileIndex))
-				res, err := tx.ExecContext(ctx, `INSERT INTO task_artifacts(id,task_id,attempt_id,file_index,object_key,byte_size,sha256,row_count,schema_fingerprint,run_id,attempt_number,format_version,verification_method,verification_status,verified_at,max_hwm,created_at,provider_checksum_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, taskID, attemptID, record.FileIndex, record.ObjectKey, record.ByteSize, record.SHA256, record.RowCount, record.SchemaFingerprint, record.RunID, record.AttemptNumber, record.FormatVersion, record.VerificationMethod, record.VerificationStatus, masterNow.UTC().Format(time.RFC3339Nano), record.MaxHWM, now, record.ProviderChecksumSHA256)
+				res, err := tx.ExecContext(ctx, `INSERT INTO task_artifacts(id,task_id,attempt_id,file_index,object_key,byte_size,sha256,row_count,schema_fingerprint,run_id,attempt_number,format_version,verification_method,verification_status,verified_at,max_hwm,created_at,provider_checksum_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, taskID, attemptID, record.FileIndex, record.ObjectKey, record.ByteSize, record.SHA256, record.RowCount, record.SchemaFingerprint, record.RunID, record.AttemptNumber, record.FormatVersion, record.VerificationMethod, record.VerificationStatus, masterNow.UTC().Format(TimestampLayout), record.MaxHWM, now, record.ProviderChecksumSHA256)
 				if err != nil {
 					return fmt.Errorf("persist artifact %d: %w", record.FileIndex, err)
 				}
@@ -466,7 +466,7 @@ func (s *Store) AbandonTaskAttempt(ctx context.Context, taskID, attemptID, worke
 func (s *Store) AbandonTaskAttemptWithPolicy(ctx context.Context, taskID, attemptID, workerID, reason string, now time.Time, policy LeasePolicy) error {
 	policy = policy.normalized()
 	now = now.UTC()
-	nowS := now.Format(time.RFC3339Nano)
+	nowS := now.UTC().Format(TimestampLayout)
 	return withBusyRetry(ctx, func() error {
 		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if err != nil {
@@ -500,7 +500,7 @@ func (s *Store) AbandonTaskAttemptWithPolicy(ctx context.Context, taskID, attemp
 				err = insertAttemptEventTx(ctx, tx, runID, taskID, attemptID, attemptNumber, workerID, "TASK_QUARANTINED", "RETRY_LIMIT_EXHAUSTED", nowS, map[string]any{"max_attempts": policy.MaxAttempts})
 			}
 		} else {
-			next := now.Add(retryBackoff(policy, attemptNumber)).Format(time.RFC3339Nano)
+			next := now.Add(retryBackoff(policy, attemptNumber)).UTC().Format(TimestampLayout)
 			res, err = tx.ExecContext(ctx, `UPDATE tasks SET status='PENDING',worker_id=NULL,current_attempt_id=NULL,next_eligible_at=?,error_message=? WHERE id=? AND status='RUNNING' AND current_attempt_id=?`, next, reason, taskID, attemptID)
 			if err == nil {
 				err = insertAttemptEventTx(ctx, tx, runID, taskID, attemptID, attemptNumber, workerID, "TASK_RETRY_SCHEDULED", "ASSIGNMENT_BUILD_FAILURE", nowS, map[string]any{"next_eligible_at": next})
@@ -521,7 +521,7 @@ func (s *Store) UpdateTaskProgressFenced(ctx context.Context, bootID, taskID, at
 }
 
 func (s *Store) UpdateTaskProgressFencedAt(ctx context.Context, bootID, taskID, attemptID, token, workerID string, rows, bytesRead, bytesWritten int64, masterNow time.Time) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE tasks SET rows_read=?,bytes_read=?,bytes_written=? WHERE id=? AND status='RUNNING' AND current_attempt_id=? AND EXISTS(SELECT 1 FROM task_attempts WHERE id=? AND task_id=? AND worker_id=? AND worker_boot_id=? AND fencing_token=? AND status='ACTIVE' AND julianday(lease_deadline)>julianday(?))`, rows, bytesRead, bytesWritten, taskID, attemptID, attemptID, taskID, workerID, bootID, token, masterNow.UTC().Format(time.RFC3339Nano))
+	res, err := s.db.ExecContext(ctx, `UPDATE tasks SET rows_read=?,bytes_read=?,bytes_written=? WHERE id=? AND status='RUNNING' AND current_attempt_id=? AND EXISTS(SELECT 1 FROM task_attempts WHERE id=? AND task_id=? AND worker_id=? AND worker_boot_id=? AND fencing_token=? AND status='ACTIVE' AND lease_deadline>?)`, rows, bytesRead, bytesWritten, taskID, attemptID, attemptID, taskID, workerID, bootID, token, masterNow.UTC().Format(TimestampLayout))
 	if err != nil {
 		return err
 	}

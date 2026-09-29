@@ -48,6 +48,9 @@ func (c masterConfig) validateLeasePolicy() error {
 	if c.CanceledObjectCleanupScanInterval <= 0 || c.CanceledObjectRetention <= 0 || c.CanceledObjectCleanupMaxAttempts <= 0 {
 		return fmt.Errorf("canceled-object cleanup scan, retention, and max attempts must be positive")
 	}
+	if c.RegistrationLeaseDuration < 3*time.Second || c.ReconciliationLeaseDuration < 3*time.Second {
+		return fmt.Errorf("registration and reconciliation lease durations must be at least 3s")
+	}
 	return nil
 }
 
@@ -152,6 +155,13 @@ type masterConfig struct {
 	HistoryRetention                  time.Duration
 	HistoryPruneInterval              time.Duration
 	DBReadConns                       int
+	CommitTimeout                     time.Duration
+	CommitMaxAttempts                 int
+	RegistrationTimeout               time.Duration
+	RegistrationLeaseDuration         time.Duration
+	RegistrationMaxAttempts           int
+	ReconciliationLeaseDuration       time.Duration
+	ReconciliationMaxAttempts         int
 }
 
 func loadMasterConfigFromEnv() masterConfig {
@@ -192,6 +202,13 @@ func loadMasterConfigFromEnv() masterConfig {
 		HistoryRetention:                  envRetentionDefault("ORABBIT_HISTORY_RETENTION", 30*24*time.Hour),
 		HistoryPruneInterval:              envDurationDefault("ORABBIT_HISTORY_PRUNE_INTERVAL", time.Hour),
 		DBReadConns:                       envPositiveIntDefault("ORABBIT_DB_READ_CONNS", 4),
+		CommitTimeout:                     envDurationDefault("ORABBIT_COMMIT_TIMEOUT", 30*time.Minute),
+		CommitMaxAttempts:                 envPositiveIntDefault("ORABBIT_COMMIT_MAX_ATTEMPTS", 5),
+		RegistrationTimeout:               envDurationDefault("ORABBIT_REGISTRATION_TIMEOUT", 30*time.Minute),
+		RegistrationLeaseDuration:         envDurationDefault("ORABBIT_REGISTRATION_LEASE_DURATION", 30*time.Second),
+		RegistrationMaxAttempts:           envPositiveIntDefault("ORABBIT_REGISTRATION_MAX_ATTEMPTS", 5),
+		ReconciliationLeaseDuration:       envDurationDefault("ORABBIT_RECONCILIATION_LEASE_DURATION", 30*time.Second),
+		ReconciliationMaxAttempts:         envPositiveIntDefault("ORABBIT_RECONCILIATION_MAX_ATTEMPTS", 5),
 	}
 }
 

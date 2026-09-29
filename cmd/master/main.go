@@ -124,12 +124,21 @@ func run() int {
 	}
 	grpcSrv.SetLeasePolicy(db.LeasePolicy{Duration: cfg.TaskLeaseDuration, MaxAttempts: cfg.TaskMaxAttempts, MaxActiveTasks: cfg.MaxActiveTasks, BackoffBase: cfg.TaskRetryBackoff, BackoffMax: cfg.TaskRetryBackoffMax})
 	grpcSrv.SetCatalogWorkLimit(cfg.CatalogWorkLimit)
+	commitCatalog := grpcapi.CommitCatalogPolicy{
+		CommitTimeout:             cfg.CommitTimeout,
+		CommitMaxAttempts:         cfg.CommitMaxAttempts,
+		RegistrationTimeout:       cfg.RegistrationTimeout,
+		Registration:              db.RegistrationPolicy{LeaseDuration: cfg.RegistrationLeaseDuration, MaxAttempts: cfg.RegistrationMaxAttempts, BackoffBase: time.Second, BackoffMax: time.Minute},
+		ReconciliationLease:       cfg.ReconciliationLeaseDuration,
+		ReconciliationMaxAttempts: cfg.ReconciliationMaxAttempts,
+	}
+	grpcSrv.SetCommitCatalogPolicy(commitCatalog)
 	grpcSrv.SetUploadCapacityPolicy(cfg.UploadCapacityLimit, cfg.UploadCapacityLeaseTTL)
 	grpcSrv.SetMultipartCleanupPolicy(cfg.MultipartAbandonmentGrace, time.Minute, cfg.MultipartCleanupMaxAttempts)
 	st.SetCanceledObjectRetention(cfg.CanceledObjectRetention)
 	grpcSrv.SetCanceledObjectCleanupPolicy(time.Minute, cfg.CanceledObjectCleanupMaxAttempts, cfg.CanceledObjectCleanupDryRun)
 	st.RecordLeadershipEvent(leaderCtx, instanceID, lease.Epoch, "MASTER_RECOVERY_STARTED", nil)
-	reconcileCtx, reconcileCancel := context.WithTimeout(leaderCtx, 30*time.Minute)
+	reconcileCtx, reconcileCancel := context.WithTimeout(leaderCtx, cfg.CommitTimeout)
 	if err := grpcSrv.ReconcileCommittingRuns(reconcileCtx); err != nil {
 		log.Error("reconcile committing runs", slog.String("err", err.Error()))
 		st.RecordLeadershipEvent(context.Background(), instanceID, lease.Epoch, "MASTER_RECOVERY_FAILED", map[string]any{"phase": "committing_runs"})
@@ -152,7 +161,7 @@ func run() int {
 	} else if len(abandoned) > 0 {
 		log.Warn("failed runs abandoned during planning", slog.Int("count", len(abandoned)), slog.Any("run_ids", abandoned))
 	}
-	registrationPolicy := db.RegistrationPolicy{LeaseDuration: 30 * time.Second, MaxAttempts: 5, BackoffBase: time.Second, BackoffMax: time.Minute}
+	registrationPolicy := commitCatalog.Registration
 	if classified, err := st.ReconcileHistoricalRegistrations(leaderCtx, time.Now()); err != nil {
 		log.Error("classify historical registrations", slog.String("err", err.Error()))
 		st.RecordLeadershipEvent(context.Background(), instanceID, lease.Epoch, "MASTER_RECOVERY_FAILED", map[string]any{"phase": "historical_registrations"})
@@ -167,7 +176,7 @@ func run() int {
 	} else if n > 0 {
 		log.Info("reconciled expired registration leases", slog.Int("count", n))
 	}
-	if n, err := st.ExpireReconciliationAttempts(leaderCtx, time.Now(), time.Second, 5); err != nil {
+	if n, err := st.ExpireReconciliationAttempts(leaderCtx, time.Now(), time.Second, cfg.ReconciliationMaxAttempts); err != nil {
 		log.Error("reconcile expired catalog-observation leases", slog.String("err", err.Error()))
 		st.RecordLeadershipEvent(context.Background(), instanceID, lease.Epoch, "MASTER_RECOVERY_FAILED", map[string]any{"phase": "catalog_reconciliation_leases"})
 		return recoveryExitCode(ctx)
@@ -177,7 +186,7 @@ func run() int {
 	st.RecordLeadershipEvent(leaderCtx, instanceID, lease.Epoch, "MASTER_RECOVERY_COMPLETED", nil)
 	leadership.SetReady(true)
 	grpcSrv.SetLeadershipGuard(leadership)
-	go runCommittingReconciliationLoop(leaderCtx, 2*time.Second, 30*time.Minute, grpcSrv, log)
+	go runCommittingReconciliationLoop(leaderCtx, 2*time.Second, cfg.CommitTimeout, grpcSrv, log)
 	go runPeriodic(leaderCtx, log, "catalog registration and reconciliation", 2*time.Second, func() {
 		for i := 0; i < 2; i++ {
 			processed, err := grpcSrv.ProcessReconciliationOnce(leaderCtx)
@@ -202,7 +211,7 @@ func run() int {
 		if _, err := st.ExpireRegistrationAttempts(leaderCtx, time.Now(), registrationPolicy); err != nil && leaderCtx.Err() == nil {
 			log.Warn("registration lease expiration scan failed", slog.String("err", err.Error()))
 		}
-		if _, err := st.ExpireReconciliationAttempts(leaderCtx, time.Now(), time.Second, 5); err != nil && leaderCtx.Err() == nil {
+		if _, err := st.ExpireReconciliationAttempts(leaderCtx, time.Now(), time.Second, cfg.ReconciliationMaxAttempts); err != nil && leaderCtx.Err() == nil {
 			log.Warn("reconciliation lease expiration scan failed", slog.String("err", err.Error()))
 		}
 	})
@@ -226,6 +235,13 @@ func run() int {
 		}
 	})
 	go runPeriodic(leaderCtx, log, "canceled-object cleanup", cfg.CanceledObjectCleanupScanInterval, func() {
+		if n, err := st.DiscoverOrphanedObjects(leaderCtx, time.Now(), 100); err != nil {
+			if leaderCtx.Err() == nil {
+				log.Warn("orphaned-object discovery failed", slog.String("err", err.Error()))
+			}
+		} else if n > 0 {
+			log.Info("orphaned objects quarantined for cleanup", slog.Int("count", n))
+		}
 		for i := 0; i < 4; i++ {
 			processed, err := grpcSrv.ProcessCanceledObjectCleanupOnce(leaderCtx)
 			if err != nil {
