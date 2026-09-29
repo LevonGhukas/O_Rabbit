@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
+	"github.com/LevonGhukas/O_Rabbit/internal/telemetry"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -109,10 +110,13 @@ func (s *Server) commitClaimedRun(ctx context.Context, runID string) bool {
 		}
 	}()
 
+	commitStart := time.Now()
 	if err := s.finalizeRunCommit(commitCtx, runID); err != nil {
+		telemetry.ObserveCommit("failed", time.Since(commitStart))
 		s.log.Error("run commit failed", slog.String("run_id", runID), slog.String("err", err.Error()))
 		return false
 	}
+	telemetry.ObserveCommit("succeeded", time.Since(commitStart))
 	s.log.Info("run commit succeeded", slog.String("run_id", runID))
 	s.launchIcebergRegistration(runID)
 	return true

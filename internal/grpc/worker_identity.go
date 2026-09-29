@@ -25,7 +25,7 @@ import (
 
 const enrollWorkerMethod = controlPlaneMethodPrefix + "EnrollWorker"
 
-var workerCAKeyAAD = []byte("orabbit-worker-ca-key")
+var workerCAKeyAAD = db.WorkerCAKeyAAD
 
 // authenticatedWorker is the identity the master derived from a verified
 // worker certificate.

@@ -121,11 +121,17 @@ restore runbook.
 ## 🔵 Hygiene
 
 - **`fix.go` at the repo root** is a `package main` codemod that rewrites files under `internal/`. `go run .` would run it. Delete it, along with the committed `.DS_Store`.
+  **Status:** DONE
 - **Containers run as root**; add a `USER`.
+  **Status:** DONE
 - **CI** runs neither `-race` nor golangci-lint (the config already exists), and has no `govulncheck` or image scanning. Images should be tagged by SHA or semver, not just pushed from `main`.
+  **Status:** DONE
 - **Example `.env` files** ship `minioadmin/minioadmin` and `0.0.0.0` + insecure defaults. Examples tend to get copied into production.
+  **Status:** DONE
 - **Observability:** `/metrics` covers lifecycle state counts only. There are no latency or throughput histograms, no RPC metrics and no tracing.
+  **Status:** DONE
 - **Master key rotation:** there is no way to rotate the key or re-encrypt stored secrets.
+  **Status:** DONE
 
 ## Suggested order
 1. **Security (blockers 1–5, plus 14–15):** fail-closed auth, required TLS and master key, encrypt the registration config, gRPC panic recovery.

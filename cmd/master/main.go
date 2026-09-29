@@ -16,6 +16,7 @@ import (
 	grpcapi "github.com/LevonGhukas/O_Rabbit/internal/grpc"
 	httpapi "github.com/LevonGhukas/O_Rabbit/internal/http"
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
+	"github.com/LevonGhukas/O_Rabbit/internal/telemetry"
 )
 
 // Process exit codes. A supervisor restarts the master on any non-zero code.
@@ -26,6 +27,9 @@ const (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "rotate-master-key" {
+		os.Exit(runRotateMasterKey(os.Args[2:]))
+	}
 	os.Exit(run())
 }
 
@@ -66,6 +70,17 @@ func run() int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	shutdownTracing, err := telemetry.InitTracing(ctx, "orabbit-master")
+	if err != nil {
+		log.Error("configure tracing", slog.String("err", err.Error()))
+		return exitConfig
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(flushCtx)
+	}()
 
 	instanceID, err := db.NewMasterInstanceID()
 	if err != nil {

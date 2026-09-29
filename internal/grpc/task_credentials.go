@@ -223,12 +223,3 @@ func decryptSecretMap(k crypto.Key, conn db.Connection) (map[string]any, error) 
 	}
 	return out, nil
 }
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
-		}
-	}
-	return ""
-}

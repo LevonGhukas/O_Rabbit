@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
+	"github.com/LevonGhukas/O_Rabbit/internal/telemetry"
 )
 
 type recoveryRequest struct {
@@ -123,6 +125,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(renderLifecycleMetrics(metrics)))
+	if err := telemetry.WriteText(w); err != nil {
+		s.log.Warn("render process metrics", slog.String("err", err.Error()))
+	}
 }
 
 func renderLifecycleMetrics(m db.LifecycleMetrics) string {

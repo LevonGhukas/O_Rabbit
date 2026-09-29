@@ -29,6 +29,9 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 	sshops "github.com/LevonGhukas/O_Rabbit/internal/ops/ssh"
 	"github.com/LevonGhukas/O_Rabbit/internal/planner"
+	"github.com/LevonGhukas/O_Rabbit/internal/telemetry"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // Server represents the HTTP API server for the control plane.
@@ -171,14 +174,23 @@ func (s *Server) Handler() http.Handler {
 		writeUnknownRoute(w, r.URL.Path)
 	})
 
-	handler := s.withRemoteOpsGuard(withBodyLimit(mux))
+	// Metrics wrap the mux directly so they see the matched route pattern.
+	handler := s.withRemoteOpsGuard(withBodyLimit(telemetry.HTTPMiddleware(mux)))
 	if s.leadership != nil {
 		handler = s.withLeadership(handler)
 	}
-	if strings.TrimSpace(s.authToken) == "" {
-		return s.withRecoverer(handler)
+	if strings.TrimSpace(s.authToken) != "" {
+		handler = s.withAuth(handler)
 	}
-	return s.withRecoverer(s.withAuth(handler))
+	// Tracing is outermost so rejected requests are traced too. It is a
+	// no-op unless OTLP tracing is configured.
+	return otelhttp.NewHandler(s.withRecoverer(handler), "orabbit-http",
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			if r.Pattern != "" {
+				return r.Method + " " + r.Pattern
+			}
+			return r.Method
+		}))
 }
 
 func (s *Server) withLeadership(next http.Handler) http.Handler {
