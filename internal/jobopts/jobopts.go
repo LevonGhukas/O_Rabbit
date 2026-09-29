@@ -19,6 +19,14 @@ const (
 type Options struct {
 	PartitionStrategy string `json:"partition_strategy"` // "single" (default) or "ordered_cursor"; legacy alias: int_range
 
+	// CursorLookback re-reads rows up to this distance below the stored
+	// high-water mark on each incremental run, so rows committed late with a
+	// cursor value at or below the mark are not lost. Integer cursors take a
+	// count, date/timestamp cursors a duration ("30m", "48h"). Re-read rows
+	// are exported again; deduplicate them downstream (for example Iceberg
+	// upsert on the table key). Empty disables the lookback.
+	CursorLookback string `json:"cursor_lookback,omitempty"`
+
 	// WorkerPool restricts the job's tasks, and therefore its credentials, to
 	// workers enrolled into this pool. Empty means "default".
 	WorkerPool string `json:"worker_pool,omitempty"`

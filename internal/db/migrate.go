@@ -38,6 +38,8 @@ var migrations = []migration{
 	{version: 23, sql: schemaV23},
 	{version: 24, sql: schemaV24},
 	{version: 25, sql: schemaV25},
+	{version: 26, sql: schemaV26},
+	{version: 27, sql: schemaV27},
 }
 
 const schemaV21 = `
@@ -46,6 +48,18 @@ ALTER TABLE iceberg_registrations ADD COLUMN retry_override_config_json TEXT NOT
 
 const schemaV22 = `
 ALTER TABLE iceberg_registrations ADD COLUMN manual_retry_budget INTEGER NOT NULL DEFAULT 0;
+`
+
+// schemaV27 stores the non-secret configuration each run was planned with,
+// so edits to its job or connections cannot change a run in flight.
+const schemaV27 = `
+ALTER TABLE runs ADD COLUMN config_snapshot_json TEXT NOT NULL DEFAULT '';
+`
+
+// schemaV26 records the object store's checksum of each artifact so the
+// commit can verify objects with a HEAD instead of re-reading them.
+const schemaV26 = `
+ALTER TABLE task_artifacts ADD COLUMN provider_checksum_sha256 TEXT NOT NULL DEFAULT '';
 `
 
 // schemaV25 adds a leased claim on committing runs so exactly one committer

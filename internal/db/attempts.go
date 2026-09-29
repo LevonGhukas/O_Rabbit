@@ -407,7 +407,7 @@ func (s *Store) completeTaskAttemptAt(ctx context.Context, bootID, taskID, attem
 					return fmt.Errorf("artifact durable identity mismatch")
 				}
 				id := attemptEventID("ARTIFACT", attemptID, fmt.Sprintf("%06d", record.FileIndex))
-				res, err := tx.ExecContext(ctx, `INSERT INTO task_artifacts(id,task_id,attempt_id,file_index,object_key,byte_size,sha256,row_count,schema_fingerprint,run_id,attempt_number,format_version,verification_method,verification_status,verified_at,max_hwm,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, taskID, attemptID, record.FileIndex, record.ObjectKey, record.ByteSize, record.SHA256, record.RowCount, record.SchemaFingerprint, record.RunID, record.AttemptNumber, record.FormatVersion, record.VerificationMethod, record.VerificationStatus, masterNow.UTC().Format(time.RFC3339Nano), record.MaxHWM, now)
+				res, err := tx.ExecContext(ctx, `INSERT INTO task_artifacts(id,task_id,attempt_id,file_index,object_key,byte_size,sha256,row_count,schema_fingerprint,run_id,attempt_number,format_version,verification_method,verification_status,verified_at,max_hwm,created_at,provider_checksum_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, taskID, attemptID, record.FileIndex, record.ObjectKey, record.ByteSize, record.SHA256, record.RowCount, record.SchemaFingerprint, record.RunID, record.AttemptNumber, record.FormatVersion, record.VerificationMethod, record.VerificationStatus, masterNow.UTC().Format(time.RFC3339Nano), record.MaxHWM, now, record.ProviderChecksumSHA256)
 				if err != nil {
 					return fmt.Errorf("persist artifact %d: %w", record.FileIndex, err)
 				}
@@ -550,7 +550,7 @@ func (s *Store) ListTaskAttempts(ctx context.Context, taskID string) ([]Attempt,
 }
 
 func (s *Store) ListArtifactsForRun(ctx context.Context, runID string) ([]artifact.Record, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT object_key,byte_size,sha256,row_count,schema_fingerprint,run_id,task_id,attempt_id,attempt_number,file_index,format_version,verification_method,verification_status,verified_at,max_hwm FROM task_artifacts WHERE run_id=? ORDER BY task_id,file_index,object_key`, runID)
+	rows, err := s.db.QueryContext(ctx, `SELECT object_key,byte_size,sha256,row_count,schema_fingerprint,run_id,task_id,attempt_id,attempt_number,file_index,format_version,verification_method,verification_status,verified_at,max_hwm,provider_checksum_sha256 FROM task_artifacts WHERE run_id=? ORDER BY task_id,file_index,object_key`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -558,7 +558,7 @@ func (s *Store) ListArtifactsForRun(ctx context.Context, runID string) ([]artifa
 	var out []artifact.Record
 	for rows.Next() {
 		var r artifact.Record
-		if err := rows.Scan(&r.ObjectKey, &r.ByteSize, &r.SHA256, &r.RowCount, &r.SchemaFingerprint, &r.RunID, &r.TaskID, &r.AttemptID, &r.AttemptNumber, &r.FileIndex, &r.FormatVersion, &r.VerificationMethod, &r.VerificationStatus, &r.VerifiedAt, &r.MaxHWM); err != nil {
+		if err := rows.Scan(&r.ObjectKey, &r.ByteSize, &r.SHA256, &r.RowCount, &r.SchemaFingerprint, &r.RunID, &r.TaskID, &r.AttemptID, &r.AttemptNumber, &r.FileIndex, &r.FormatVersion, &r.VerificationMethod, &r.VerificationStatus, &r.VerifiedAt, &r.MaxHWM, &r.ProviderChecksumSHA256); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

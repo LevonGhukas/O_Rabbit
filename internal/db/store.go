@@ -328,6 +328,7 @@ type Run struct {
 	FailureClass                   string                    `json:"failure_class,omitempty"`
 	TypeWarnings                   []typesystem.TypeWarning  `json:"type_warnings"`
 	RegistrationConfigJSON         json.RawMessage           `json:"-"`
+	ConfigSnapshotJSON             json.RawMessage           `json:"-"`
 	CommitID                       string                    `json:"commit_id,omitempty"`
 	CommitIntentJSON               json.RawMessage           `json:"-"`
 	CommitPhase                    string                    `json:"commit_phase,omitempty"`
@@ -640,10 +641,13 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 
 func (s *Store) GetRun(ctx context.Context, id string) (Run, error) {
 	var r Run
-	var registrationConfig, warningJSON, commitIntent string
-	row := s.db.QueryRowContext(ctx, `SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json, commit_id, commit_intent_json, commit_phase FROM runs WHERE id=?;`, id)
-	if err := row.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &registrationConfig, &warningJSON, &r.CommitID, &commitIntent, &r.CommitPhase); err != nil {
+	var registrationConfig, warningJSON, commitIntent, configSnapshot string
+	row := s.db.QueryRowContext(ctx, `SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json, commit_id, commit_intent_json, commit_phase, config_snapshot_json FROM runs WHERE id=?;`, id)
+	if err := row.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &registrationConfig, &warningJSON, &r.CommitID, &commitIntent, &r.CommitPhase, &configSnapshot); err != nil {
 		return Run{}, wrapRunRegistrationConfigColumnErr(err)
+	}
+	if strings.TrimSpace(configSnapshot) != "" {
+		r.ConfigSnapshotJSON = []byte(configSnapshot)
 	}
 	if err := decodeRunWarnings(warningJSON, &r); err != nil {
 		return Run{}, err

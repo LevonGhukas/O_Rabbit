@@ -1092,7 +1092,10 @@ func (s *Server) buildExistingJobRunRegistrationConfig(ctx context.Context, job 
 		table = strings.TrimSpace(jobRegCfg.Table)
 	}
 	if table == "" {
-		opts, _ := jobopts.Parse(job.OptionsJSON)
+		opts, err := jobopts.Parse(job.OptionsJSON)
+		if err != nil {
+			return nil, fmt.Errorf("job options are invalid: %w", err)
+		}
 		sourceTable := strings.TrimSpace(opts.Table)
 		if sourceTable == "" {
 			sourceTable = job.TargetTable
@@ -1123,29 +1126,26 @@ func (s *Server) buildExistingJobRunRegistrationConfig(ctx context.Context, job 
 }
 
 func (s *Server) loadConnectionS3Config(conn db.Connection) (s3io.Config, error) {
-	var metadata map[string]any
-	_ = json.Unmarshal(conn.MetadataJSON, &metadata)
-
+	target, err := dataset.ParseTarget(conn.MetadataJSON)
+	if err != nil {
+		return s3io.Config{}, err
+	}
 	secretPlain, err := crypto.Decrypt(s.k, conn.SecretEncBlob, []byte(conn.ID))
 	if err != nil {
 		return s3io.Config{}, err
 	}
 	var secret map[string]any
-	_ = json.Unmarshal(secretPlain, &secret)
-
-	forcePathStyle := true
-	if v, ok := metadata["force_path_style"].(bool); ok {
-		forcePathStyle = v
+	if err := json.Unmarshal(secretPlain, &secret); err != nil {
+		return s3io.Config{}, fmt.Errorf("target connection secret is not a JSON object: %w", err)
 	}
-	cfg := s3io.Config{
-		Endpoint:        strings.TrimSpace(anyStringValue(metadata["endpoint"])),
-		Region:          strings.TrimSpace(anyStringValue(metadata["region"])),
-		Bucket:          strings.TrimSpace(anyStringValue(metadata["bucket"])),
-		ForcePathStyle:  forcePathStyle,
+	return s3io.Config{
+		Endpoint:        target.Endpoint,
+		Region:          target.Region,
+		Bucket:          target.Bucket,
+		ForcePathStyle:  target.ForcePathStyle,
 		AccessKeyID:     strings.TrimSpace(anyStringValue(secret["access_key_id"])),
 		SecretAccessKey: strings.TrimSpace(anyStringValue(secret["secret_access_key"])),
-	}
-	return cfg, nil
+	}, nil
 }
 
 func anyStringValue(v any) string {

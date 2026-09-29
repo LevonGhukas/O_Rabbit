@@ -3,11 +3,13 @@ package artifact
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -39,6 +41,10 @@ type Record struct {
 	VerificationStatus string `json:"verification_status"`
 	VerifiedAt         string `json:"verified_at,omitempty"`
 	MaxHWM             string `json:"max_hwm,omitempty"`
+	// ProviderChecksumSHA256 is the object store's own checksum of the
+	// uploaded object, recorded when the worker verified it. The commit
+	// compares it with a HEAD instead of re-reading the object.
+	ProviderChecksumSHA256 string `json:"provider_checksum_sha256,omitempty"`
 }
 
 func (r Record) Validate() error {
@@ -59,6 +65,33 @@ func (r Record) Validate() error {
 	}
 	if r.FormatVersion != FormatVersion || (r.VerificationMethod != VerificationPortable && r.VerificationMethod != VerificationProvider) || r.VerificationStatus != VerificationVerified {
 		return fmt.Errorf("artifact verification is insufficient")
+	}
+	if r.ProviderChecksumSHA256 != "" {
+		if err := ValidateProviderChecksum(r.ProviderChecksumSHA256, r.SHA256); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateProviderChecksum checks the form of an object-store SHA-256
+// checksum. A full-object checksum (no "-<parts>" suffix) must equal the
+// artifact's own digest; a multipart composite checksum cannot be derived
+// from the whole-file digest and is checked only for form.
+func ValidateProviderChecksum(checksum, sha256Hex string) error {
+	digest, parts, composite := strings.Cut(checksum, "-")
+	raw, err := base64.StdEncoding.DecodeString(digest)
+	if err != nil || len(raw) != sha256.Size {
+		return fmt.Errorf("invalid provider checksum")
+	}
+	if composite {
+		if n, err := strconv.Atoi(parts); err != nil || n < 1 {
+			return fmt.Errorf("invalid provider checksum part count")
+		}
+		return nil
+	}
+	if hex.EncodeToString(raw) != sha256Hex {
+		return fmt.Errorf("provider checksum does not match artifact sha256")
 	}
 	return nil
 }

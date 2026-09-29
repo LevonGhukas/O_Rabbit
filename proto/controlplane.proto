@@ -203,6 +203,11 @@ message ArtifactIntegrity {
   string verification_status = 13;
   string verified_at = 14;
   string max_hwm = 15;
+  // Checksum the object store computed for the uploaded object
+  // (x-amz-checksum-sha256): base64 SHA-256 of the whole object, or of the
+  // part checksums followed by "-<parts>" for multipart uploads. Empty when
+  // the store does not report checksums.
+  string provider_checksum_sha256 = 16;
 }
 
 message RenewTaskLeaseRequest {

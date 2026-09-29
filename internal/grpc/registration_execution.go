@@ -12,10 +12,8 @@ import (
 	"time"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/artifact"
-	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
-	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
 )
 
@@ -49,10 +47,11 @@ func (s *Server) runIcebergRegistrationWithHooks(ctx context.Context, runID, reg
 	if err != nil {
 		return false, icebergreg.RunResult{}, err
 	}
-	job, err := s.st.GetJob(ctx, run.JobID)
+	resolved, err := s.resolveRun(ctx, run)
 	if err != nil {
 		return false, icebergreg.RunResult{}, err
 	}
+	job := resolved.config.Job
 
 	regCfg, err := icebergreg.ParseRunConfig(run.RegistrationConfigJSON)
 	if err != nil {
@@ -90,54 +89,25 @@ func (s *Server) runIcebergRegistrationWithHooks(ctx context.Context, runID, reg
 	if err != nil {
 		return false, icebergreg.RunResult{}, err
 	}
-	tgtConn, err := s.st.GetConnection(ctx, job.TargetConnectionID)
+	srcConn.Engine = resolved.config.SourceEngine
+	src, err := decryptSecretMap(s.k, srcConn)
 	if err != nil {
-		return false, icebergreg.RunResult{}, err
+		return false, icebergreg.RunResult{}, fmt.Errorf("source connection secret: %w", err)
 	}
-
-	srcSecret, err := crypto.Decrypt(s.k, srcConn.SecretEncBlob, []byte(srcConn.ID))
+	sourceDSN := stringMapValue(src, "dsn")
+	s3cfg, err := s.targetS3Config(ctx, resolved)
 	if err != nil {
-		return false, icebergreg.RunResult{}, err
+		return true, icebergreg.RunResult{}, err
 	}
-	var src map[string]any
-	_ = json.Unmarshal(srcSecret, &src)
-	sourceDSN, _ := src["dsn"].(string)
+	endpoint, region, bucket, forcePathStyle := s3cfg.Endpoint, s3cfg.Region, s3cfg.Bucket, s3cfg.ForcePathStyle
+	accessKey, secretKey, sessionToken := s3cfg.AccessKeyID, s3cfg.SecretAccessKey, s3cfg.SessionToken
 
-	tgtSecret, err := crypto.Decrypt(s.k, tgtConn.SecretEncBlob, []byte(tgtConn.ID))
-	if err != nil {
-		return false, icebergreg.RunResult{}, err
-	}
-	var tgt map[string]any
-	_ = json.Unmarshal(tgtSecret, &tgt)
-	accessKey, _ := tgt["access_key_id"].(string)
-	secretKey, _ := tgt["secret_access_key"].(string)
-	sessionToken, _ := tgt["session_token"].(string)
-
-	var tgtMeta map[string]any
-	_ = json.Unmarshal(tgtConn.MetadataJSON, &tgtMeta)
-	endpoint, _ := tgtMeta["endpoint"].(string)
-	region, _ := tgtMeta["region"].(string)
-	bucket, _ := tgtMeta["bucket"].(string)
-	forcePathStyle := true
-	if v, ok := tgtMeta["force_path_style"].(bool); ok {
-		forcePathStyle = v
-	}
-	if endpoint == "" {
-		endpoint = "http://localhost:9000"
-	}
-	if region == "" {
-		region = "us-east-1"
-	}
-	if strings.TrimSpace(bucket) == "" {
-		return true, icebergreg.RunResult{}, fmt.Errorf("target connection metadata missing bucket")
-	}
-
-	opts, _ := jobopts.Parse(job.OptionsJSON)
+	opts := resolved.opts
 	sourceQuery := strings.TrimSpace(opts.Query)
 	if opts.NormalizedSourceMode() == "query" && sourceQuery == "" {
 		sourceQuery = strings.TrimSpace(job.SourceSQL)
 	}
-	datasetPrefix := datasetPrefixForJob(job, srcConn.Engine, opts, tgtMeta)
+	datasetPrefix := resolved.prefix
 	var intent durableCommitIntent
 	var exactArtifacts []artifact.Record
 	if run.CommitID != "" {

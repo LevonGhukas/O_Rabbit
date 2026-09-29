@@ -70,9 +70,13 @@ Fix: reject the new run with `DatasetBusyError` (that logic already exists) and 
 ## 🟠 High
 
 9. **Commit integrity check doesn't scale.** It streams every Parquet object back through the master to re-hash it, so exports in the TB range bottleneck on one process's bandwidth. Use S3 checksums (`x-amz-checksum-sha256`) at upload time and a HEAD at commit.
+   **Status:** DONE
 10. **Runs don't snapshot their configuration.** `buildAssignment` and `commitRun` read the live job, connection and options each time. If someone edits a job or connection mid-run, workers can write under a different prefix, bucket or options than the commit expects. The README says runs snapshot their configuration; they don't.
+   **Status:** DONE
 11. **Parse errors are silently ignored.** Examples: `_ = json.Unmarshal(meta)`, `opts, _ := jobopts.Parse(...)`, and a missing endpoint silently becoming `http://localhost:9000` / `us-east-1`. In production these should be hard errors.
+   **Status:** DONE
 12. **Incremental cursors can lose rows.** Using an exclusive lower bound on the last high-water mark ([postgres.go:171](internal/connectors/postgres.go:171)) permanently skips late-committing rows and ties at the boundary (for example `updated_at` set at transaction start, or out-of-order sequences). Add a lookback window with dedupe or upsert, or at least document the limitation.
+   **Status:** DONE
 13. **Query mode is only "read-only" by denylist.** Its safety is a keyword denylist ([query_mode.go:518](internal/connectors/query_mode.go:518)). Side-effecting functions pass it (`pg_terminate_backend`, `dblink_exec`, `lo_import`), and so does the raw `WhereClause` interpolation. Enforce it at the database: open read-only transactions and document that a read-only database user is required.
 14. **SSH host-key checking is off by default.** An empty `HostKeyFingerprint` accepts any host key ([ssh.go:236](internal/ops/ssh/ssh.go:236)), which allows a man-in-the-middle to capture SSH credentials. More broadly, remote Docker/deploy over SSH makes the ETL master a remote-execution service behind one bearer token. Consider moving it out of the core binary or putting it behind a separate role.
 15. **The HTTP server lacks basic hardening.**

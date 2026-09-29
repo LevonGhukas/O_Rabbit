@@ -924,6 +924,7 @@ func executeTaskBody(ctx context.Context, log *slog.Logger, cp grpcpb.ControlPla
 			if upRes.VerificationMethod != "" {
 				record.VerificationMethod = upRes.VerificationMethod
 			}
+			record.ProviderChecksumSha256 = upRes.ProviderChecksumSHA256
 			skipCh <- upRes.Skipped
 		}(i, pf.Path)
 	}

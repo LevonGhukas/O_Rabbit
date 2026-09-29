@@ -78,6 +78,10 @@ func TestStartRunWithTasksAuditedTransitionsRunAndPersistsAudit(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
 
+	createRunConnections(t, st, "src-audit", "tgt-audit")
+	if err := st.CreateJob(ctx, Job{ID: "job-audit", Name: "job-audit", SourceConnectionID: "src-audit", TargetConnectionID: "tgt-audit", TargetNamespace: "ns", TargetTable: "tbl", WriteMode: "append", OptionsJSON: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
 	run := Run{
 		ID:            "run-audit",
 		JobID:         "job-audit",
