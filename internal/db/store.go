@@ -79,7 +79,12 @@ func decryptStoredJSON(k secretcrypto.Key, stored string, aad []byte) ([]byte, e
 }
 
 type Store struct {
-	db                      *sql.DB
+	// db is the single writer connection. It must stay a single connection:
+	// the leadership fence installs per-connection TEMP triggers on it.
+	db *sql.DB
+	// rdb is a read-only pool for observability and list queries. With WAL,
+	// readers never block the writer and always see committed data.
+	rdb                     *sql.DB
 	log                     *slog.Logger
 	masterKey               secretcrypto.Key
 	canceledObjectRetention time.Duration
@@ -88,7 +93,12 @@ type Store struct {
 
 type Config struct {
 	Path string
+	// ReadConns sizes the read-only connection pool. Zero means
+	// defaultReadConns.
+	ReadConns int
 }
+
+const defaultReadConns = 4
 
 func (s *Store) SetMasterKey(k secretcrypto.Key) {
 	s.masterKey = k
@@ -134,7 +144,38 @@ func Open(ctx context.Context, cfg Config, log *slog.Logger) (*Store, error) {
 		return nil, err
 	}
 
-	return &Store{db: db, log: log, canceledObjectRetention: 24 * time.Hour}, nil
+	rdb, err := openReadPool(ctx, cfg, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	return &Store{db: db, rdb: rdb, log: log, canceledObjectRetention: 24 * time.Hour}, nil
+}
+
+// openReadPool opens a query_only pool on the same database file so reads do
+// not queue behind the single writer connection. In-memory and URI-style
+// paths cannot be shared across pools, so they reuse the writer.
+func openReadPool(ctx context.Context, cfg Config, writer *sql.DB) (*sql.DB, error) {
+	if cfg.Path == "" || strings.Contains(cfg.Path, ":memory:") || strings.HasPrefix(cfg.Path, "file:") || strings.Contains(cfg.Path, "?") {
+		return writer, nil
+	}
+	conns := cfg.ReadConns
+	if conns <= 0 {
+		conns = defaultReadConns
+	}
+	dsn := "file:" + cfg.Path + "?_pragma=busy_timeout(15000)&_pragma=query_only(1)&_pragma=foreign_keys(1)"
+	rdb, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	rdb.SetMaxOpenConns(conns)
+	rdb.SetMaxIdleConns(conns)
+	if err := rdb.PingContext(ctx); err != nil {
+		_ = rdb.Close()
+		return nil, err
+	}
+	return rdb, nil
 }
 
 func (s *Store) SetCanceledObjectRetention(retention time.Duration) {
@@ -143,7 +184,12 @@ func (s *Store) SetCanceledObjectRetention(retention time.Duration) {
 	}
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	if s.rdb != nil && s.rdb != s.db {
+		_ = s.rdb.Close()
+	}
+	return s.db.Close()
+}
 
 // Ready reports whether the control-plane store is currently queryable.
 // It uses a short, caller-bounded probe suitable for HTTP readiness checks.
@@ -436,7 +482,7 @@ func (s *Store) ListConnectionsPage(ctx context.Context, limit int, cursor strin
 	if err != nil {
 		return nil, "", err
 	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.rdb.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, "", err
 	}
@@ -511,7 +557,7 @@ func (s *Store) GetJob(ctx context.Context, id string) (Job, error) {
 }
 
 func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, source_connection_id, target_connection_id, source_sql, target_namespace, target_table, write_mode, incremental, hwm_column, options_json, created_at, updated_at FROM jobs ORDER BY created_at DESC;`)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT id, name, source_connection_id, target_connection_id, source_sql, target_namespace, target_table, write_mode, incremental, hwm_column, options_json, created_at, updated_at FROM jobs ORDER BY created_at DESC;`)
 	if err != nil {
 		return nil, err
 	}
@@ -630,7 +676,7 @@ func (s *Store) ListRunsPage(ctx context.Context, limit int, cursor string) ([]R
 	if err != nil {
 		return nil, "", err
 	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.rdb.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, "", wrapRunRegistrationConfigColumnErr(err)
 	}
@@ -791,7 +837,7 @@ func (s *Store) attachRegistrationProjection(ctx context.Context, r *Run) {
 		if projection, err := s.GetReconciliationProjection(ctx, reg.ID); err == nil {
 			r.Reconciliation = projection
 		}
-		_ = s.db.QueryRowContext(ctx, `SELECT id FROM iceberg_registrations WHERE dataset_id=? AND target_key=? AND dataset_sequence<? AND status<>'REGISTERED' ORDER BY dataset_sequence LIMIT 1`, reg.DatasetID, reg.TargetKey, reg.DatasetSequence).Scan(&r.RegistrationBlockedBy)
+		_ = s.rdb.QueryRowContext(ctx, `SELECT id FROM iceberg_registrations WHERE dataset_id=? AND target_key=? AND dataset_sequence<? AND status<>'REGISTERED' ORDER BY dataset_sequence LIMIT 1`, reg.DatasetID, reg.TargetKey, reg.DatasetSequence).Scan(&r.RegistrationBlockedBy)
 	}
 	r.Readiness = RegistrationReadiness(r.Status, r.CatalogStatus)
 	if r.Status == "COMMITTING" {
@@ -904,7 +950,7 @@ func (s *Store) CancelRun(ctx context.Context, runID, reason string) (bool, stri
 }
 
 func (s *Store) ListTasksForRun(ctx context.Context, runID string) ([]Task, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT t.id,t.run_id,t.task_index,t.partition_spec_json,t.worker_id,t.status,t.rows_read,t.bytes_read,t.bytes_written,t.parquet_objects_json,t.started_at,t.finished_at,t.error_message,t.current_attempt_id,t.attempt_count,t.next_eligible_at,COALESCE(a.attempt_number,0),COALESCE(a.lease_deadline,''),COALESCE(a.last_renewed_at,''),COALESCE(a.status,''),COALESCE(a.failure_class,''),COALESCE(ar.artifact_count,0),COALESCE(ar.artifact_bytes,0),COALESCE(ar.artifact_rows,0),COALESCE(ar.verification_status,''),COALESCE(ar.verification_method,''),COALESCE(ar.verified_at,'') FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_number=t.attempt_count LEFT JOIN (SELECT task_id,COUNT(*) artifact_count,SUM(byte_size) artifact_bytes,SUM(row_count) artifact_rows,MIN(verification_status) verification_status,MIN(verification_method) verification_method,MAX(verified_at) verified_at FROM task_artifacts GROUP BY task_id) ar ON ar.task_id=t.id WHERE t.run_id=? ORDER BY t.task_index ASC;`, runID)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT t.id,t.run_id,t.task_index,t.partition_spec_json,t.worker_id,t.status,t.rows_read,t.bytes_read,t.bytes_written,t.parquet_objects_json,t.started_at,t.finished_at,t.error_message,t.current_attempt_id,t.attempt_count,t.next_eligible_at,COALESCE(a.attempt_number,0),COALESCE(a.lease_deadline,''),COALESCE(a.last_renewed_at,''),COALESCE(a.status,''),COALESCE(a.failure_class,''),COALESCE(ar.artifact_count,0),COALESCE(ar.artifact_bytes,0),COALESCE(ar.artifact_rows,0),COALESCE(ar.verification_status,''),COALESCE(ar.verification_method,''),COALESCE(ar.verified_at,'') FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_number=t.attempt_count LEFT JOIN (SELECT task_id,COUNT(*) artifact_count,SUM(byte_size) artifact_bytes,SUM(row_count) artifact_rows,MIN(verification_status) verification_status,MIN(verification_method) verification_method,MAX(verified_at) verified_at FROM task_artifacts GROUP BY task_id) ar ON ar.task_id=t.id WHERE t.run_id=? ORDER BY t.task_index ASC;`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -1064,7 +1110,7 @@ func (s *Store) loadWorkerInstances(ctx context.Context, workers []Worker) error
 		return nil
 	}
 	// Fetch all instances and group by worker
-	rows, err := s.db.QueryContext(ctx, `SELECT boot_id, worker_id, hostname, pid, version, status, started_at, last_heartbeat FROM worker_instances ORDER BY last_heartbeat DESC`)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT boot_id, worker_id, hostname, pid, version, status, started_at, last_heartbeat FROM worker_instances ORDER BY last_heartbeat DESC`)
 	if err != nil {
 		return err
 	}
@@ -1088,7 +1134,7 @@ func (s *Store) loadWorkerInstances(ctx context.Context, workers []Worker) error
 }
 
 func (s *Store) ListWorkers(ctx context.Context) ([]Worker, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, addr, status, last_heartbeat, capabilities_json FROM workers ORDER BY last_heartbeat DESC;`)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT id, addr, status, last_heartbeat, capabilities_json FROM workers ORDER BY last_heartbeat DESC;`)
 	if err != nil {
 		return nil, err
 	}
@@ -1116,7 +1162,7 @@ func (s *Store) ListWorkersActive(ctx context.Context, activeSince string) ([]Wo
 	if strings.TrimSpace(activeSince) == "" {
 		return s.ListWorkers(ctx)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, addr, status, last_heartbeat, capabilities_json FROM workers WHERE last_heartbeat >= ? ORDER BY last_heartbeat DESC;`, activeSince)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT id, addr, status, last_heartbeat, capabilities_json FROM workers WHERE last_heartbeat >= ? ORDER BY last_heartbeat DESC;`, activeSince)
 	if err != nil {
 		return nil, err
 	}
@@ -1552,7 +1598,7 @@ func (s *Store) ListEventsForRun(ctx context.Context, runID string, limit int) (
 	if limit <= 0 {
 		limit = 500
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, run_id, task_id, ts, level, message, fields_json FROM events WHERE run_id=? ORDER BY ts ASC LIMIT ?;`, runID, limit)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT id, run_id, task_id, ts, level, message, fields_json FROM events WHERE run_id=? ORDER BY ts ASC LIMIT ?;`, runID, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -285,7 +285,7 @@ func safeError(message string) string {
 }
 
 func (s *Store) ListMultipartUploadsForRun(ctx context.Context, runID string) ([]MultipartLifecycle, error) {
-	rows, err := s.db.QueryContext(ctx, multipartSelect+` WHERE run_id=? ORDER BY task_id,file_index`, runID)
+	rows, err := s.rdb.QueryContext(ctx, multipartSelect+` WHERE run_id=? ORDER BY task_id,file_index`, runID)
 	if err != nil {
 		return nil, err
 	}

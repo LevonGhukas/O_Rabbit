@@ -48,5 +48,6 @@ Benchmarks/oracle/*.txt
 .env.minio
 .env.worker
 .env.worker.on.master
+.env.backup
 
 configs.sql

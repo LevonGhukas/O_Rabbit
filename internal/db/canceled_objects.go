@@ -135,12 +135,12 @@ func scanCanceledObject(row rowScanner, c *CanceledObjectCandidate) error {
 
 func (s *Store) GetCanceledObjectCandidate(ctx context.Context, id string) (CanceledObjectCandidate, error) {
 	var c CanceledObjectCandidate
-	err := scanCanceledObject(s.db.QueryRowContext(ctx, canceledObjectSelect+` WHERE id=?`, id), &c)
+	err := scanCanceledObject(s.rdb.QueryRowContext(ctx, canceledObjectSelect+` WHERE id=?`, id), &c)
 	return c, err
 }
 
 func (s *Store) ListCanceledObjectCandidates(ctx context.Context, runID string) ([]CanceledObjectCandidate, error) {
-	rows, err := s.db.QueryContext(ctx, canceledObjectSelect+` WHERE run_id=? ORDER BY discovered_at,id`, runID)
+	rows, err := s.rdb.QueryContext(ctx, canceledObjectSelect+` WHERE run_id=? ORDER BY discovered_at,id`, runID)
 	if err != nil {
 		return nil, err
 	}

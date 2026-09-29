@@ -149,6 +149,9 @@ type masterConfig struct {
 	CanceledObjectRetention           time.Duration
 	CanceledObjectCleanupMaxAttempts  int
 	CanceledObjectCleanupDryRun       bool
+	HistoryRetention                  time.Duration
+	HistoryPruneInterval              time.Duration
+	DBReadConns                       int
 }
 
 func loadMasterConfigFromEnv() masterConfig {
@@ -186,6 +189,9 @@ func loadMasterConfigFromEnv() masterConfig {
 		CanceledObjectRetention:           envDurationDefault("ORABBIT_CANCELED_OBJECT_RETENTION", 7*24*time.Hour),
 		CanceledObjectCleanupMaxAttempts:  envPositiveIntDefault("ORABBIT_CANCELED_OBJECT_CLEANUP_MAX_ATTEMPTS", 5),
 		CanceledObjectCleanupDryRun:       envBoolDefault("ORABBIT_CANCELED_OBJECT_CLEANUP_DRY_RUN", true),
+		HistoryRetention:                  envRetentionDefault("ORABBIT_HISTORY_RETENTION", 30*24*time.Hour),
+		HistoryPruneInterval:              envDurationDefault("ORABBIT_HISTORY_PRUNE_INTERVAL", time.Hour),
+		DBReadConns:                       envPositiveIntDefault("ORABBIT_DB_READ_CONNS", 4),
 	}
 }
 
@@ -230,6 +236,15 @@ func envDurationDefault(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return v
+}
+
+// envRetentionDefault is envDurationDefault that also accepts "0" to
+// disable pruning.
+func envRetentionDefault(key string, def time.Duration) time.Duration {
+	if strings.TrimSpace(os.Getenv(key)) == "0" {
+		return 0
+	}
+	return envDurationDefault(key, def)
 }
 
 func envPositiveIntDefault(key string, def int) int {

@@ -229,6 +229,9 @@ split-worker Compose file translates its other connection settings into flags.
 | `ORABBIT_CANCELED_OBJECT_CLEANUP_MAX_ATTEMPTS` | `5` | Object cleanup retry limit |
 | `ORABBIT_CANCELED_OBJECT_CLEANUP_DRY_RUN` | `true` | Report candidates without deletion |
 | `ORABBIT_FULL_RUN_RETAIN_COUNT` | `1` | Successful full-refresh datasets retained after Iceberg publication |
+| `ORABBIT_HISTORY_RETENTION` | `720h` | Age after which history of finished runs (events, failed-run attempts, old catalog attempts, leadership history) is pruned; `0` disables |
+| `ORABBIT_HISTORY_PRUNE_INTERVAL` | `1h` | History pruning cadence |
+| `ORABBIT_DB_READ_CONNS` | `4` | Read-only SQLite connections for list, metrics and SSE queries; writes always use one connection |
 
 Admission limits are layered. `ORABBIT_MAX_ACTIVE_RUNS` counts durable
 `RUNNING` and `COMMITTING` runs; excess planned runs keep their tasks
@@ -861,8 +864,11 @@ Only one master process may use a given local database identity. The database
 uses durable leadership records and mutation fencing in addition to a local
 process lock.
 
-Back up the SQLite database together with its `-wal` and `-shm` files using a
-SQLite-aware backup procedure. Preserve `ORABBIT_MASTER_KEY` separately.
+The master is a single point of failure: there is no automatic failover or
+replication. Run Litestream beside it (`docker-compose.master.backup.yml`) or
+take `sqlite3 .backup` copies, and preserve `ORABBIT_MASTER_KEY` separately.
+See [docs/master-backup-restore.md](docs/master-backup-restore.md) for the
+deployment model, backup setup, restore runbook and history retention.
 
 ## Development
 
