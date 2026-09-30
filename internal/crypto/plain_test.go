@@ -8,26 +8,6 @@ import (
 	"testing"
 )
 
-func TestEncryptDecryptPlainCompatNoKey(t *testing.T) {
-	k := Key{}
-	aad := []byte("conn-1")
-	plain := []byte(`{"dsn":"postgres://u:p@h/db"}`)
-	blob, err := Encrypt(k, plain, aad)
-	if err != nil {
-		t.Fatalf("Encrypt: %v", err)
-	}
-	if len(blob) < 2 || blob[0] != blobVersion0Plain {
-		t.Fatalf("expected plaintext blob version")
-	}
-	got, err := Decrypt(k, blob, aad)
-	if err != nil {
-		t.Fatalf("Decrypt: %v", err)
-	}
-	if !bytes.Equal(got, plain) {
-		t.Fatalf("decrypted plaintext mismatch: got=%q want=%q", got, plain)
-	}
-}
-
 func TestEncryptDecryptAESGCM(t *testing.T) {
 	keyBytes := bytes.Repeat([]byte{0x7a}, 32)
 	k := Key{key: keyBytes}
@@ -89,5 +69,29 @@ func TestLoadMasterKeyFromEnvParsesBase64AndHex(t *testing.T) {
 	}
 	if !bytes.Equal(k.key, base) {
 		t.Fatalf("decoded hex key mismatch")
+	}
+}
+
+func TestEncryptRequiresKey(t *testing.T) {
+	if _, err := Encrypt(Key{}, []byte("secret"), []byte("aad")); err == nil {
+		t.Fatal("expected encrypt error without key")
+	}
+}
+
+func TestDecryptRejectsVersionedPlaintext(t *testing.T) {
+	blob := append([]byte{blobVersion0Plain}, []byte("secret")...)
+
+	k := Key{key: bytes.Repeat([]byte{0x42}, 32)}
+
+	if _, err := Decrypt(k, blob, []byte("aad")); err == nil {
+		t.Fatal("expected plaintext blob to be rejected")
+	}
+}
+
+func TestDecryptRejectsUnversionedPlaintext(t *testing.T) {
+	k := Key{key: bytes.Repeat([]byte{0x42}, 32)}
+
+	if _, err := Decrypt(k, []byte("legacy-secret"), []byte("aad")); err == nil {
+		t.Fatal("expected unversioned plaintext to be rejected")
 	}
 }

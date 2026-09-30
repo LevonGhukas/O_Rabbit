@@ -1,3 +1,5 @@
+// cmd/master/config.go
+
 package main
 
 import (
@@ -25,6 +27,9 @@ func (c masterConfig) validateLeasePolicy() error {
 	if c.MaxActiveRuns <= 0 || c.MaxActiveTasks <= 0 || c.CatalogWorkLimit <= 0 || c.UploadCapacityLimit <= 0 {
 		return fmt.Errorf("global active-run, active-task, catalog-work, and upload-capacity limits must be positive")
 	}
+	if c.WorkerCertTTL < time.Hour || c.WorkerCertTTL > 30*24*time.Hour {
+		return fmt.Errorf("worker certificate TTL must be between 1h and 720h")
+	}
 	if c.UploadCapacityLeaseTTL < 3*time.Second {
 		return fmt.Errorf("upload capacity lease TTL must be at least 3s")
 	}
@@ -43,16 +48,50 @@ func (c masterConfig) validateLeasePolicy() error {
 	if c.CanceledObjectCleanupScanInterval <= 0 || c.CanceledObjectRetention <= 0 || c.CanceledObjectCleanupMaxAttempts <= 0 {
 		return fmt.Errorf("canceled-object cleanup scan, retention, and max attempts must be positive")
 	}
+	if c.RegistrationLeaseDuration < 3*time.Second || c.ReconciliationLeaseDuration < 3*time.Second {
+		return fmt.Errorf("registration and reconciliation lease durations must be at least 3s")
+	}
 	return nil
 }
 
 func (c masterConfig) validateAuthentication() error {
-	if !isLoopbackListenAddress(c.GRPCAddr) && strings.TrimSpace(c.WorkerAuthToken) == "" {
-		return fmt.Errorf("remote gRPC listen address %q requires ORABBIT_WORKER_AUTH_TOKEN", c.GRPCAddr)
+	grpcRemote := !isLoopbackListenAddress(c.GRPCAddr)
+
+	if grpcRemote && strings.TrimSpace(c.WorkerAuthToken) == "" {
+		return fmt.Errorf(
+			"remote gRPC listen address %q requires ORABBIT_WORKER_AUTH_TOKEN",
+			c.GRPCAddr,
+		)
 	}
+
+	if grpcRemote && c.Insecure && !c.AllowInsecureRemoteGRPC {
+		return fmt.Errorf(
+			"remote gRPC listen address %q cannot use insecure gRPC; configure TLS "+
+				"(or set ORABBIT_GRPC_ALLOW_INSECURE_REMOTE=true for an isolated private network)",
+			c.GRPCAddr,
+		)
+	}
+
+	if !c.Insecure {
+		if strings.TrimSpace(c.TLSCert) == "" {
+			return fmt.Errorf("gRPC TLS requires ORABBIT_TLS_CERT_FILE")
+		}
+		if strings.TrimSpace(c.TLSKey) == "" {
+			return fmt.Errorf("gRPC TLS requires ORABBIT_TLS_KEY_FILE")
+		}
+	}
+
+	if remote := strings.TrimSpace(c.RemoteOpsAuthToken); remote != "" && remote == strings.TrimSpace(c.HTTPAuthToken) {
+		return fmt.Errorf("ORABBIT_REMOTE_OPS_AUTH_TOKEN must differ from ORABBIT_HTTP_AUTH_TOKEN")
+	}
+
 	if !isLoopbackListenAddress(c.HTTPAddr) && strings.TrimSpace(c.HTTPAuthToken) == "" {
-		return fmt.Errorf("remote HTTP listen address %q requires ORABBIT_HTTP_AUTH_TOKEN", c.HTTPAddr)
+		return fmt.Errorf(
+			"remote HTTP listen address %q requires ORABBIT_HTTP_AUTH_TOKEN",
+			c.HTTPAddr,
+		)
 	}
+
 	return nil
 }
 
@@ -70,16 +109,27 @@ func isLoopbackListenAddress(addr string) bool {
 }
 
 type masterConfig struct {
-	DBPath          string
-	GRPCAddr        string
-	HTTPAddr        string
-	HTTPAuthToken   string
-	WorkerAuthToken string
-	IceBin          string
+	DBPath        string
+	GRPCAddr      string
+	HTTPAddr      string
+	HTTPAuthToken string
+	// RemoteOpsAuthToken enables the remote operations API (SSH, Docker,
+	// deployments) and is the only token it accepts. Empty disables it.
+	RemoteOpsAuthToken string
+	WorkerAuthToken    string
+	IceBin             string
 
 	Insecure bool
-	TLSCert  string
-	TLSKey   string
+	// WorkerCertTTL is the lifetime of master-issued worker certificates.
+	// Workers renew at two thirds of it; revocation takes effect immediately.
+	WorkerCertTTL time.Duration
+	// AllowInsecureRemoteGRPC is an explicit opt-in for plaintext gRPC on a
+	// non-loopback listener inside an isolated private network (for example a
+	// single-host Docker network). Task assignments carry source and target
+	// credentials, so it must never be used on a routable network.
+	AllowInsecureRemoteGRPC bool
+	TLSCert                 string
+	TLSKey                  string
 
 	LogLevel                          string
 	LogFormat                         string
@@ -102,6 +152,16 @@ type masterConfig struct {
 	CanceledObjectRetention           time.Duration
 	CanceledObjectCleanupMaxAttempts  int
 	CanceledObjectCleanupDryRun       bool
+	HistoryRetention                  time.Duration
+	HistoryPruneInterval              time.Duration
+	DBReadConns                       int
+	CommitTimeout                     time.Duration
+	CommitMaxAttempts                 int
+	RegistrationTimeout               time.Duration
+	RegistrationLeaseDuration         time.Duration
+	RegistrationMaxAttempts           int
+	ReconciliationLeaseDuration       time.Duration
+	ReconciliationMaxAttempts         int
 }
 
 func loadMasterConfigFromEnv() masterConfig {
@@ -110,11 +170,14 @@ func loadMasterConfigFromEnv() masterConfig {
 		GRPCAddr:                          envutil.EnvOrDefault("ORABBIT_GRPC_ADDR", "127.0.0.1:9102"),
 		HTTPAddr:                          envutil.EnvOrDefault("ORABBIT_HTTP_ADDR", "127.0.0.1:9100"),
 		HTTPAuthToken:                     strings.TrimSpace(os.Getenv("ORABBIT_HTTP_AUTH_TOKEN")),
+		RemoteOpsAuthToken:                strings.TrimSpace(os.Getenv("ORABBIT_REMOTE_OPS_AUTH_TOKEN")),
 		WorkerAuthToken:                   strings.TrimSpace(os.Getenv("ORABBIT_WORKER_AUTH_TOKEN")),
 		IceBin:                            envutil.EnvOrDefault("ORABBIT_ICE_BIN", "ice"),
-		Insecure:                          envBoolDefault("ORABBIT_GRPC_INSECURE", true),
+		Insecure:                          envBoolDefault("ORABBIT_GRPC_INSECURE", false),
+		AllowInsecureRemoteGRPC:           envBoolDefault("ORABBIT_GRPC_ALLOW_INSECURE_REMOTE", false),
 		TLSCert:                           strings.TrimSpace(os.Getenv("ORABBIT_TLS_CERT_FILE")),
 		TLSKey:                            strings.TrimSpace(os.Getenv("ORABBIT_TLS_KEY_FILE")),
+		WorkerCertTTL:                     envDurationDefault("ORABBIT_WORKER_CERT_TTL", 24*time.Hour),
 		LogLevel:                          envutil.EnvOrDefault("ORABBIT_LOG_LEVEL", "INFO"),
 		LogFormat:                         envutil.EnvOrDefault("ORABBIT_LOG_FORMAT", "json"),
 		TaskLeaseDuration:                 envDurationDefault("ORABBIT_TASK_LEASE_DURATION", 30*time.Second),
@@ -136,6 +199,16 @@ func loadMasterConfigFromEnv() masterConfig {
 		CanceledObjectRetention:           envDurationDefault("ORABBIT_CANCELED_OBJECT_RETENTION", 7*24*time.Hour),
 		CanceledObjectCleanupMaxAttempts:  envPositiveIntDefault("ORABBIT_CANCELED_OBJECT_CLEANUP_MAX_ATTEMPTS", 5),
 		CanceledObjectCleanupDryRun:       envBoolDefault("ORABBIT_CANCELED_OBJECT_CLEANUP_DRY_RUN", true),
+		HistoryRetention:                  envRetentionDefault("ORABBIT_HISTORY_RETENTION", 30*24*time.Hour),
+		HistoryPruneInterval:              envDurationDefault("ORABBIT_HISTORY_PRUNE_INTERVAL", time.Hour),
+		DBReadConns:                       envPositiveIntDefault("ORABBIT_DB_READ_CONNS", 4),
+		CommitTimeout:                     envDurationDefault("ORABBIT_COMMIT_TIMEOUT", 30*time.Minute),
+		CommitMaxAttempts:                 envPositiveIntDefault("ORABBIT_COMMIT_MAX_ATTEMPTS", 5),
+		RegistrationTimeout:               envDurationDefault("ORABBIT_REGISTRATION_TIMEOUT", 30*time.Minute),
+		RegistrationLeaseDuration:         envDurationDefault("ORABBIT_REGISTRATION_LEASE_DURATION", 30*time.Second),
+		RegistrationMaxAttempts:           envPositiveIntDefault("ORABBIT_REGISTRATION_MAX_ATTEMPTS", 5),
+		ReconciliationLeaseDuration:       envDurationDefault("ORABBIT_RECONCILIATION_LEASE_DURATION", 30*time.Second),
+		ReconciliationMaxAttempts:         envPositiveIntDefault("ORABBIT_RECONCILIATION_MAX_ATTEMPTS", 5),
 	}
 }
 
@@ -147,8 +220,10 @@ func bindMasterFlags(cfg *masterConfig) {
 	flag.StringVar(&cfg.WorkerAuthToken, "worker-auth-token", cfg.WorkerAuthToken, "Bearer token required on worker gRPC calls (required for non-loopback gRPC)")
 	flag.StringVar(&cfg.IceBin, "ice-bin", cfg.IceBin, "Ice CLI binary path for master-owned engine=ice registration")
 	flag.BoolVar(&cfg.Insecure, "insecure", cfg.Insecure, "Disable gRPC TLS (dev)")
+	flag.BoolVar(&cfg.AllowInsecureRemoteGRPC, "allow-insecure-remote-grpc", cfg.AllowInsecureRemoteGRPC, "Permit plaintext gRPC on a non-loopback listener (isolated private networks only)")
 	flag.StringVar(&cfg.TLSCert, "tls-cert", cfg.TLSCert, "gRPC TLS cert file (or ORABBIT_TLS_CERT_FILE)")
 	flag.StringVar(&cfg.TLSKey, "tls-key", cfg.TLSKey, "gRPC TLS key file (or ORABBIT_TLS_KEY_FILE)")
+	flag.DurationVar(&cfg.WorkerCertTTL, "worker-cert-ttl", cfg.WorkerCertTTL, "Lifetime of master-issued worker identity certificates (1h-720h)")
 	flag.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level: DEBUG, INFO, WARN, ERROR")
 	flag.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "Log format: json or text")
 	flag.DurationVar(&cfg.TaskLeaseDuration, "task-lease-duration", cfg.TaskLeaseDuration, "Task attempt lease duration")
@@ -178,6 +253,15 @@ func envDurationDefault(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return v
+}
+
+// envRetentionDefault is envDurationDefault that also accepts "0" to
+// disable pruning.
+func envRetentionDefault(key string, def time.Duration) time.Duration {
+	if strings.TrimSpace(os.Getenv(key)) == "0" {
+		return 0
+	}
+	return envDurationDefault(key, def)
 }
 
 func envPositiveIntDefault(key string, def int) int {

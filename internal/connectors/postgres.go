@@ -36,7 +36,7 @@ var (
 )
 
 func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
-	db, err := sql.Open("pgx", dsn)
+	db, err := openReadOnlyPostgres(dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +60,7 @@ func (p *Postgres) ExportSnapshot(ctx context.Context) (string, error) {
 	// To share a snapshot across workers, the transaction exporting it must remain open.
 	// Since planner closes its db pool, we create a dedicated detached connection that
 	// sleeps in the background for 24 hours (or until the database kills it).
-	detachedDB, err := sql.Open("pgx", p.dsn)
+	detachedDB, err := openReadOnlyPostgres(p.dsn)
 	if err != nil {
 		return "", fmt.Errorf("failed to open detached snapshot connection: %w", err)
 	}

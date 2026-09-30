@@ -435,12 +435,3 @@ func mongoLosslessString(v any) (string, error) {
 	}
 	return "", fmt.Errorf("Mongo Extended JSON fallback: %w", err)
 }
-
-// mongoValueToString is retained for package compatibility but is now strict.
-func mongoValueToString(v any) string {
-	text, err := mongoLosslessString(v)
-	if err != nil {
-		return ""
-	}
-	return text
-}

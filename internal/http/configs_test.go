@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 	"github.com/LevonGhukas/O_Rabbit/internal/httperr"
 )
@@ -27,7 +26,7 @@ func TestHandleServerConfigsRouting(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, "")
+			srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{}, "")
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(tt.method, "/servers/s1/configs", nil)
 			srv.handleServerConfigs(rec, req, "s1", tt.parts)
@@ -46,7 +45,7 @@ func TestHandleServerConfigsRouting(t *testing.T) {
 }
 
 func TestHandleServerConfigsUnknownRoutes(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{}, "")
 	for _, parts := range [][]string{{"app.env", "other"}, {"app.env", "validate", "extra"}} {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/servers/s1/configs", nil)
@@ -63,7 +62,7 @@ func TestHandleValidateConfigInvalidJSON(t *testing.T) {
 	if _, err := st.CreateServer(context.Background(), server); err != nil {
 		t.Fatal(err)
 	}
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/servers/s1/configs/app.env/validate", strings.NewReader("{"))
 	srv.handleServerConfigs(rec, req, "s1", []string{"app.env", "validate"})
@@ -82,7 +81,7 @@ func TestHandleValidateConfig(t *testing.T) {
 	if _, err := st.CreateServer(context.Background(), server); err != nil {
 		t.Fatal(err)
 	}
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/servers/s1/configs/app.env/validate", strings.NewReader(`{"content":"PORT=8080\n"}`))
 	srv.handleServerConfigs(rec, req, "s1", []string{"app.env", "validate"})

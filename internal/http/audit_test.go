@@ -14,7 +14,7 @@ import (
 
 func TestConnectionCreateWritesAuditRecord(t *testing.T) {
 	st := openTestStore(t)
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "topsecret")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "topsecret")
 
 	reqBody := `{
 		"name":"source-1",
@@ -73,7 +73,7 @@ func TestConnectionUpdateWritesAuditBeforeAfter(t *testing.T) {
 		MetadataJSON:  []byte(`{"dsn":"postgres://old"}`),
 		SecretEncBlob: []byte(`plaintext-secret`),
 	})
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "topsecret")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "topsecret")
 
 	reqBody := `{
 		"name":"source-new",
@@ -117,7 +117,7 @@ func TestConnectionDeleteWritesBeforeOnlyAuditRecord(t *testing.T) {
 		MetadataJSON:  []byte(`{"dsn":"postgres://delete"}`),
 		SecretEncBlob: []byte(`plaintext-secret`),
 	})
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/connections/conn-delete", nil)
@@ -147,7 +147,7 @@ func TestConnectionDeleteWritesBeforeOnlyAuditRecord(t *testing.T) {
 
 func TestJobCreateUpdateDeleteWriteAuditRecords(t *testing.T) {
 	st := openTestStore(t)
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 
 	createBody := `{
 		"name":"job-1",
@@ -239,13 +239,24 @@ func TestRunStartWritesCompactAuditRecord(t *testing.T) {
 		MetadataJSON:  []byte(`{}`),
 		SecretEncBlob: []byte(`{}`),
 	})
+	// A new dataset: the object store has no _state.json yet.
+	objectStore := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`<Error><Code>NoSuchKey</Code><Message>not found</Message></Error>`))
+	}))
+	defer objectStore.Close()
+	targetSecret, err := crypto.Encrypt(testCryptoKey, []byte(`{"access_key_id":"a","secret_access_key":"b"}`), []byte("tgt-run"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	createTestConnection(t, st, db.Connection{
 		ID:            "tgt-run",
 		Name:          "tgt-run",
 		Kind:          "target",
 		Engine:        "s3",
-		MetadataJSON:  []byte(`{"prefix":"exports"}`),
-		SecretEncBlob: []byte(`{}`),
+		MetadataJSON:  []byte(`{"prefix":"exports","bucket":"exports-bucket","endpoint":"` + objectStore.URL + `"}`),
+		SecretEncBlob: targetSecret,
 	})
 	if err := st.CreateJob(context.Background(), db.Job{
 		ID:                 "job-run",
@@ -259,7 +270,7 @@ func TestRunStartWritesCompactAuditRecord(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "topsecret")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "topsecret")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/jobs/job-run/runs", nil)
 	req.Header.Set("Authorization", "Bearer topsecret")

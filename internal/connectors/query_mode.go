@@ -270,8 +270,7 @@ func queryModeCursor(ctx context.Context, db *sql.DB, engine string, q CursorQue
 		rows.Close()
 		return nil, nil, nil, -1, err
 	}
-	cursorIdx := -1
-	cursorIdx = queryResultColumnIndex(cols, q.CursorColumn)
+	cursorIdx := queryResultColumnIndex(cols, q.CursorColumn)
 	return rows, cols, ct, cursorIdx, nil
 }
 
@@ -452,6 +451,55 @@ func NormalizeReadOnlySQLQuery(raw string) (string, error) {
 		query = strings.TrimSpace(query[:finalSemi])
 	}
 	return query, nil
+}
+
+// ValidateWhereClause checks a user-supplied row filter before it is placed
+// inside "WHERE (<clause>) AND <cursor range>". It must be a single boolean
+// expression: no statement separators, no comments (which could remove the
+// cursor range that follows), balanced parentheses (so it cannot close the
+// surrounding group), and none of the keywords rejected in query mode. Like
+// query mode this is a guard against mistakes, not a sandbox: source
+// connections must use a read-only database user.
+func ValidateWhereClause(clause string) error {
+	depth := 0
+	for i := 0; i < len(clause); {
+		c := clause[i]
+		switch {
+		case c == '-' && i+1 < len(clause) && clause[i+1] == '-',
+			c == '/' && i+1 < len(clause) && clause[i+1] == '*':
+			return fmt.Errorf("where_clause must not contain comments")
+		case c == ';':
+			return fmt.Errorf("where_clause must be a single expression without ';'")
+		case c == '\'', c == '"', c == '`':
+			next, ok := skipSQLQuoted(clause, i+1, c)
+			if !ok {
+				return fmt.Errorf("where_clause contains an unterminated quoted value")
+			}
+			i = next
+			continue
+		case c == '(':
+			depth++
+		case c == ')':
+			if depth--; depth < 0 {
+				return fmt.Errorf("where_clause has unbalanced parentheses")
+			}
+		case isSQLIdentStart(c):
+			j := i + 1
+			for j < len(clause) && isSQLIdentPart(clause[j]) {
+				j++
+			}
+			if tok := strings.ToUpper(clause[i:j]); destructiveSQLKeyword(tok) {
+				return fmt.Errorf("where_clause rejects SQL keyword %q", tok)
+			}
+			i = j
+			continue
+		}
+		i++
+	}
+	if depth != 0 {
+		return fmt.Errorf("where_clause has unbalanced parentheses")
+	}
+	return nil
 }
 
 func scanSQLQuery(s string) ([]string, int, error) {

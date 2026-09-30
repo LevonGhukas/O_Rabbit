@@ -50,6 +50,9 @@ func (s *Store) StartRunWithTasks(ctx context.Context, run Run, tasks []TaskInse
 		if err := insertTasksTx(ctx, tx, tasks); err != nil {
 			return err
 		}
+		if err := snapshotRunConfigTx(ctx, tx, run.ID); err != nil {
+			return err
+		}
 		var err error
 		admitted, err = s.admitRunTx(ctx, tx, run.ID)
 		return err
@@ -62,6 +65,19 @@ func (s *Store) StartRunWithTasks(ctx context.Context, run Run, tasks []TaskInse
 // transitions in this transaction.
 func (s *Store) AdmitPendingRuns(ctx context.Context) (int, error) {
 	if s.maxActiveRuns <= 0 {
+		return 0, nil
+	}
+	// Workers call this on every poll. Check on the read pool first so the
+	// common case (nothing waiting, or no free capacity) takes no write lock.
+	var waiting bool
+	if err := s.rdb.QueryRowContext(ctx, `
+		SELECT (SELECT COUNT(*) FROM runs WHERE status IN ('RUNNING','COMMITTING')) < ?
+		   AND EXISTS(SELECT 1 FROM runs r WHERE r.status='PLANNING'
+		              AND EXISTS(SELECT 1 FROM tasks t WHERE t.run_id=r.id AND t.status='PENDING'))`,
+		s.maxActiveRuns).Scan(&waiting); err != nil {
+		return 0, err
+	}
+	if !waiting {
 		return 0, nil
 	}
 	admitted := 0

@@ -1,0 +1,16 @@
+# Optional overlay: run Litestream beside the master to replicate its SQLite
+# database continuously. Use together with docker-compose.master.yml:
+#   docker compose -f docker-compose.master.yml -f docker-compose.master.backup.yml up -d
+# Configure LITESTREAM_* and AWS_* in ${ORABBIT_BACKUP_ENV_FILE:-.env.backup}.
+services:
+  litestream:
+    image: litestream/litestream:0.3.13
+    command: ["replicate", "-config", "/etc/litestream.yml"]
+    env_file:
+      - ${ORABBIT_BACKUP_ENV_FILE:-.env.backup}
+    volumes:
+      - orabbit_master_data:/var/lib/orabbit
+      - ./litestream.yml:/etc/litestream.yml:ro
+    networks:
+      - orabbit_control_plane
+    restart: unless-stopped

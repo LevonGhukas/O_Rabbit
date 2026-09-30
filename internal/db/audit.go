@@ -34,7 +34,7 @@ func (s *Store) ListAuditRecords(ctx context.Context, limit int) ([]AuditRecord,
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.rdb.QueryContext(ctx, `
 		SELECT id, ts, actor_type, actor_id, action, resource_type, resource_id, request_id, before_json, after_json, metadata_json
 		FROM audit_log
 		ORDER BY ts DESC, id DESC
@@ -195,6 +195,9 @@ func (s *Store) StartRunWithTasksAudited(ctx context.Context, run Run, tasks []T
 	admitted := false
 	err := s.withTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable}, func(tx *sql.Tx) error {
 		if err := insertTasksTx(ctx, tx, tasks); err != nil {
+			return err
+		}
+		if err := snapshotRunConfigTx(ctx, tx, run.ID); err != nil {
 			return err
 		}
 		var err error

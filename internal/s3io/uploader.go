@@ -35,6 +35,10 @@ type Config struct {
 	AccessKeyID     string
 	SecretAccessKey string
 	SessionToken    string
+
+	// Credentials, when set, replaces the static keys above, for example with
+	// temporary credentials that are refreshed before they expire.
+	Credentials aws.CredentialsProvider
 }
 
 type objectClient interface {
@@ -96,12 +100,17 @@ func New(ctx context.Context, cfg Config) (*Uploader, error) {
 		return nil, fmt.Errorf("missing bucket")
 	}
 
-	creds := credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, cfg.SessionToken)
+	var creds aws.CredentialsProvider = credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, cfg.SessionToken)
+	if cfg.Credentials != nil {
+		creds = cfg.Credentials
+	}
 
 	awsCfg := aws.Config{
-		Region:      cfg.Region,
-		Credentials: aws.NewCredentialsCache(creds),
-		HTTPClient:  awshttp.NewBuildableClient(),
+		Region: cfg.Region,
+		Credentials: aws.NewCredentialsCache(creds, func(o *aws.CredentialsCacheOptions) {
+			o.ExpiryWindow = 5 * time.Minute
+		}),
+		HTTPClient: awshttp.NewBuildableClient(),
 	}
 
 	if strings.TrimSpace(cfg.Endpoint) != "" {
@@ -120,6 +129,9 @@ type UploadResult struct {
 	Bytes              int64
 	Skipped            bool
 	VerificationMethod string
+	// ProviderChecksumSHA256 is the store's checksum of the verified object,
+	// empty when the store does not report one.
+	ProviderChecksumSHA256 string
 }
 
 func digestBase64(hexDigest string) (string, error) {
@@ -142,33 +154,57 @@ func (u *Uploader) OpenObject(ctx context.Context, key string) (io.ReadCloser, b
 }
 
 func (u *Uploader) VerifyObject(ctx context.Context, key string, expectedSize int64, expectedSHA256 string, expectedMeta map[string]string) error {
-	_, err := u.verifyObject(ctx, key, expectedSize, expectedSHA256, expectedMeta)
+	_, _, err := u.verifyObject(ctx, key, expectedSize, expectedSHA256, expectedMeta)
 	return err
 }
 
-func (u *Uploader) verifyObject(ctx context.Context, key string, expectedSize int64, expectedSHA256 string, expectedMeta map[string]string) (string, error) {
+// ObjectChecksum returns an object's size and the store's SHA-256 checksum
+// (empty if the store reports none) without reading the object.
+func (u *Uploader) ObjectChecksum(ctx context.Context, key string) (int64, string, bool, error) {
+	head, err := u.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(u.cfg.Bucket), Key: aws.String(key), ChecksumMode: types.ChecksumModeEnabled})
+	if err != nil {
+		if isNotFound(err) {
+			return 0, "", false, nil
+		}
+		if !isChecksumUnsupported(err) {
+			return 0, "", false, err
+		}
+		if head, err = u.Head(ctx, key); err != nil {
+			if isNotFound(err) {
+				return 0, "", false, nil
+			}
+			return 0, "", false, err
+		}
+	}
+	return aws.ToInt64(head.ContentLength), strings.TrimSpace(aws.ToString(head.ChecksumSHA256)), true, nil
+}
+
+// verifyObject checks an uploaded object and returns the verification method
+// and the store's checksum of it.
+func (u *Uploader) verifyObject(ctx context.Context, key string, expectedSize int64, expectedSHA256 string, expectedMeta map[string]string) (string, string, error) {
 	head, err := u.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(u.cfg.Bucket), Key: aws.String(key), ChecksumMode: types.ChecksumModeEnabled})
 	if err != nil && isChecksumUnsupported(err) {
 		u.markChecksumUnsupported()
 		head, err = u.Head(ctx, key)
 	}
 	if err != nil {
-		return "", &artifact.Failure{Classification: artifact.FailureVerificationUnavailable, Retryable: true, ObjectKey: key, VerificationMethod: artifact.VerificationPortable, Err: err}
+		return "", "", &artifact.Failure{Classification: artifact.FailureVerificationUnavailable, Retryable: true, ObjectKey: key, VerificationMethod: artifact.VerificationPortable, Err: err}
 	}
 	if aws.ToInt64(head.ContentLength) != expectedSize {
-		return "", &artifact.Failure{Classification: artifact.FailureRemoteSizeMismatch, ObjectKey: key, VerificationMethod: artifact.VerificationPortable, Err: fmt.Errorf("got=%d expected=%d", aws.ToInt64(head.ContentLength), expectedSize)}
+		return "", "", &artifact.Failure{Classification: artifact.FailureRemoteSizeMismatch, ObjectKey: key, VerificationMethod: artifact.VerificationPortable, Err: fmt.Errorf("got=%d expected=%d", aws.ToInt64(head.ContentLength), expectedSize)}
 	}
 	if !metaMatches(head.Metadata, expectedMeta) {
-		return "", &artifact.Failure{Classification: artifact.FailureRemoteMetadataMismatch, ObjectKey: key, VerificationMethod: artifact.VerificationPortable, Err: fmt.Errorf("metadata mismatch")}
+		return "", "", &artifact.Failure{Classification: artifact.FailureRemoteMetadataMismatch, ObjectKey: key, VerificationMethod: artifact.VerificationPortable, Err: fmt.Errorf("metadata mismatch")}
 	}
 	method := artifact.VerificationPortable
-	if checksum := strings.TrimSpace(aws.ToString(head.ChecksumSHA256)); checksum != "" && !strings.Contains(checksum, "-") {
+	providerChecksum := strings.TrimSpace(aws.ToString(head.ChecksumSHA256))
+	if checksum := providerChecksum; checksum != "" && !strings.Contains(checksum, "-") {
 		expected, encErr := digestBase64(expectedSHA256)
 		if encErr != nil {
-			return "", encErr
+			return "", "", encErr
 		}
 		if checksum != expected {
-			return "", &artifact.Failure{Classification: artifact.FailureRemoteChecksumMismatch, ObjectKey: key, VerificationMethod: artifact.VerificationProvider, Err: fmt.Errorf("provider SHA-256 mismatch")}
+			return "", "", &artifact.Failure{Classification: artifact.FailureRemoteChecksumMismatch, ObjectKey: key, VerificationMethod: artifact.VerificationProvider, Err: fmt.Errorf("provider SHA-256 mismatch")}
 		}
 		method = artifact.VerificationProvider
 	}
@@ -178,10 +214,10 @@ func (u *Uploader) verifyObject(ctx context.Context, key string, expectedSize in
 		if ctx.Err() != nil {
 			class, retryable = artifact.FailureVerificationCanceled, false
 		}
-		return "", &artifact.Failure{Classification: class, Retryable: retryable, ObjectKey: key, Err: err}
+		return "", "", &artifact.Failure{Classification: class, Retryable: retryable, ObjectKey: key, Err: err}
 	}
 	if !found {
-		return "", &artifact.Failure{Classification: artifact.FailureVerificationUnavailable, Retryable: true, ObjectKey: key, Err: fmt.Errorf("remote artifact missing")}
+		return "", "", &artifact.Failure{Classification: artifact.FailureVerificationUnavailable, Retryable: true, ObjectKey: key, Err: fmt.Errorf("remote artifact missing")}
 	}
 	defer body.Close()
 	if err := artifact.VerifyStream(ctx, body, expectedSize, expectedSHA256); err != nil {
@@ -189,9 +225,9 @@ func (u *Uploader) verifyObject(ctx context.Context, key string, expectedSize in
 		if ctx.Err() != nil {
 			class = artifact.FailureVerificationCanceled
 		}
-		return "", &artifact.Failure{Classification: class, ObjectKey: key, VerificationMethod: method, Err: err}
+		return "", "", &artifact.Failure{Classification: class, ObjectKey: key, VerificationMethod: method, Err: err}
 	}
-	return method, nil
+	return method, providerChecksum, nil
 }
 
 func (u *Uploader) UploadFileVerified(ctx context.Context, key, path string, meta map[string]string, expectedSize int64, expectedSHA256 string) (UploadResult, error) {
@@ -203,7 +239,7 @@ func (u *Uploader) UploadFileVerifiedTracked(ctx context.Context, key, path stri
 		if !metaMatches(head.Metadata, meta) {
 			return UploadResult{}, &artifact.Failure{Classification: artifact.FailureExistingObjectConflict, ObjectKey: key, Err: fmt.Errorf("metadata mismatch")}
 		}
-		method, verifyErr := u.verifyObject(ctx, key, expectedSize, expectedSHA256, meta)
+		method, providerChecksum, verifyErr := u.verifyObject(ctx, key, expectedSize, expectedSHA256, meta)
 		if verifyErr != nil {
 			if failure, ok := artifact.AsFailure(verifyErr); ok {
 				switch failure.Classification {
@@ -213,7 +249,7 @@ func (u *Uploader) UploadFileVerifiedTracked(ctx context.Context, key, path stri
 			}
 			return UploadResult{}, verifyErr
 		}
-		return UploadResult{ETag: aws.ToString(head.ETag), Bytes: expectedSize, Skipped: true, VerificationMethod: method}, nil
+		return UploadResult{ETag: aws.ToString(head.ETag), Bytes: expectedSize, Skipped: true, VerificationMethod: method, ProviderChecksumSHA256: providerChecksum}, nil
 	} else if !isNotFound(err) {
 		return UploadResult{}, err
 	}
@@ -221,11 +257,11 @@ func (u *Uploader) UploadFileVerifiedTracked(ctx context.Context, key, path stri
 	if err != nil {
 		return UploadResult{}, err
 	}
-	method, verifyErr := u.verifyObject(ctx, key, expectedSize, expectedSHA256, meta)
+	method, providerChecksum, verifyErr := u.verifyObject(ctx, key, expectedSize, expectedSHA256, meta)
 	if verifyErr != nil {
 		return UploadResult{}, verifyErr
 	}
-	result.VerificationMethod = method
+	result.VerificationMethod, result.ProviderChecksumSHA256 = method, providerChecksum
 	return result, nil
 }
 
@@ -322,7 +358,7 @@ func (u *Uploader) VerifyTrackedFinalObject(ctx context.Context, key string, siz
 		}
 		return false, err
 	}
-	_, err := u.verifyObject(ctx, key, size, sha, meta)
+	_, _, err := u.verifyObject(ctx, key, size, sha, meta)
 	return true, err
 }
 
@@ -342,7 +378,7 @@ func (u *Uploader) ObserveExactObject(ctx context.Context, key string, size int6
 		}
 		return ExactObjectObservation{}, err
 	}
-	_, verifyErr := u.verifyObject(ctx, key, size, sha, meta)
+	_, _, verifyErr := u.verifyObject(ctx, key, size, sha, meta)
 	versionID := aws.ToString(head.VersionId)
 	identityBytes := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%s", key, size, sha, versionID, aws.ToString(head.ETag))))
 	observation := ExactObjectObservation{

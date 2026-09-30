@@ -25,16 +25,22 @@ services:
           -master "$${ORABBIT_MASTER_GRPC_ADDR}" \
           -worker-id "$${wid}" \
           -worker-addr "$${waddr}" \
-          -insecure="$${ORABBIT_GRPC_INSECURE:-true}" \
+          -insecure="$${ORABBIT_GRPC_INSECURE:-false}" \
           -tls-ca "$${ORABBIT_TLS_CA_FILE:-}" \
           -tls-server-name "$${ORABBIT_TLS_SERVER_NAME:-}" \
           -poll "$${ORABBIT_WORKER_POLL:-2s}" \
           -log-level "$${ORABBIT_LOG_LEVEL:-INFO}" \
           -log-format "$${ORABBIT_LOG_FORMAT:-json}"
+    volumes:
+      # Master-issued worker identity (certificate and private key).
+      - orabbit_worker_identity:/var/lib/orabbit/identity
     networks:
       - orabbit_control_plane
     restart: unless-stopped
     stop_grace_period: 30s
+
+volumes:
+  orabbit_worker_identity:
 
 networks:
   orabbit_control_plane:

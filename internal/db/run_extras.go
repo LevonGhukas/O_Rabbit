@@ -21,7 +21,7 @@ func (s *Store) ListEventsForRunPage(ctx context.Context, runID string, limit in
 		err  error
 	)
 	if strings.TrimSpace(cursor) == "" {
-		rows, err = s.db.QueryContext(ctx, `
+		rows, err = s.rdb.QueryContext(ctx, `
 			SELECT id, run_id, task_id, ts, level, message, fields_json
 			FROM events
 			WHERE run_id=?
@@ -33,7 +33,7 @@ func (s *Store) ListEventsForRunPage(ctx context.Context, runID string, limit in
 		if err != nil {
 			return nil, "", err
 		}
-		rows, err = s.db.QueryContext(ctx, `
+		rows, err = s.rdb.QueryContext(ctx, `
 			SELECT id, run_id, task_id, ts, level, message, fields_json
 			FROM events
 			WHERE run_id=? AND (ts > ? OR (ts = ? AND id > ?))

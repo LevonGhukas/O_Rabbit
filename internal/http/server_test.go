@@ -18,7 +18,7 @@ import (
 )
 
 func TestHandlerAuthMiddlewareReturnsJSONUnauthorized(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{PID: 1, HTTPAddr: ":9100", GRPCAddr: ":9102", DBPath: "test.sqlite"}, "topsecret")
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{PID: 1, HTTPAddr: ":9100", GRPCAddr: ":9102", DBPath: "test.sqlite"}, "topsecret")
 	h := srv.Handler()
 
 	healthReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
@@ -60,7 +60,7 @@ func TestHandlerAuthMiddlewareReturnsJSONUnauthorized(t *testing.T) {
 
 func TestBearerAuthenticationCasesDoNotLeakToken(t *testing.T) {
 	const secret = "admin-token-0123456789"
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, secret)
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{}, secret)
 	h := srv.Handler()
 	tests := []struct {
 		name   string
@@ -92,7 +92,7 @@ func TestBearerAuthenticationCasesDoNotLeakToken(t *testing.T) {
 }
 
 func TestHealthzRemainsPlainTextLiveness(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, "topsecret")
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{}, "topsecret")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 
@@ -107,7 +107,7 @@ func TestHealthzRemainsPlainTextLiveness(t *testing.T) {
 }
 
 func TestReadyReturnsJSONOKWithoutAuth(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "topsecret")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "topsecret")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 
@@ -132,7 +132,7 @@ func TestReadyReturnsServiceUnavailableWhenStoreNotReady(t *testing.T) {
 		t.Fatalf("close store: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 
@@ -152,7 +152,7 @@ func TestReadyReturnsServiceUnavailableWhenStoreNotReady(t *testing.T) {
 }
 
 func TestStatusMethodNotAllowedReturnsJSON(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{PID: 1, HTTPAddr: ":9100", GRPCAddr: ":9102", DBPath: "test.sqlite"}, "")
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{PID: 1, HTTPAddr: ":9100", GRPCAddr: ":9102", DBPath: "test.sqlite"}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/status", nil)
 
@@ -175,7 +175,7 @@ func TestStatusMethodNotAllowedReturnsJSON(t *testing.T) {
 }
 
 func TestInvalidJSONBodyReturnsStructuredError(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/connections", strings.NewReader("{"))
 
@@ -198,7 +198,7 @@ func TestInvalidJSONBodyReturnsStructuredError(t *testing.T) {
 }
 
 func TestUnknownRouteReturnsJSONNotFound(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/does-not-exist", nil)
 
@@ -220,24 +220,45 @@ func TestUnknownRouteReturnsJSONNotFound(t *testing.T) {
 	}
 }
 
-func TestUnknownRouteWithAuthReturnsJSONNotFound(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "topsecret")
+func TestUnknownRouteWithoutAuthReturnsUnauthorized(t *testing.T) {
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "topsecret")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/does-not-exist", nil)
 
 	srv.Handler().ServeHTTP(rec, req)
 
 	resp := decodeErrorResponse(t, rec)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d want=%d", rec.Code, http.StatusUnauthorized)
+	}
+
+	if resp.Error.Code != httperr.CodeUnauthorized {
+		t.Fatalf("error code=%q want=%q", resp.Error.Code, httperr.CodeUnauthorized)
+	}
+}
+
+func TestUnknownRouteWithValidAuthReturnsJSONNotFound(t *testing.T) {
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "topsecret")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/does-not-exist", nil)
+	req.Header.Set("Authorization", "Bearer topsecret")
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	resp := decodeErrorResponse(t, rec)
+
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status=%d want=%d", rec.Code, http.StatusNotFound)
 	}
+
 	if resp.Error.Code != httperr.CodeNotFound {
 		t.Fatalf("error code=%q want=%q", resp.Error.Code, httperr.CodeNotFound)
 	}
 }
 
 func TestConnectionNotFoundReturnsStructuredError(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/connections/missing", nil)
 
@@ -291,7 +312,7 @@ func TestRunCancelEndpointCancelsPendingTasksAndPublishesEvent(t *testing.T) {
 	ch, unsub := bc.Subscribe(run.ID)
 	defer unsub()
 
-	srv := NewServer(nil, st, bc, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, bc, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/runs/"+run.ID+"/cancel", strings.NewReader(`{}`))
 
@@ -357,7 +378,7 @@ func TestRunCancelEndpointRejectsTerminalRuns(t *testing.T) {
 		t.Fatalf("create run: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/runs/"+run.ID+"/cancel", strings.NewReader(`{}`))
 
@@ -373,7 +394,7 @@ func TestRunCancelEndpointRejectsTerminalRuns(t *testing.T) {
 }
 
 func TestDeleteMissingConnectionReturnsStructuredError(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/connections/missing", nil)
 
@@ -419,7 +440,7 @@ func TestConnectionDeleteConflictReturnsStructuredError(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/connections/"+conn.ID, nil)
 
@@ -443,7 +464,7 @@ func TestInternalErrorReturnsGenericStructuredJSON(t *testing.T) {
 	if err := st.Close(); err != nil {
 		t.Fatalf("close store: %v", err)
 	}
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/connections", nil)
 
@@ -462,7 +483,7 @@ func TestInternalErrorReturnsGenericStructuredJSON(t *testing.T) {
 }
 
 func TestJobNotFoundReturnsStructuredError(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/jobs/missing", nil)
 
@@ -481,7 +502,7 @@ func TestJobNotFoundReturnsStructuredError(t *testing.T) {
 }
 
 func TestDeleteMissingJobReturnsStructuredError(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/jobs/missing", nil)
 
@@ -500,7 +521,7 @@ func TestDeleteMissingJobReturnsStructuredError(t *testing.T) {
 }
 
 func TestJobExtraSegmentsReturnJSONNotFound(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "")
 	tests := []string{
 		"/jobs/job-1/extra",
 		"/jobs/job-1/runs/extra",
@@ -588,7 +609,7 @@ func TestJobRunsDatasetBusyReturnsStructuredConflict(t *testing.T) {
 		t.Fatalf("create busy run: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/jobs/job-1/runs", nil)
 
@@ -605,8 +626,109 @@ func TestJobRunsDatasetBusyReturnsStructuredConflict(t *testing.T) {
 		t.Fatalf("error message=%q want=%q", resp.Error.Message, "dataset is busy")
 	}
 	errObj := decodeErrorObject(t, rec)
-	if _, ok := errObj["details"]; ok {
-		t.Fatalf("details field should be omitted for dataset_busy response")
+	details, _ := errObj["details"].(map[string]any)
+	if details["active_run_id"] != "run-busy" || details["active_job_id"] != "other-job" || details["active_run_status"] != "RUNNING" {
+		t.Fatalf("dataset_busy must name the run holding the dataset so it can be canceled: %v", errObj["details"])
+	}
+
+	// The active run is left untouched: busy is a rejection, not a takeover.
+	run, err := st.GetRun(context.Background(), "run-busy")
+	if err != nil || run.Status != "RUNNING" {
+		t.Fatalf("active run status=%q err=%v, want RUNNING", run.Status, err)
+	}
+}
+
+func TestStartingJobAgainDoesNotSupersedeItsActiveRun(t *testing.T) {
+	st := openTestStore(t)
+	createTestConnection(t, st, db.Connection{
+		ID:            "src-1",
+		Name:          "src-1",
+		Kind:          "source",
+		Engine:        "postgres",
+		MetadataJSON:  []byte(`{}`),
+		SecretEncBlob: []byte(`{"dsn":"postgres://example"}`),
+	})
+	createTestConnection(t, st, db.Connection{
+		ID:     "tgt-1",
+		Name:   "tgt-1",
+		Kind:   "target",
+		Engine: "s3",
+		MetadataJSON: []byte(`{
+			"endpoint":"http://localhost:9000",
+			"bucket":"bucket1",
+			"prefix":"exports"
+		}`),
+		SecretEncBlob: []byte(`{"access_key_id":"minioadmin","secret_access_key":"minioadmin"}`),
+	})
+	job := db.Job{
+		ID:                 "job-1",
+		Name:               "job-1",
+		SourceConnectionID: "src-1",
+		TargetConnectionID: "tgt-1",
+		TargetTable:        "big_table",
+		WriteMode:          "append",
+		OptionsJSON:        []byte(`{}`),
+	}
+	if err := st.CreateJob(context.Background(), job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	basePrefix := dataset.Prefix("exports", "postgres", "big_table")
+	datasetKey := dataset.StorageKey("http://localhost:9000", "bucket1", basePrefix)
+	if err := st.CreateRun(context.Background(), db.Run{
+		ID:            "run-busy",
+		JobID:         "job-1",
+		DatasetKey:    datasetKey,
+		Status:        "RUNNING",
+		CorrelationID: "corr-busy",
+		StartedAt:     time.Now().UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("create busy run: %v", err)
+	}
+	if err := st.InsertTasks(context.Background(), []db.TaskInsert{{ID: "task-busy", RunID: "run-busy", TaskIndex: 1, PartitionSpec: []byte(`{}`), Status: "PENDING"}}); err != nil {
+		t.Fatal(err)
+	}
+	leased, ok, err := st.AssignNextPendingTaskWithLease(context.Background(), "", "worker-1", time.Now(), db.LeasePolicy{Duration: time.Minute, MaxAttempts: 3}, nil, nil)
+	if err != nil || !ok {
+		t.Fatalf("lease task ok=%v err=%v", ok, err)
+	}
+
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/jobs/job-1/runs", nil)
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	resp := decodeErrorResponse(t, rec)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d want=%d", rec.Code, http.StatusConflict)
+	}
+	if resp.Error.Code != httperr.CodeDatasetBusy {
+		t.Fatalf("error code=%q want=%q", resp.Error.Code, httperr.CodeDatasetBusy)
+	}
+	if resp.Error.Message != "dataset is busy" {
+		t.Fatalf("error message=%q want=%q", resp.Error.Message, "dataset is busy")
+	}
+	errObj := decodeErrorObject(t, rec)
+	details, _ := errObj["details"].(map[string]any)
+	if details["active_run_id"] != "run-busy" || details["active_job_id"] != "job-1" || details["active_run_status"] != "RUNNING" {
+		t.Fatalf("dataset_busy must name the run holding the dataset so it can be canceled: %v", errObj["details"])
+	}
+
+	// A double submit must not fail the healthy run, its task, or its lease.
+	run, err := st.GetRun(context.Background(), "run-busy")
+	if err != nil || run.Status != "RUNNING" {
+		t.Fatalf("active run status=%q err=%v, want RUNNING", run.Status, err)
+	}
+	tasks, err := st.ListTasksForRun(context.Background(), "run-busy")
+	if err != nil || len(tasks) != 1 || tasks[0].Status != "RUNNING" {
+		t.Fatalf("active task=%+v err=%v, want RUNNING", tasks, err)
+	}
+	if _, err := st.RenewTaskLease(context.Background(), "", leased.ID, leased.AttemptID, leased.FencingToken, "worker-1", time.Now(), time.Minute); err != nil {
+		t.Fatalf("worker must keep its lease after a rejected resubmit: %v", err)
+	}
+	runs, err := st.ListRuns(context.Background())
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("a rejected submit must not create a run: runs=%d err=%v", len(runs), err)
 	}
 }
 
@@ -647,7 +769,7 @@ func TestJobRunsPersistRegistrationConfigSnapshot(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/jobs/job-reg/runs", strings.NewReader(`{
 		"registration_config": {
@@ -727,7 +849,7 @@ func TestJobRunsPersistIceRegistrationConfigSnapshotWithRawConfig(t *testing.T) 
 		t.Fatalf("create job: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/jobs/job-ice/runs", strings.NewReader(`{
 		"registration_config": {
@@ -790,7 +912,7 @@ func TestJobRunsGenericPlannerFailureReturnsStructuredInternalError(t *testing.T
 		t.Fatalf("create job: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/jobs/job-bad/runs", nil)
 
@@ -809,7 +931,7 @@ func TestJobRunsGenericPlannerFailureReturnsStructuredInternalError(t *testing.T
 }
 
 func TestRecovererReturnsStructuredJSONInternalError(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{}, "")
 	h := srv.withRecoverer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic("boom")
 	}))
@@ -832,14 +954,29 @@ func TestRecovererReturnsStructuredJSONInternalError(t *testing.T) {
 
 func openTestStore(t *testing.T) *db.Store {
 	t.Helper()
+
 	path := filepath.Join(t.TempDir(), "test.sqlite")
 	st, err := db.Open(context.Background(), db.Config{Path: path}, nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
+
+	t.Setenv(
+		"ORABBIT_MASTER_KEY",
+		"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+	)
+
+	k, err := crypto.LoadMasterKeyFromEnv()
+	if err != nil {
+		t.Fatalf("load test master key: %v", err)
+	}
+
+	st.SetMasterKey(k)
+
 	t.Cleanup(func() {
 		_ = st.Close()
 	})
+
 	return st
 }
 

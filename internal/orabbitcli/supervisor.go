@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -152,6 +153,8 @@ func (s *localSupervisor) startWorker(spec localWorkerLaunchSpec) (*managedProce
 		if v := strings.TrimSpace(spec.TLSServerName); v != "" {
 			args = append(args, "-tls-server-name", v)
 		}
+		// Each supervised worker keeps its own master-issued identity.
+		args = append(args, "-identity-dir", s.workerIdentityDir(spec.WorkerID))
 	}
 	return s.launchManagedProcess(spec.CommandCtx, spec.FollowCtx, "worker:"+strings.TrimSpace(spec.WorkerID), spec.BinaryPath, args, procInfo{
 		Kind:       "worker",
@@ -252,4 +255,14 @@ func (s *localSupervisor) stopPIDs(ctx context.Context, pids []int, force bool, 
 	_ = unregisterManagedProcesses(s.runtimeDir, pids)
 	_, _ = s.reconcileManagedState()
 	return "killed", nil
+}
+
+func (s *localSupervisor) workerIdentityDir(workerID string) string {
+	base := s.runtimeDir
+	if base == "" {
+		if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+			base = filepath.Join(dir, "orabbit-client")
+		}
+	}
+	return filepath.Join(base, "worker-identities", strings.TrimSpace(workerID))
 }

@@ -1,3 +1,5 @@
+// internal/crypto/plain.go
+
 package crypto
 
 import (
@@ -41,45 +43,57 @@ func LoadMasterKeyFromEnv() (Key, error) {
 	return Key{key: k}, nil
 }
 
+// ParseKey decodes a base64 or hex encoded 32-byte key in the same formats
+// accepted for ORABBIT_MASTER_KEY.
+func ParseKey(raw string) (Key, error) {
+	k, err := decodeKey(strings.TrimSpace(raw))
+	if err != nil {
+		return Key{}, err
+	}
+	return Key{key: k}, nil
+}
+
 // IsZero returns true if no encryption key is configured.
 func (k Key) IsZero() bool { return len(k.key) == 0 }
 
 // Encrypt encrypts a secret blob.
-// When key is empty, it stores plaintext with a version marker for backward compatibility.
+// A master key is required; plaintext storage is not allowed.
 func Encrypt(k Key, plaintext, aad []byte) ([]byte, error) {
 	if k.IsZero() {
-		out := make([]byte, 0, 1+len(plaintext))
-		out = append(out, blobVersion0Plain)
-		out = append(out, plaintext...)
-		return out, nil
+		return nil, errors.New("ORABBIT_MASTER_KEY is required to encrypt secrets")
 	}
 
 	aead, err := newAEAD(k)
 	if err != nil {
 		return nil, err
 	}
+
 	nonce := make([]byte, 12)
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, fmt.Errorf("generate nonce: %w", err)
 	}
+
 	ciphertext := aead.Seal(nil, nonce, plaintext, aad)
+
 	out := make([]byte, 0, 1+len(nonce)+len(ciphertext))
 	out = append(out, blobVersion1AESGCM)
 	out = append(out, nonce...)
 	out = append(out, ciphertext...)
+
 	return out, nil
 }
 
 // Decrypt decrypts the stored secret blob.
-// - version 0: plaintext passthrough (legacy/default when no key configured)
+// - version 0: rejected; legacy plaintext must be migrated first
 // - version 1: AES-256-GCM using ORABBIT_MASTER_KEY
+// - unknown/unversioned blobs: rejected
 func Decrypt(k Key, blob, aad []byte) ([]byte, error) {
 	if len(blob) == 0 {
 		return nil, errors.New("secret blob empty")
 	}
 	switch blob[0] {
 	case blobVersion0Plain:
-		return blob[1:], nil
+		return nil, errors.New("plaintext secret blob is not allowed; migrate legacy secrets")
 	case blobVersion1AESGCM:
 		if k.IsZero() {
 			return nil, errors.New("encrypted secret requires ORABBIT_MASTER_KEY")
@@ -99,8 +113,7 @@ func Decrypt(k Key, blob, aad []byte) ([]byte, error) {
 		}
 		return plaintext, nil
 	default:
-		// Back-compat: accept historical blobs that were stored without a version prefix.
-		return blob, nil
+		return nil, errors.New("unknown or unversioned secret blob")
 	}
 }
 
@@ -146,4 +159,39 @@ func newAEAD(k Key) (cipher.AEAD, error) {
 		return nil, err
 	}
 	return cipher.NewGCM(block)
+}
+
+func ReencryptLegacy(k Key, blob, aad []byte) ([]byte, bool, error) {
+	if len(blob) == 0 {
+		return blob, false, nil
+	}
+
+	switch blob[0] {
+	case blobVersion1AESGCM:
+		// Already encrypted with AES-GCM.
+		return blob, false, nil
+
+	case blobVersion0Plain:
+		if k.IsZero() {
+			return nil, false, errors.New("ORABBIT_MASTER_KEY is required to migrate plaintext secret")
+		}
+
+		encrypted, err := Encrypt(k, blob[1:], aad)
+		if err != nil {
+			return nil, false, err
+		}
+		return encrypted, true, nil
+
+	default:
+		// Historical unversioned plaintext.
+		if k.IsZero() {
+			return nil, false, errors.New("ORABBIT_MASTER_KEY is required to migrate plaintext secret")
+		}
+
+		encrypted, err := Encrypt(k, blob, aad)
+		if err != nil {
+			return nil, false, err
+		}
+		return encrypted, true, nil
+	}
 }
