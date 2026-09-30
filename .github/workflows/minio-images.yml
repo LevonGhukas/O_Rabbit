@@ -48,6 +48,8 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: minio-ci:minio
+          pull: true
+          no-cache-filters: runtime-base
           cache-from: type=gha,scope=minio-minio
           cache-to: type=gha,mode=max,scope=minio-minio
 
@@ -59,6 +61,8 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: minio-ci:mc
+          pull: true
+          no-cache-filters: runtime-base
           cache-from: type=gha,scope=minio-mc
           cache-to: type=gha,mode=max,scope=minio-mc
 
@@ -128,6 +132,8 @@ jobs:
           provenance: true
           sbom: true
           tags: levonghukas/minio:${{ steps.v.outputs.minio_tag }}
+          pull: true
+          no-cache-filters: runtime-base
           cache-from: type=gha,scope=minio-minio
 
       - name: Push mc (amd64 + arm64)
@@ -141,4 +147,6 @@ jobs:
           provenance: true
           sbom: true
           tags: levonghukas/mc:${{ steps.v.outputs.mc_tag }}
+          pull: true
+          no-cache-filters: runtime-base
           cache-from: type=gha,scope=minio-mc
