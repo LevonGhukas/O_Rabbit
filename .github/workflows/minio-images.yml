@@ -1,7 +1,8 @@
 name: MinIO images
 
 # Rebuilds levonghukas/minio and levonghukas/mc from pinned upstream source
-# (docker/minio/Dockerfile). Pull requests only build; main pushes publish.
+# with patched dependencies (docker/minio/Dockerfile). Pull requests build,
+# test and scan; pushes to main also publish <release>-r<revision> tags.
 on:
   push:
     branches: [main]
@@ -15,28 +16,23 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
+    name: Build, test, scan & push
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - target: minio
-            image: levonghukas/minio
-            release_arg: MINIO_RELEASE
-          - target: mc
-            image: levonghukas/mc
-            release_arg: MC_RELEASE
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Read pinned release
-        id: release
+      - name: Read pinned releases
+        id: v
         run: |
-          tag="$(sed -n 's/^ARG ${{ matrix.release_arg }}=//p' docker/minio/Dockerfile)"
-          test -n "$tag"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          get() { sed -n "s/^ARG $1=//p" docker/minio/Dockerfile; }
+          rev="$(get IMAGE_REVISION)"; minio="$(get MINIO_RELEASE)"; mc="$(get MC_RELEASE)"
+          test -n "$rev" && test -n "$minio" && test -n "$mc"
+          {
+            echo "minio_release=$minio"; echo "minio_tag=$minio-r$rev"
+            echo "mc_release=$mc";       echo "mc_tag=$mc-r$rev"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -44,24 +40,72 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build for smoke test
+      - name: Build minio (amd64, for tests)
         uses: docker/build-push-action@v6
         with:
           context: docker/minio
-          target: ${{ matrix.target }}
+          target: minio
           platforms: linux/amd64
           load: true
-          tags: minio-ci:${{ matrix.target }}
-          cache-from: type=gha,scope=minio-${{ matrix.target }}
-          cache-to: type=gha,mode=max,scope=minio-${{ matrix.target }}
+          tags: minio-ci:minio
+          cache-from: type=gha,scope=minio-minio
+          cache-to: type=gha,mode=max,scope=minio-minio
 
-      - name: Smoke test
-        run: docker run --rm minio-ci:${{ matrix.target }} --version | grep -F "${{ steps.release.outputs.tag }}"
+      - name: Build mc (amd64, for tests)
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/minio
+          target: mc
+          platforms: linux/amd64
+          load: true
+          tags: minio-ci:mc
+          cache-from: type=gha,scope=minio-mc
+          cache-to: type=gha,mode=max,scope=minio-mc
 
-      - name: Scan image
+      - name: Version check
+        run: |
+          docker run --rm minio-ci:minio --version | grep -F "${{ steps.v.outputs.minio_release }}"
+          docker run --rm minio-ci:mc --version | grep -F "${{ steps.v.outputs.mc_release }}"
+
+      # The dependency upgrades change code paths, so exercise real S3 calls:
+      # bucket, small object, and a multipart upload verified by checksum.
+      - name: Functional S3 test
+        run: |
+          docker network create minio-ft
+          docker run -d --name ft-minio --network minio-ft \
+            -e MINIO_ROOT_USER=ftuser -e MINIO_ROOT_PASSWORD=ftpassword123 minio-ci:minio
+          for _ in $(seq 1 30); do
+            docker exec ft-minio curl -fsS http://127.0.0.1:9000/minio/health/live && break
+            sleep 1
+          done
+          docker run --rm --network minio-ft --entrypoint sh minio-ci:mc -ec '
+            mc alias set t http://ft-minio:9000 ftuser ftpassword123 >/dev/null
+            mc mb t/functest
+            echo hello | mc pipe t/functest/small.txt
+            test "$(mc cat t/functest/small.txt)" = hello
+            head -c 67108864 /dev/urandom > /tmp/big
+            a=$(sha256sum /tmp/big | cut -d" " -f1)
+            mc cp /tmp/big t/functest/big.bin
+            b=$(mc cat t/functest/big.bin | sha256sum | cut -d" " -f1)
+            test "$a" = "$b"
+            mc rm t/functest/big.bin'
+
+      - name: Functional test logs
+        if: failure()
+        run: docker logs ft-minio || true
+
+      - name: Scan minio
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: minio-ci:${{ matrix.target }}
+          image-ref: minio-ci:minio
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Scan mc
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: minio-ci:mc
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: "1"
@@ -73,15 +117,28 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push (amd64 + arm64)
+      - name: Push minio (amd64 + arm64)
         if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
         with:
           context: docker/minio
-          target: ${{ matrix.target }}
+          target: minio
           platforms: linux/amd64,linux/arm64
           push: true
           provenance: true
           sbom: true
-          tags: ${{ matrix.image }}:${{ steps.release.outputs.tag }}
-          cache-from: type=gha,scope=minio-${{ matrix.target }}
+          tags: levonghukas/minio:${{ steps.v.outputs.minio_tag }}
+          cache-from: type=gha,scope=minio-minio
+
+      - name: Push mc (amd64 + arm64)
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/minio
+          target: mc
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: true
+          sbom: true
+          tags: levonghukas/mc:${{ steps.v.outputs.mc_tag }}
+          cache-from: type=gha,scope=minio-mc
