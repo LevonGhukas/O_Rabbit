@@ -80,7 +80,8 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 
 
 FROM alpine:3.22 AS runtime-base
-RUN apk add --no-cache ca-certificates tzdata curl
+# Apply OS security updates the base image does not include yet.
+RUN apk upgrade --no-cache && apk add --no-cache ca-certificates tzdata curl
 
 
 # Client: keeps a shell because Compose init jobs run `mc` from sh scripts.
