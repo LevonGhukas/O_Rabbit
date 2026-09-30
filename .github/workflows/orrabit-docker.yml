@@ -114,10 +114,12 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Needs a release built with Go >= the go.mod version (v2.4 was built
+      # with Go 1.25 and refuses Go 1.26 modules). Bump with the Go toolchain.
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.4
+          version: v2.14.0
 
       - name: shellcheck
         run: shellcheck deploy-*.sh healthcheck.sh scripts/*.sh
@@ -205,7 +207,7 @@ jobs:
           grep -q -- '-insecure' <<<"$out" || { echo "$out"; exit 1; }
 
       - name: Scan image
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: orabbit-ci:${{ matrix.target }}
           severity: CRITICAL,HIGH
