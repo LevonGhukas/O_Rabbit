@@ -1583,19 +1583,21 @@ func newSubmitTestServer(st *db.Store) *submitTestServer {
 	srv.runPlanner = func(ctx context.Context, st *db.Store, k crypto.Key, job db.Job, registrationConfig json.RawMessage, audit *db.AuditRecord) (db.Run, []db.TaskInsert, error) {
 		ts.registrationConfig = append(json.RawMessage(nil), registrationConfig...)
 		ts.plannedJob = job
-		return db.Run{
-				ID:            "run-submit-test",
-				JobID:         job.ID,
-				Status:        "RUNNING",
-				CorrelationID: "corr-submit-test",
-				StartedAt:     "2026-01-01T00:00:00Z",
-			}, []db.TaskInsert{{
-				ID:            "task-submit-test",
-				RunID:         "run-submit-test",
-				TaskIndex:     1,
-				PartitionSpec: []byte(`{"type":"sql_cursor_single"}`),
-				Status:        "PENDING",
-			}}, nil
+		run := db.Run{
+			ID:            "run-submit-test",
+			JobID:         job.ID,
+			Status:        "RUNNING",
+			CorrelationID: "corr-submit-test",
+			StartedAt:     "2026-01-01T00:00:00Z",
+		}
+		tasks := []db.TaskInsert{{
+			ID:            "task-submit-test",
+			RunID:         "run-submit-test",
+			TaskIndex:     1,
+			PartitionSpec: []byte(`{"type":"sql_cursor_single"}`),
+			Status:        "PENDING",
+		}}
+		return run, tasks, nil
 	}
 	return ts
 }

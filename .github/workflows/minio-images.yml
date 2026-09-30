@@ -59,7 +59,7 @@ jobs:
         run: docker run --rm minio-ci:${{ matrix.target }} --version | grep -F "${{ steps.release.outputs.tag }}"
 
       - name: Scan image
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: minio-ci:${{ matrix.target }}
           severity: CRITICAL,HIGH
