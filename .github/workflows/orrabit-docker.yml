@@ -196,6 +196,10 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: orabbit-ci:${{ matrix.target }}
+          # Fresh base images and OS packages every run, so security fixes
+          # are never hidden by the layer cache; Go build stages stay cached.
+          pull: true
+          no-cache-filters: runtime-base,master-runtime-base
           cache-from: type=gha,scope=orabbit-${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=orabbit-${{ matrix.target }}
 
@@ -230,6 +234,8 @@ jobs:
           target: ${{ matrix.target }}
           platforms: linux/amd64
           push: true
+          pull: true
+          no-cache-filters: runtime-base,master-runtime-base
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=orabbit-${{ matrix.target }}
