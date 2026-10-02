@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"net"
 	"net/url"
@@ -352,15 +355,22 @@ func (c *Cassandra) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, 
 			return nil, nil, nil, -1, err
 		}
 
-		cql = fmt.Sprintf("SELECT * FROM %s", qt)
-		if len(clauses) > 0 {
-			cql += " WHERE " + strings.Join(clauses, " AND ")
-		}
-
 		// Describe the table to get column metadata.
 		cols, cts, err = c.DescribeTable(ctx, q.Table)
 		if err != nil {
 			return nil, nil, nil, -1, err
+		}
+		selectList := "*"
+		if len(q.SelectColumns) > 0 {
+			cols, cts, selectList, err = selectCassandraColumns(cols, cts, q.SelectColumns)
+			if err != nil {
+				return nil, nil, nil, -1, err
+			}
+		}
+
+		cql = fmt.Sprintf("SELECT %s FROM %s", selectList, qt)
+		if len(clauses) > 0 {
+			cql += " WHERE " + strings.Join(clauses, " AND ")
 		}
 	}
 
@@ -836,7 +846,10 @@ func newCassandraRows(iter *gocql.Iter, cols []string) (*sql.Rows, error) {
 
 // cassandraRawValue receives the serialized bytes of a CQL type gocql cannot
 // map to a Go type (custom types such as Cassandra 5 vector).
-type cassandraRawValue struct{ data []byte }
+type cassandraRawValue struct {
+	custom string
+	data   []byte
+}
 
 func (r *cassandraRawValue) UnmarshalCQL(_ gocql.TypeInfo, data []byte) error {
 	if data == nil {
@@ -846,6 +859,61 @@ func (r *cassandraRawValue) UnmarshalCQL(_ gocql.TypeInfo, data []byte) error {
 	r.data = append([]byte(nil), data...)
 	return nil
 }
+
+// value decodes fixed-width Cassandra 5 vectors (float, double, int, bigint)
+// into a list; any other custom type is returned as its raw bytes.
+func (r *cassandraRawValue) value() any {
+	if r.data == nil {
+		return nil
+	}
+	if elems, ok := decodeCassandraVector(r.custom, r.data); ok {
+		return elems
+	}
+	return r.data
+}
+
+var cassandraVectorTypeRe = regexp.MustCompile(`^org\.apache\.cassandra\.db\.marshal\.VectorType\(org\.apache\.cassandra\.db\.marshal\.(\w+)\s*,\s*(\d+)\)$`)
+
+func decodeCassandraVector(custom string, data []byte) ([]any, bool) {
+	m := cassandraVectorTypeRe.FindStringSubmatch(strings.TrimSpace(custom))
+	if m == nil {
+		return nil, false
+	}
+	dim, err := strconv.Atoi(m[2])
+	if err != nil || dim < 0 {
+		return nil, false
+	}
+	var width int
+	switch m[1] {
+	case "FloatType", "Int32Type":
+		width = 4
+	case "DoubleType", "LongType":
+		width = 8
+	default:
+		return nil, false
+	}
+	if len(data) != dim*width {
+		return nil, false
+	}
+	out := make([]any, dim)
+	for i := 0; i < dim; i++ {
+		chunk := data[i*width : (i+1)*width]
+		switch m[1] {
+		case "FloatType":
+			out[i] = math.Float32frombits(binary.BigEndian.Uint32(chunk))
+		case "Int32Type":
+			out[i] = int32(binary.BigEndian.Uint32(chunk))
+		case "DoubleType":
+			out[i] = math.Float64frombits(binary.BigEndian.Uint64(chunk))
+		case "LongType":
+			out[i] = int64(binary.BigEndian.Uint64(chunk))
+		}
+	}
+	return out, true
+}
+
+// cassandraTuple marks a scanned tuple so it is serialized as one JSON value.
+type cassandraTuple []any
 
 // cassandraRowScanner scans rows with explicit per-column destinations.
 // gocql's MapScan discards RowData errors, so a single unsupported column type
@@ -887,7 +955,8 @@ func newCassandraRowScanner(columns []gocql.ColumnInfo) *cassandraRowScanner {
 
 func cassandraDestFactory(info gocql.TypeInfo) func() any {
 	if _, err := info.NewWithError(); err != nil {
-		return func() any { return &cassandraRawValue{} }
+		custom := info.Custom()
+		return func() any { return &cassandraRawValue{custom: custom} }
 	}
 	return func() any { v, _ := info.NewWithError(); return v }
 }
@@ -905,7 +974,7 @@ func (s *cassandraRowScanner) scan(iter *gocql.Iter) (map[string]any, bool) {
 			for j := 0; j < n; j++ {
 				elems[j] = cassandraDereference(dests[pos+j])
 			}
-			row[name] = elems
+			row[name] = cassandraTuple(elems)
 			pos += n
 			continue
 		}
@@ -917,10 +986,7 @@ func (s *cassandraRowScanner) scan(iter *gocql.Iter) (map[string]any, bool) {
 
 func cassandraDereference(dest any) any {
 	if raw, ok := dest.(*cassandraRawValue); ok {
-		if raw.data == nil {
-			return nil
-		}
-		return raw.data
+		return raw.value()
 	}
 	return reflect.Indirect(reflect.ValueOf(dest)).Interface()
 }
@@ -956,7 +1022,10 @@ func cassandraToDriverValue(v any) (driver.Value, error) {
 		return x, nil
 	case gocql.UUID:
 		return x.String(), nil
-	case time.Time:
+	case time.Time, time.Duration:
+		return x, nil
+	case []any:
+		// list/set/vector values stay structured for the array converter.
 		return x, nil
 	default:
 		text, err := typesystem.ToLosslessString(v)
@@ -967,10 +1036,17 @@ func cassandraToDriverValue(v any) (driver.Value, error) {
 	}
 }
 
-// normalizeCassandraValue rewrites gocql-specific Go values (decimal, varint,
-// duration, uuid, inet) into plain strings, recursing into collections, tuples
-// and UDTs, so the lossless string/JSON fallback can serialize them.
+// normalizeCassandraValue rewrites gocql-specific Go values into values the
+// type system converts natively: decimal/varint become exact strings, duration
+// becomes ISO-8601 text, list/set/vector become []any, and map/UDT/tuple values
+// become one JSON document.
 func normalizeCassandraValue(v any) any {
+	return normalizeCassandraNested(v, false)
+}
+
+// normalizeCassandraNested keeps containers as native Go structures when they
+// are nested inside a JSON document, so they are encoded exactly once.
+func normalizeCassandraNested(v any, inJSON bool) any {
 	switch x := v.(type) {
 	case nil:
 		return nil
@@ -985,37 +1061,112 @@ func normalizeCassandraValue(v any) any {
 		}
 		return x.String()
 	case gocql.Duration:
-		return fmt.Sprintf("%dmo%dd%dns", x.Months, x.Days, x.Nanoseconds)
-	case time.Duration:
-		return int64(x)
+		return cassandraISODuration(x)
 	case gocql.UUID:
 		return x.String()
 	case net.IP:
 		return x.String()
-	case []byte, string, time.Time:
+	case []byte, string, time.Time, time.Duration:
 		return x
+	case cassandraTuple:
+		out := make([]any, len(x))
+		for i, elem := range x {
+			out[i] = normalizeCassandraNested(elem, true)
+		}
+		return cassandraJSONDocument(out, inJSON)
 	}
 	rv := reflect.ValueOf(v)
 	switch rv.Kind() {
 	case reflect.Slice, reflect.Array:
 		out := make([]any, rv.Len())
 		for i := range out {
-			out[i] = normalizeCassandraValue(rv.Index(i).Interface())
+			out[i] = normalizeCassandraNested(rv.Index(i).Interface(), inJSON)
 		}
 		return out
 	case reflect.Map:
 		out := make(map[string]any, rv.Len())
 		iter := rv.MapRange()
 		for iter.Next() {
-			key := normalizeCassandraValue(iter.Key().Interface())
-			out[fmt.Sprint(key)] = normalizeCassandraValue(iter.Value().Interface())
+			key := normalizeCassandraNested(iter.Key().Interface(), true)
+			out[fmt.Sprint(key)] = normalizeCassandraNested(iter.Value().Interface(), true)
 		}
-		return out
+		return cassandraJSONDocument(out, inJSON)
 	case reflect.Pointer:
 		if rv.IsNil() {
 			return nil
 		}
-		return normalizeCassandraValue(rv.Elem().Interface())
+		return normalizeCassandraNested(rv.Elem().Interface(), inJSON)
 	}
 	return v
+}
+
+func cassandraJSONDocument(v any, inJSON bool) any {
+	if inJSON {
+		return v
+	}
+	encoded, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprint(v)
+	}
+	return string(encoded)
+}
+
+// cassandraISODuration renders a CQL duration as ISO-8601, e.g. P1M2DT3.5S.
+func cassandraISODuration(d gocql.Duration) string {
+	var b strings.Builder
+	b.WriteString("P")
+	if d.Months != 0 {
+		fmt.Fprintf(&b, "%dM", d.Months)
+	}
+	if d.Days != 0 {
+		fmt.Fprintf(&b, "%dD", d.Days)
+	}
+	if d.Nanoseconds != 0 {
+		secs := strconv.FormatFloat(time.Duration(d.Nanoseconds).Seconds(), 'f', -1, 64)
+		fmt.Fprintf(&b, "T%sS", secs)
+	}
+	if b.Len() == 1 {
+		b.WriteString("T0S")
+	}
+	return b.String()
+}
+
+// selectCassandraColumns narrows described table columns to the requested
+// selection (in request order) and returns the quoted CQL select list.
+func selectCassandraColumns(cols []string, cts []*sql.ColumnType, selected []string) ([]string, []*sql.ColumnType, string, error) {
+	outCols := make([]string, 0, len(selected))
+	outTypes := make([]*sql.ColumnType, 0, len(selected))
+	quoted := make([]string, 0, len(selected))
+	seen := make(map[int]bool, len(selected))
+	for _, want := range selected {
+		want = strings.TrimSpace(want)
+		if want == "" {
+			continue
+		}
+		idx := -1
+		for i, col := range cols {
+			if cursorColumnMatches(col, want) {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return nil, nil, "", fmt.Errorf("cassandra select column %q not found in table", want)
+		}
+		if seen[idx] {
+			continue
+		}
+		seen[idx] = true
+		q, err := quoteCassandraIdent(cols[idx])
+		if err != nil {
+			return nil, nil, "", err
+		}
+		outCols = append(outCols, cols[idx])
+		outTypes = append(outTypes, cts[idx])
+		quoted = append(quoted, q)
+	}
+	if len(outCols) == 0 {
+		return cols, cts, "*", nil
+	}
+	return outCols, outTypes, strings.Join(quoted, ", "), nil
 }
