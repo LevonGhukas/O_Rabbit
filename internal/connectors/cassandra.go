@@ -360,7 +360,10 @@ func (c *Cassandra) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, 
 		}
 	}
 
-	iter := c.session.Query(cql, args...).WithContext(ctx).Iter()
+	// SELECT * on a prepared statement: request result metadata on every
+	// execution so a stale/empty cached column list cannot make MapScan fail
+	// with "not enough columns to scan into: have 0 want N".
+	iter := c.session.Query(cql, args...).WithContext(ctx).NoSkipMetadata().Iter()
 
 	// Find cursor column index for the last-value checkpoint.
 	cursorIdx := -1
