@@ -6,13 +6,17 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"io"
+	"math/big"
+	"net"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gocql/gocql"
+	inf "gopkg.in/inf.v0"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
@@ -791,10 +795,11 @@ func (r *cassandraRowsIter) Next(dest []driver.Value) error {
 // sizes O_Rabbit uses (target_rows_per_task is typically 100k-500k rows with
 // bounded column widths).
 func newCassandraRows(iter *gocql.Iter, cols []string) (*sql.Rows, error) {
+	scanner := newCassandraRowScanner(iter.Columns())
 	data := make([][]driver.Value, 0, 1024)
 	for {
-		row := make(map[string]any)
-		if !iter.MapScan(row) {
+		row, ok := scanner.scan(iter)
+		if !ok {
 			break
 		}
 		vals := make([]driver.Value, len(cols))
@@ -829,8 +834,100 @@ func newCassandraRows(iter *gocql.Iter, cols []string) (*sql.Rows, error) {
 	return rows, nil
 }
 
+// cassandraRawValue receives the serialized bytes of a CQL type gocql cannot
+// map to a Go type (custom types such as Cassandra 5 vector).
+type cassandraRawValue struct{ data []byte }
+
+func (r *cassandraRawValue) UnmarshalCQL(_ gocql.TypeInfo, data []byte) error {
+	if data == nil {
+		r.data = nil
+		return nil
+	}
+	r.data = append([]byte(nil), data...)
+	return nil
+}
+
+// cassandraRowScanner scans rows with explicit per-column destinations.
+// gocql's MapScan discards RowData errors, so a single unsupported column type
+// turns into "not enough columns to scan into: have 0 want N".
+type cassandraRowScanner struct {
+	names []string
+	// tupleLen[i] is 0 for plain columns, otherwise the number of tuple elements
+	// occupying consecutive scan slots.
+	tupleLen []int
+	newDests func() []any
+}
+
+func newCassandraRowScanner(columns []gocql.ColumnInfo) *cassandraRowScanner {
+	s := &cassandraRowScanner{
+		names:    make([]string, len(columns)),
+		tupleLen: make([]int, len(columns)),
+	}
+	var factories []func() any
+	for i, col := range columns {
+		s.names[i] = col.Name
+		if tuple, ok := col.TypeInfo.(gocql.TupleTypeInfo); ok {
+			s.tupleLen[i] = len(tuple.Elems)
+			for _, elem := range tuple.Elems {
+				factories = append(factories, cassandraDestFactory(elem))
+			}
+			continue
+		}
+		factories = append(factories, cassandraDestFactory(col.TypeInfo))
+	}
+	s.newDests = func() []any {
+		dests := make([]any, len(factories))
+		for i, f := range factories {
+			dests[i] = f()
+		}
+		return dests
+	}
+	return s
+}
+
+func cassandraDestFactory(info gocql.TypeInfo) func() any {
+	if _, err := info.NewWithError(); err != nil {
+		return func() any { return &cassandraRawValue{} }
+	}
+	return func() any { v, _ := info.NewWithError(); return v }
+}
+
+func (s *cassandraRowScanner) scan(iter *gocql.Iter) (map[string]any, bool) {
+	dests := s.newDests()
+	if !iter.Scan(dests...) {
+		return nil, false
+	}
+	row := make(map[string]any, len(s.names))
+	pos := 0
+	for i, name := range s.names {
+		if n := s.tupleLen[i]; n > 0 {
+			elems := make([]any, n)
+			for j := 0; j < n; j++ {
+				elems[j] = cassandraDereference(dests[pos+j])
+			}
+			row[name] = elems
+			pos += n
+			continue
+		}
+		row[name] = cassandraDereference(dests[pos])
+		pos++
+	}
+	return row, true
+}
+
+func cassandraDereference(dest any) any {
+	if raw, ok := dest.(*cassandraRawValue); ok {
+		if raw.data == nil {
+			return nil
+		}
+		return raw.data
+	}
+	return reflect.Indirect(reflect.ValueOf(dest)).Interface()
+}
+
 // cassandraToDriverValue converts a gocql scan value to a driver.Value.
 func cassandraToDriverValue(v any) (driver.Value, error) {
+	v = normalizeCassandraValue(v)
 	if v == nil {
 		return nil, nil
 	}
@@ -868,4 +965,57 @@ func cassandraToDriverValue(v any) (driver.Value, error) {
 		}
 		return text, nil
 	}
+}
+
+// normalizeCassandraValue rewrites gocql-specific Go values (decimal, varint,
+// duration, uuid, inet) into plain strings, recursing into collections, tuples
+// and UDTs, so the lossless string/JSON fallback can serialize them.
+func normalizeCassandraValue(v any) any {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case *inf.Dec:
+		if x == nil {
+			return nil
+		}
+		return x.String()
+	case *big.Int:
+		if x == nil {
+			return nil
+		}
+		return x.String()
+	case gocql.Duration:
+		return fmt.Sprintf("%dmo%dd%dns", x.Months, x.Days, x.Nanoseconds)
+	case time.Duration:
+		return int64(x)
+	case gocql.UUID:
+		return x.String()
+	case net.IP:
+		return x.String()
+	case []byte, string, time.Time:
+		return x
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Array:
+		out := make([]any, rv.Len())
+		for i := range out {
+			out[i] = normalizeCassandraValue(rv.Index(i).Interface())
+		}
+		return out
+	case reflect.Map:
+		out := make(map[string]any, rv.Len())
+		iter := rv.MapRange()
+		for iter.Next() {
+			key := normalizeCassandraValue(iter.Key().Interface())
+			out[fmt.Sprint(key)] = normalizeCassandraValue(iter.Value().Interface())
+		}
+		return out
+	case reflect.Pointer:
+		if rv.IsNil() {
+			return nil
+		}
+		return normalizeCassandraValue(rv.Elem().Interface())
+	}
+	return v
 }
