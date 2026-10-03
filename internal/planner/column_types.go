@@ -55,6 +55,9 @@ func resolveEffectiveColumnTypes(ctx context.Context, st *db.Store, k crypto.Key
 			return o.ColumnTypes, nil, nil
 		}
 		cols, colTypes, err = d.DescribeTable(ctx, o.Table)
+		if err == nil {
+			cols, colTypes = arrowio.RestrictToSelectedColumns(cols, colTypes, o.SelectColumns)
+		}
 	}
 	if err != nil || len(cols) == 0 {
 		// Schema discovery failures surface later with source-specific errors.
