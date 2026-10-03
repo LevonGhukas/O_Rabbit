@@ -20,6 +20,7 @@ func PlanForLogicalType(name string, t typesystem.LogicalType) (ColumnPlan, type
 	if err != nil {
 		return ColumnPlan{}, typesystem.MappingResult{}, err
 	}
+	mapping.Target = CanonicalTypeForArrow(dataType)
 	convertTarget := storageConversionTarget(t)
 	plan := ColumnPlan{Name: name, DataType: dataType, Builder: func(mem memory.Allocator) array.Builder { return array.NewBuilder(mem, dataType) }}
 	plan.Append = func(builder array.Builder, raw any) error {

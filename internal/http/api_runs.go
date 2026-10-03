@@ -422,7 +422,7 @@ func validationTypeMappings(ctx context.Context, spec validatedRunSubmitSpec) ([
 			return nil, nil, fmt.Errorf("infer document schema: %w", err)
 		}
 		for _, field := range inference.Fields {
-			out = append(out, map[string]any{"column": field.Name, "logical_type": field.LogicalType.String(), "storage_type": field.Mapping.Destination, "class": field.Mapping.Class, "fallback": field.Mapping.Fallback, "reason": field.Mapping.Reason})
+			out = append(out, map[string]any{"column": field.Name, "logical_type": field.LogicalType.String(), "storage_type": field.Mapping.Destination, "target_type": field.Mapping.Target, "class": field.Mapping.Class, "fallback": field.Mapping.Fallback, "reason": field.Mapping.Reason})
 		}
 		return out, arrowio.MongoTypeWarnings(inference), nil
 	}
@@ -441,6 +441,9 @@ func validationTypeMappings(ctx context.Context, spec validatedRunSubmitSpec) ([
 		cols, types, err = q.DescribeQuery(ctx, spec.SourceQuery)
 	} else {
 		cols, types, err = reader.DescribeTable(ctx, spec.SourceTable)
+		if err == nil {
+			cols, types = arrowio.RestrictToSelectedColumns(cols, types, spec.SelectColumns)
+		}
 	}
 	if err != nil {
 		return out, warnings, nil
@@ -461,14 +464,15 @@ func validationTypeMappingsFromDescription(spec validatedRunSubmitSpec, cols []s
 		if e != nil {
 			continue
 		}
-		if raw, ok := spec.ColumnTypes[col]; ok {
+		raw, hasOverride := spec.ColumnTypes[col]
+		if hasOverride {
 			if parsed, e := typesystem.ResolveOverride(raw, logical); e == nil {
 				logical = parsed
 			}
 		}
-		_, mapping, e := arrowio.PlanForLogicalType(col, logical)
+		_, mapping, e := arrowio.PlanForOverride(col, raw, logical)
 		if e == nil {
-			out = append(out, map[string]any{"column": col, "logical_type": logical.String(), "storage_type": mapping.Destination, "class": mapping.Class, "fallback": mapping.Fallback, "reason": mapping.Reason})
+			out = append(out, map[string]any{"column": col, "logical_type": logical.String(), "storage_type": mapping.Destination, "target_type": mapping.Target, "class": mapping.Class, "fallback": mapping.Fallback, "reason": mapping.Reason})
 		}
 	}
 	return out, result.Warnings

@@ -129,11 +129,15 @@ func FinalizeColumnResolutions(resolutions []ColumnResolution, stats map[string]
 		if typeReason == "" && nullReason == "" {
 			continue
 		}
-		storage := rendered
+		storage, target := rendered, rendered
 		if useSource {
 			src := r.Source
 			src.Nullable = nullable
 			storage = src.String() + " (source type)"
+			// Report the stored type, not the "source" placeholder.
+			if _, m, err := PlanForLogicalType(r.Column, src); err == nil {
+				target = m.Target
+			}
 		}
 		reason := strings.TrimSpace(strings.Join(nonEmpty(typeReason, nullReason), " "))
 		warnings = append(warnings, typesystem.TypeWarning{
@@ -141,6 +145,7 @@ func FinalizeColumnResolutions(resolutions []ColumnResolution, stats map[string]
 			SourceType:  sourceTypeLabel(r.Source),
 			LogicalType: r.RequestedRaw,
 			StorageType: storage,
+			TargetType:  target,
 			Class:       typesystem.MappingOverrideFallback,
 			Reason:      fmt.Sprintf("Column %q: %s", r.Column, reason),
 		})
@@ -431,4 +436,35 @@ func nonEmpty(values ...string) []string {
 		}
 	}
 	return out
+}
+
+// RestrictToSelectedColumns narrows a described table to the job's selected
+// columns (case-insensitive) so type planning and warnings cover only columns
+// the run writes. An empty selection keeps every column; unknown names are
+// ignored here and reported by the source reader.
+func RestrictToSelectedColumns(cols []string, types []*sql.ColumnType, selected []string) ([]string, []*sql.ColumnType) {
+	if len(selected) == 0 || len(types) != len(cols) {
+		return cols, types
+	}
+	want := make(map[string]bool, len(selected))
+	for _, s := range selected {
+		if s = strings.ToLower(strings.TrimSpace(s)); s != "" {
+			want[s] = true
+		}
+	}
+	if len(want) == 0 {
+		return cols, types
+	}
+	outCols := make([]string, 0, len(want))
+	outTypes := make([]*sql.ColumnType, 0, len(want))
+	for i, col := range cols {
+		if want[strings.ToLower(col)] {
+			outCols = append(outCols, col)
+			outTypes = append(outTypes, types[i])
+		}
+	}
+	if len(outCols) == 0 {
+		return cols, types
+	}
+	return outCols, outTypes
 }

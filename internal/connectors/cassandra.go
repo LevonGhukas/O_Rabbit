@@ -368,9 +368,22 @@ func (c *Cassandra) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, 
 			}
 		}
 
+		where, err := cassandraWherePredicate(q.WhereClause)
+		if err != nil {
+			return nil, nil, nil, -1, err
+		}
+		if where != "" {
+			clauses = append(clauses, where)
+		}
+
 		cql = fmt.Sprintf("SELECT %s FROM %s", selectList, qt)
 		if len(clauses) > 0 {
 			cql += " WHERE " + strings.Join(clauses, " AND ")
+		}
+		if where != "" {
+			// User filters usually target non-key columns; Cassandra evaluates
+			// them per token range, which each task already bounds.
+			cql += " ALLOW FILTERING"
 		}
 	}
 
@@ -1169,4 +1182,65 @@ func selectCassandraColumns(cols []string, cts []*sql.ColumnType, selected []str
 		return cols, cts, "*", nil
 	}
 	return outCols, outTypes, strings.Join(quoted, ", "), nil
+}
+
+var cassandraWhereOrRe = regexp.MustCompile(`(?i)\bOR\b`)
+
+// cassandraWherePredicate validates a job filter for CQL: relations joined by
+// AND only. CQL has no OR and no parenthesized boolean groups, so those are
+// rejected up front instead of failing later with a driver syntax error.
+func cassandraWherePredicate(where string) (string, error) {
+	where = strings.TrimSpace(where)
+	for strings.HasPrefix(where, "(") && strings.HasSuffix(where, ")") && balancedOuterParens(where) {
+		where = strings.TrimSpace(where[1 : len(where)-1])
+	}
+	if where == "" {
+		return "", nil
+	}
+	if strings.Contains(where, ";") {
+		return "", fmt.Errorf("cassandra filter must be a single predicate")
+	}
+	if cassandraWhereOrRe.MatchString(stripCQLStringLiterals(where)) {
+		return "", fmt.Errorf("cassandra filters support AND-joined conditions only (CQL has no OR)")
+	}
+	return where, nil
+}
+
+// balancedOuterParens reports whether the first "(" closes at the last rune.
+func balancedOuterParens(s string) bool {
+	depth := 0
+	inString := false
+	for i, r := range s {
+		if r == '\'' {
+			inString = !inString
+		}
+		if inString {
+			continue
+		}
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 && i != len(s)-1 {
+				return false
+			}
+		}
+	}
+	return depth == 0
+}
+
+func stripCQLStringLiterals(s string) string {
+	var b strings.Builder
+	inString := false
+	for _, r := range s {
+		if r == '\'' {
+			inString = !inString
+			continue
+		}
+		if !inString {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }

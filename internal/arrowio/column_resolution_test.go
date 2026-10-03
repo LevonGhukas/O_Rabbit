@@ -119,6 +119,9 @@ func TestOverrideFractionalValuesKeepSourceType(t *testing.T) {
 	if got != "source" || len(warnings) != 1 || !strings.Contains(warnings[0].Reason, "fractional") {
 		t.Fatalf("effective = %q warnings = %+v", got, warnings)
 	}
+	if warnings[0].TargetType != "string" {
+		t.Fatalf("target_type = %q, want the stored source type, not the placeholder", warnings[0].TargetType)
+	}
 }
 
 func TestOverrideDecimalScaleIsWidened(t *testing.T) {
