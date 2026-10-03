@@ -3,7 +3,6 @@ package planner
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"log/slog"
 	"strings"
 
@@ -91,7 +90,7 @@ func resolveEffectiveColumnTypes(ctx context.Context, st *db.Store, k crypto.Key
 		prober, ok := reader.(connectors.QueryColumnProber)
 		switch {
 		case !ok || query == "":
-			probeErr = errUnsupportedProbe
+			probeErr = connectors.ErrColumnProbeUnsupported
 		default:
 			results, perr := prober.ProbeQueryColumns(ctx, query, probes)
 			probeErr = perr
@@ -114,8 +113,6 @@ func resolveEffectiveColumnTypes(ctx context.Context, st *db.Store, k crypto.Key
 	}
 	return effective, warnings, nil
 }
-
-var errUnsupportedProbe = errors.New("this source does not support value checks")
 
 func resultHasColumn(cols []string, name string) bool {
 	want := strings.ToLower(strings.TrimSpace(name))
