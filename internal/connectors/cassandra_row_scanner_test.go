@@ -111,3 +111,18 @@ func TestSelectCassandraColumns(t *testing.T) {
 	_, _, _, err = selectCassandraColumns([]string{"id"}, cts[:1], []string{"missing"})
 	require.Error(t, err)
 }
+
+func TestCassandraWherePredicate(t *testing.T) {
+	got, err := cassandraWherePredicate(`(age > 30 AND name = 'or else')`)
+	require.NoError(t, err)
+	require.Equal(t, `age > 30 AND name = 'or else'`, got)
+
+	got, err = cassandraWherePredicate("  ")
+	require.NoError(t, err)
+	require.Empty(t, got)
+
+	_, err = cassandraWherePredicate("age > 30 OR age < 5")
+	require.Error(t, err)
+	_, err = cassandraWherePredicate("age > 1; DROP TABLE x")
+	require.Error(t, err)
+}

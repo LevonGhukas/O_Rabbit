@@ -7,6 +7,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/stretchr/testify/require"
+
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
 
 func TestCassandraTypeMapping(t *testing.T) {
@@ -110,4 +112,25 @@ func TestCassandraPlansAcceptConnectorValues(t *testing.T) {
 			require.NoError(t, p.Append(b, tc.value))
 		})
 	}
+}
+
+func TestTypeWarningsReportCanonicalTargetType(t *testing.T) {
+	for dbType, want := range map[string]string{
+		"decimal":          "string",
+		"map<text, int>":   "string",
+		"uuid":             "string",
+		"vector<float, 2>": "array<float32>",
+	} {
+		logical, err := LogicalTypeForCassandraColumn(dbType, 0, 0, false)
+		require.NoError(t, err)
+		_, mapping, err := PlanForLogicalType("c", logical)
+		require.NoError(t, err)
+		require.Equal(t, want, mapping.Target, dbType)
+	}
+	_, mapping, err := PlanForLogicalType("c", typesystem.LogicalType{Kind: typesystem.KindUnknown, SourceTypeName: "decimal"})
+	require.NoError(t, err)
+	w, ok := typesystem.WarningForMapping("c", mapping)
+	require.True(t, ok)
+	require.Equal(t, "string", w.TargetType)
+	require.Equal(t, "utf8", w.StorageType)
 }

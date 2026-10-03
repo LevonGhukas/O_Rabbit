@@ -66,12 +66,13 @@ func PlansFromSQLEngineResult(engine string, cols []string, colTypes []*sql.Colu
 		if err != nil {
 			continue
 		}
-		if raw, ok := lookupColumnOverride(targetTypes, col); ok {
+		raw, hasOverride := lookupColumnOverride(targetTypes, col)
+		if hasOverride {
 			if parsed, parseErr := typesystem.ResolveOverride(raw, logical); parseErr == nil {
 				logical = parsed
 			}
 		}
-		_, mapping, mapErr := PlanForLogicalType(col, logical)
+		_, mapping, mapErr := PlanForOverride(col, raw, logical)
 		if mapErr == nil {
 			if warning, ok := typesystem.WarningForMapping(col, mapping); ok {
 				warnings = append(warnings, warning)
@@ -585,7 +586,7 @@ func PlansFromSQLEngineWithOverrides(engine string, cols []string, colTypes []*s
 		if parseErr != nil {
 			return nil, nil, fmt.Errorf("column %s target type: %w", f.Name, parseErr)
 		}
-		newPlan, _, planErr := PlanForLogicalType(f.Name, logical)
+		newPlan, _, planErr := PlanForOverride(f.Name, targetTypeStr, logical)
 		if planErr != nil {
 			return nil, nil, fmt.Errorf("column %s target plan: %w", f.Name, planErr)
 		}
