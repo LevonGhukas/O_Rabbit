@@ -9,6 +9,7 @@ type TypeWarning struct {
 	SourceType  string       `json:"source_type,omitempty"`
 	LogicalType string       `json:"logical_type"`
 	StorageType string       `json:"storage_type"`
+	TargetType  string       `json:"target_type,omitempty"`
 	Class       MappingClass `json:"class"`
 	Reason      string       `json:"reason"`
 }
@@ -17,7 +18,7 @@ func WarningForMapping(column string, mapping MappingResult) (TypeWarning, bool)
 	if mapping.Class != MappingSemanticFallback && mapping.Class != MappingUnsupportedFallback {
 		return TypeWarning{}, false
 	}
-	return TypeWarning{Column: column, SourceType: mapping.LogicalType.SourceTypeName, LogicalType: mapping.LogicalType.String(), StorageType: mapping.Destination, Class: mapping.Class, Reason: mapping.Reason}, true
+	return TypeWarning{Column: column, SourceType: mapping.LogicalType.SourceTypeName, LogicalType: mapping.LogicalType.String(), StorageType: mapping.Destination, TargetType: mapping.Target, Class: mapping.Class, Reason: mapping.Reason}, true
 }
 
 func DeduplicateTypeWarnings(input []TypeWarning) []TypeWarning {

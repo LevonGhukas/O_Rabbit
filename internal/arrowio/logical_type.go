@@ -2,6 +2,7 @@ package arrowio
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 
@@ -76,6 +77,9 @@ func ArrowTypeForLogicalType(t typesystem.LogicalType) (arrow.DataType, typesyst
 	case typesystem.KindMap:
 		return fallback(typesystem.MappingSemanticFallback, "native map conversion is not implemented")
 	case typesystem.KindUnknown:
+		if unboundedNumericSource(t.SourceTypeName) {
+			return fallback(typesystem.MappingUnsupportedFallback, "source numeric type has no fixed precision/scale, so values are stored as exact text; choose a decimal(p,s) column type to store them as numbers")
+		}
 		return fallback(typesystem.MappingUnsupportedFallback, "unknown logical type uses lossless string fallback")
 	case typesystem.KindArray:
 		elementType, elementMapping, err := ArrowTypeForLogicalType(*t.Element)
@@ -88,4 +92,15 @@ func ArrowTypeForLogicalType(t typesystem.LogicalType) (arrow.DataType, typesyst
 	default:
 		return nil, typesystem.MappingResult{}, fmt.Errorf("unsupported logical type %s", t.String())
 	}
+}
+
+// unboundedNumericSource reports arbitrary-precision numeric source types
+// (Cassandra decimal/varint, unconstrained SQL NUMERIC) that only map to a
+// lossless text fallback unless the user picks a decimal(p,s).
+func unboundedNumericSource(sourceType string) bool {
+	switch strings.ToLower(strings.TrimSpace(sourceType)) {
+	case "decimal", "varint", "numeric", "number":
+		return true
+	}
+	return false
 }

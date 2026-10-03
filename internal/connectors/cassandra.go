@@ -4,15 +4,22 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
+	"math"
+	"math/big"
+	"net"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gocql/gocql"
+	inf "gopkg.in/inf.v0"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
@@ -348,19 +355,42 @@ func (c *Cassandra) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, 
 			return nil, nil, nil, -1, err
 		}
 
-		cql = fmt.Sprintf("SELECT * FROM %s", qt)
-		if len(clauses) > 0 {
-			cql += " WHERE " + strings.Join(clauses, " AND ")
-		}
-
 		// Describe the table to get column metadata.
 		cols, cts, err = c.DescribeTable(ctx, q.Table)
 		if err != nil {
 			return nil, nil, nil, -1, err
 		}
+		selectList := "*"
+		if len(q.SelectColumns) > 0 {
+			cols, cts, selectList, err = selectCassandraColumns(cols, cts, q.SelectColumns)
+			if err != nil {
+				return nil, nil, nil, -1, err
+			}
+		}
+
+		where, err := cassandraWherePredicate(q.WhereClause)
+		if err != nil {
+			return nil, nil, nil, -1, err
+		}
+		if where != "" {
+			clauses = append(clauses, where)
+		}
+
+		cql = fmt.Sprintf("SELECT %s FROM %s", selectList, qt)
+		if len(clauses) > 0 {
+			cql += " WHERE " + strings.Join(clauses, " AND ")
+		}
+		if where != "" {
+			// User filters usually target non-key columns; Cassandra evaluates
+			// them per token range, which each task already bounds.
+			cql += " ALLOW FILTERING"
+		}
 	}
 
-	iter := c.session.Query(cql, args...).WithContext(ctx).Iter()
+	// SELECT * on a prepared statement: request result metadata on every
+	// execution so a stale/empty cached column list cannot make MapScan fail
+	// with "not enough columns to scan into: have 0 want N".
+	iter := c.session.Query(cql, args...).WithContext(ctx).NoSkipMetadata().Iter()
 
 	// Find cursor column index for the last-value checkpoint.
 	cursorIdx := -1
@@ -788,10 +818,11 @@ func (r *cassandraRowsIter) Next(dest []driver.Value) error {
 // sizes O_Rabbit uses (target_rows_per_task is typically 100k-500k rows with
 // bounded column widths).
 func newCassandraRows(iter *gocql.Iter, cols []string) (*sql.Rows, error) {
+	scanner := newCassandraRowScanner(iter.Columns())
 	data := make([][]driver.Value, 0, 1024)
 	for {
-		row := make(map[string]any)
-		if !iter.MapScan(row) {
+		row, ok := scanner.scan(iter)
+		if !ok {
 			break
 		}
 		vals := make([]driver.Value, len(cols))
@@ -826,8 +857,156 @@ func newCassandraRows(iter *gocql.Iter, cols []string) (*sql.Rows, error) {
 	return rows, nil
 }
 
+// cassandraRawValue receives the serialized bytes of a CQL type gocql cannot
+// map to a Go type (custom types such as Cassandra 5 vector).
+type cassandraRawValue struct {
+	custom string
+	data   []byte
+}
+
+func (r *cassandraRawValue) UnmarshalCQL(_ gocql.TypeInfo, data []byte) error {
+	if data == nil {
+		r.data = nil
+		return nil
+	}
+	r.data = append([]byte(nil), data...)
+	return nil
+}
+
+// value decodes fixed-width Cassandra 5 vectors (float, double, int, bigint)
+// into a list; any other custom type is returned as its raw bytes.
+func (r *cassandraRawValue) value() any {
+	if r.data == nil {
+		return nil
+	}
+	if elems, ok := decodeCassandraVector(r.custom, r.data); ok {
+		return elems
+	}
+	return r.data
+}
+
+var cassandraVectorTypeRe = regexp.MustCompile(`^org\.apache\.cassandra\.db\.marshal\.VectorType\(org\.apache\.cassandra\.db\.marshal\.(\w+)\s*,\s*(\d+)\)$`)
+
+func decodeCassandraVector(custom string, data []byte) ([]any, bool) {
+	m := cassandraVectorTypeRe.FindStringSubmatch(strings.TrimSpace(custom))
+	if m == nil {
+		return nil, false
+	}
+	dim, err := strconv.Atoi(m[2])
+	if err != nil || dim < 0 {
+		return nil, false
+	}
+	var width int
+	switch m[1] {
+	case "FloatType", "Int32Type":
+		width = 4
+	case "DoubleType", "LongType":
+		width = 8
+	default:
+		return nil, false
+	}
+	if len(data) != dim*width {
+		return nil, false
+	}
+	out := make([]any, dim)
+	for i := 0; i < dim; i++ {
+		chunk := data[i*width : (i+1)*width]
+		switch m[1] {
+		case "FloatType":
+			out[i] = math.Float32frombits(binary.BigEndian.Uint32(chunk))
+		case "Int32Type":
+			out[i] = int32(binary.BigEndian.Uint32(chunk))
+		case "DoubleType":
+			out[i] = math.Float64frombits(binary.BigEndian.Uint64(chunk))
+		case "LongType":
+			out[i] = int64(binary.BigEndian.Uint64(chunk))
+		}
+	}
+	return out, true
+}
+
+// cassandraTuple marks a scanned tuple so it is serialized as one JSON value.
+type cassandraTuple []any
+
+// cassandraRowScanner scans rows with explicit per-column destinations.
+// gocql's MapScan discards RowData errors, so a single unsupported column type
+// turns into "not enough columns to scan into: have 0 want N".
+type cassandraRowScanner struct {
+	names []string
+	// tupleLen[i] is 0 for plain columns, otherwise the number of tuple elements
+	// occupying consecutive scan slots.
+	tupleLen []int
+	newDests func() []any
+}
+
+func newCassandraRowScanner(columns []gocql.ColumnInfo) *cassandraRowScanner {
+	s := &cassandraRowScanner{
+		names:    make([]string, len(columns)),
+		tupleLen: make([]int, len(columns)),
+	}
+	var factories []func() any
+	for i, col := range columns {
+		s.names[i] = col.Name
+		if tuple, ok := col.TypeInfo.(gocql.TupleTypeInfo); ok {
+			s.tupleLen[i] = len(tuple.Elems)
+			for _, elem := range tuple.Elems {
+				factories = append(factories, cassandraDestFactory(elem))
+			}
+			continue
+		}
+		factories = append(factories, cassandraDestFactory(col.TypeInfo))
+	}
+	s.newDests = func() []any {
+		dests := make([]any, len(factories))
+		for i, f := range factories {
+			dests[i] = f()
+		}
+		return dests
+	}
+	return s
+}
+
+func cassandraDestFactory(info gocql.TypeInfo) func() any {
+	if _, err := info.NewWithError(); err != nil {
+		custom := info.Custom()
+		return func() any { return &cassandraRawValue{custom: custom} }
+	}
+	return func() any { v, _ := info.NewWithError(); return v }
+}
+
+func (s *cassandraRowScanner) scan(iter *gocql.Iter) (map[string]any, bool) {
+	dests := s.newDests()
+	if !iter.Scan(dests...) {
+		return nil, false
+	}
+	row := make(map[string]any, len(s.names))
+	pos := 0
+	for i, name := range s.names {
+		if n := s.tupleLen[i]; n > 0 {
+			elems := make([]any, n)
+			for j := 0; j < n; j++ {
+				elems[j] = cassandraDereference(dests[pos+j])
+			}
+			row[name] = cassandraTuple(elems)
+			pos += n
+			continue
+		}
+		row[name] = cassandraDereference(dests[pos])
+		pos++
+	}
+	return row, true
+}
+
+func cassandraDereference(dest any) any {
+	if raw, ok := dest.(*cassandraRawValue); ok {
+		return raw.value()
+	}
+	return reflect.Indirect(reflect.ValueOf(dest)).Interface()
+}
+
 // cassandraToDriverValue converts a gocql scan value to a driver.Value.
 func cassandraToDriverValue(v any) (driver.Value, error) {
+	v = normalizeCassandraValue(v)
 	if v == nil {
 		return nil, nil
 	}
@@ -856,7 +1035,10 @@ func cassandraToDriverValue(v any) (driver.Value, error) {
 		return x, nil
 	case gocql.UUID:
 		return x.String(), nil
-	case time.Time:
+	case time.Time, time.Duration:
+		return x, nil
+	case []any:
+		// list/set/vector values stay structured for the array converter.
 		return x, nil
 	default:
 		text, err := typesystem.ToLosslessString(v)
@@ -865,4 +1047,200 @@ func cassandraToDriverValue(v any) (driver.Value, error) {
 		}
 		return text, nil
 	}
+}
+
+// normalizeCassandraValue rewrites gocql-specific Go values into values the
+// type system converts natively: decimal/varint become exact strings, duration
+// becomes ISO-8601 text, list/set/vector become []any, and map/UDT/tuple values
+// become one JSON document.
+func normalizeCassandraValue(v any) any {
+	return normalizeCassandraNested(v, false)
+}
+
+// normalizeCassandraNested keeps containers as native Go structures when they
+// are nested inside a JSON document, so they are encoded exactly once.
+func normalizeCassandraNested(v any, inJSON bool) any {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case *inf.Dec:
+		if x == nil {
+			return nil
+		}
+		return x.String()
+	case *big.Int:
+		if x == nil {
+			return nil
+		}
+		return x.String()
+	case gocql.Duration:
+		return cassandraISODuration(x)
+	case gocql.UUID:
+		return x.String()
+	case net.IP:
+		return x.String()
+	case []byte, string, time.Time, time.Duration:
+		return x
+	case cassandraTuple:
+		out := make([]any, len(x))
+		for i, elem := range x {
+			out[i] = normalizeCassandraNested(elem, true)
+		}
+		return cassandraJSONDocument(out, inJSON)
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Array:
+		out := make([]any, rv.Len())
+		for i := range out {
+			out[i] = normalizeCassandraNested(rv.Index(i).Interface(), inJSON)
+		}
+		return out
+	case reflect.Map:
+		out := make(map[string]any, rv.Len())
+		iter := rv.MapRange()
+		for iter.Next() {
+			key := normalizeCassandraNested(iter.Key().Interface(), true)
+			out[fmt.Sprint(key)] = normalizeCassandraNested(iter.Value().Interface(), true)
+		}
+		return cassandraJSONDocument(out, inJSON)
+	case reflect.Pointer:
+		if rv.IsNil() {
+			return nil
+		}
+		return normalizeCassandraNested(rv.Elem().Interface(), inJSON)
+	}
+	return v
+}
+
+func cassandraJSONDocument(v any, inJSON bool) any {
+	if inJSON {
+		return v
+	}
+	encoded, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprint(v)
+	}
+	return string(encoded)
+}
+
+// cassandraISODuration renders a CQL duration as ISO-8601, e.g. P1M2DT3.5S.
+func cassandraISODuration(d gocql.Duration) string {
+	var b strings.Builder
+	b.WriteString("P")
+	if d.Months != 0 {
+		fmt.Fprintf(&b, "%dM", d.Months)
+	}
+	if d.Days != 0 {
+		fmt.Fprintf(&b, "%dD", d.Days)
+	}
+	if d.Nanoseconds != 0 {
+		secs := strconv.FormatFloat(time.Duration(d.Nanoseconds).Seconds(), 'f', -1, 64)
+		fmt.Fprintf(&b, "T%sS", secs)
+	}
+	if b.Len() == 1 {
+		b.WriteString("T0S")
+	}
+	return b.String()
+}
+
+// selectCassandraColumns narrows described table columns to the requested
+// selection (in request order) and returns the quoted CQL select list.
+func selectCassandraColumns(cols []string, cts []*sql.ColumnType, selected []string) ([]string, []*sql.ColumnType, string, error) {
+	outCols := make([]string, 0, len(selected))
+	outTypes := make([]*sql.ColumnType, 0, len(selected))
+	quoted := make([]string, 0, len(selected))
+	seen := make(map[int]bool, len(selected))
+	for _, want := range selected {
+		want = strings.TrimSpace(want)
+		if want == "" {
+			continue
+		}
+		idx := -1
+		for i, col := range cols {
+			if cursorColumnMatches(col, want) {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return nil, nil, "", fmt.Errorf("cassandra select column %q not found in table", want)
+		}
+		if seen[idx] {
+			continue
+		}
+		seen[idx] = true
+		q, err := quoteCassandraIdent(cols[idx])
+		if err != nil {
+			return nil, nil, "", err
+		}
+		outCols = append(outCols, cols[idx])
+		outTypes = append(outTypes, cts[idx])
+		quoted = append(quoted, q)
+	}
+	if len(outCols) == 0 {
+		return cols, cts, "*", nil
+	}
+	return outCols, outTypes, strings.Join(quoted, ", "), nil
+}
+
+var cassandraWhereOrRe = regexp.MustCompile(`(?i)\bOR\b`)
+
+// cassandraWherePredicate validates a job filter for CQL: relations joined by
+// AND only. CQL has no OR and no parenthesized boolean groups, so those are
+// rejected up front instead of failing later with a driver syntax error.
+func cassandraWherePredicate(where string) (string, error) {
+	where = strings.TrimSpace(where)
+	for strings.HasPrefix(where, "(") && strings.HasSuffix(where, ")") && balancedOuterParens(where) {
+		where = strings.TrimSpace(where[1 : len(where)-1])
+	}
+	if where == "" {
+		return "", nil
+	}
+	if strings.Contains(where, ";") {
+		return "", fmt.Errorf("cassandra filter must be a single predicate")
+	}
+	if cassandraWhereOrRe.MatchString(stripCQLStringLiterals(where)) {
+		return "", fmt.Errorf("cassandra filters support AND-joined conditions only (CQL has no OR)")
+	}
+	return where, nil
+}
+
+// balancedOuterParens reports whether the first "(" closes at the last rune.
+func balancedOuterParens(s string) bool {
+	depth := 0
+	inString := false
+	for i, r := range s {
+		if r == '\'' {
+			inString = !inString
+		}
+		if inString {
+			continue
+		}
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 && i != len(s)-1 {
+				return false
+			}
+		}
+	}
+	return depth == 0
+}
+
+func stripCQLStringLiterals(s string) string {
+	var b strings.Builder
+	inString := false
+	for _, r := range s {
+		if r == '\'' {
+			inString = !inString
+			continue
+		}
+		if !inString {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }

@@ -47,7 +47,7 @@ func TestCassandraLogicalMigration(t *testing.T) {
 	for _, test := range []struct {
 		source string
 		want   typesystem.Kind
-	}{{"bigint", typesystem.KindInt64}, {"timestamp", typesystem.KindTimestampTZ}, {"blob", typesystem.KindBinary}, {"uuid", typesystem.KindUUID}, {"varint", typesystem.KindUnknown}, {"decimal", typesystem.KindUnknown}, {"list<text>", typesystem.KindUnknown}, {"inet", typesystem.KindUnknown}, {"extension", typesystem.KindUnknown}} {
+	}{{"bigint", typesystem.KindInt64}, {"timestamp", typesystem.KindTimestampTZ}, {"blob", typesystem.KindBinary}, {"uuid", typesystem.KindUUID}, {"varint", typesystem.KindUnknown}, {"decimal", typesystem.KindUnknown}, {"list<text>", typesystem.KindArray}, {"inet", typesystem.KindString}, {"address", typesystem.KindJSON}, {"org.apache.cassandra.db.marshal.Custom", typesystem.KindUnknown}} {
 		got, err := LogicalTypeForCassandraColumn(test.source, 0, 0, false)
 		require.NoError(t, err)
 		require.Equal(t, test.want, got.Kind)
