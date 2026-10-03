@@ -215,3 +215,54 @@ func TestRequestedUInt64StoredAsInt64WhenValuesFit(t *testing.T) {
 		t.Fatalf("values beyond int64 keep uint64 (decimal storage): %q", got)
 	}
 }
+
+func TestUncheckableSourceHonorsDecimalOverride(t *testing.T) {
+	source := typesystem.LogicalType{Kind: typesystem.KindUnknown, SourceTypeName: "decimal", Nullable: true}
+	r := resolutionFor(t, source, true, "nullable<decimal(18,2)>")
+	got, warnings := finalize(r, nil, connectors.ErrColumnProbeUnsupported)
+	if got != "nullable<decimal(18,2)>" || len(warnings) != 0 {
+		t.Fatalf("effective = %q warnings = %+v", got, warnings)
+	}
+
+	// A probe that failed while reading data still keeps the source type.
+	got, warnings = finalize(r, nil, errors.New("timeout"))
+	if got != "nullable<source>" || len(warnings) != 1 {
+		t.Fatalf("read failure: effective = %q warnings = %+v", got, warnings)
+	}
+}
+
+func TestHonoredDecimalOverrideRejectsLossyValuesAtLoad(t *testing.T) {
+	p, _, err := PlanForLogicalType("v", typesystem.Decimal(18, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := p.Builder(memory.DefaultAllocator)
+	defer b.Release()
+	if err := p.Append(b, "123.45"); err != nil {
+		t.Fatalf("exact value: %v", err)
+	}
+	if err := p.Append(b, "1.234"); err == nil {
+		t.Fatal("value needing rounding must fail, not be rounded")
+	}
+	v, _, err := PlanForLogicalType("v", typesystem.Decimal(38, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vb := v.Builder(memory.DefaultAllocator)
+	defer vb.Release()
+	if err := v.Append(vb, "-123456789012345678901234567890"); err != nil {
+		t.Fatalf("varint as decimal(38,0): %v", err)
+	}
+}
+
+func TestUnboundedNumericWarningExplainsDecimalChoice(t *testing.T) {
+	for _, src := range []string{"decimal", "varint"} {
+		_, mapping, err := PlanForLogicalType("v", typesystem.LogicalType{Kind: typesystem.KindUnknown, SourceTypeName: src})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(mapping.Reason, "decimal(p,s)") || mapping.Target != "string" {
+			t.Fatalf("%s: %+v", src, mapping)
+		}
+	}
+}

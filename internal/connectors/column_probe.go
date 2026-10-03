@@ -3,6 +3,7 @@ package connectors
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -311,3 +312,8 @@ func (p *Postgres) DescribeQueryNotNull(ctx context.Context, query string) (map[
 	}
 	return out, nil
 }
+
+// ErrColumnProbeUnsupported means the source cannot check column values before
+// a run (it does not implement QueryColumnProber). It is distinct from a probe
+// that failed while reading data.
+var ErrColumnProbeUnsupported = errors.New("this source does not support value checks")

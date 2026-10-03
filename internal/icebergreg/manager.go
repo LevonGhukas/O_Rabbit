@@ -1240,13 +1240,13 @@ func inferRunIcebergSchema(ctx context.Context, req RunRequest, tableName string
 // stable JSON representation before a zero-artifact run enters its durable
 // commit boundary.
 func InferDurableIcebergSchema(ctx context.Context, engine, dsn, mode, table, query, recordPath, fileFormat string) (json.RawMessage, error) {
-	schema, _, err := InferDurableIcebergSchemaWithWarnings(ctx, engine, dsn, mode, table, query, recordPath, fileFormat, nil)
+	schema, _, err := InferDurableIcebergSchemaWithWarnings(ctx, engine, dsn, mode, table, query, recordPath, fileFormat, nil, nil)
 	return schema, err
 }
 
 // InferDurableIcebergSchemaWithWarnings snapshots the durable source schema and
 // returns the document inference warnings produced by that same sample.
-func InferDurableIcebergSchemaWithWarnings(ctx context.Context, engine, dsn, mode, table, query, recordPath, fileFormat string, columnTypes map[string]string) (json.RawMessage, []typesystem.TypeWarning, error) {
+func InferDurableIcebergSchemaWithWarnings(ctx context.Context, engine, dsn, mode, table, query, recordPath, fileFormat string, columnTypes map[string]string, selectColumns []string) (json.RawMessage, []typesystem.TypeWarning, error) {
 	if connectors.SupportsDocumentReader(engine) {
 		reader, err := connectors.OpenDocumentReader(ctx, engine, dsn)
 		if err != nil {
@@ -1272,7 +1272,7 @@ func InferDurableIcebergSchemaWithWarnings(ctx context.Context, engine, dsn, mod
 		return nil, nil, fmt.Errorf("open source for durable schema: %w", err)
 	}
 	defer reader.Close()
-	req := RunRequest{SourceEngine: engine, SourceMode: mode, SourceTable: table, SourceQuery: query}
+	req := RunRequest{SourceEngine: engine, SourceMode: mode, SourceTable: table, SourceQuery: query, SelectColumns: selectColumns}
 	cols, sqlTypes, err := describeSourceSchemaForAutoCreate(ctx, reader, req)
 	if err != nil {
 		return nil, nil, err

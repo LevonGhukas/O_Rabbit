@@ -2,6 +2,7 @@ package arrowio
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -172,6 +173,12 @@ func resolveOverrideRange(r ColumnResolution, st connectors.ColumnProbeResult, h
 	label := req.Kind.String()
 	if req.Kind == typesystem.KindDecimal {
 		label = renderDecimalLabel(req)
+	}
+	if !hasStats && errors.Is(probeErr, connectors.ErrColumnProbeUnsupported) {
+		// The source cannot be checked in advance (e.g. Cassandra). Honor the
+		// choice: conversion is strict, so a value that does not fit or would
+		// be rounded fails the run instead of being stored lossily.
+		return req, false, ""
 	}
 	if !hasStats {
 		return req, true, fmt.Sprintf("you selected %s, but the source values could not be checked (%v), so the source type %s is kept to avoid possible data loss.", label, probeErrText(probeErr), sourceTypeLabel(r.Source))
