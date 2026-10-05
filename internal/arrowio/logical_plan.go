@@ -58,6 +58,9 @@ func StorageArrowTypeForLogicalType(t typesystem.LogicalType) (arrow.DataType, t
 	return ArrowTypeForLogicalType(t)
 }
 
+// uint64DecimalPrecision holds every uint64 value (max 18446744073709551615).
+const uint64DecimalPrecision = 20
+
 func storageConversionTarget(t typesystem.LogicalType) typesystem.LogicalType {
 	switch t.Kind {
 	case typesystem.KindUInt32:
