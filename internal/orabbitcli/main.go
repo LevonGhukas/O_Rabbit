@@ -74,6 +74,7 @@ func cmdStart(ctx context.Context, args []string) int {
 	tlsKey := fs.String("tls-key", "", "Master gRPC TLS key file (required when -insecure=false and starting master)")
 	tlsCA := fs.String("tls-ca", "", "Worker CA cert for master gRPC TLS (optional)")
 	tlsServerName := fs.String("tls-server-name", "", "Expected server name for worker gRPC TLS (optional)")
+	workerEnrollmentToken := fs.String("worker-enrollment-token", "", "Enrollment token for TLS workers that have no identity yet; create one with max_uses >= --count (prefer ORABBIT_WORKER_ENROLLMENT_TOKEN)")
 
 	count := fs.Int("count", 1, "Worker process count")
 	insecure := fs.Bool("insecure", true, "Disable gRPC TLS (dev)")
@@ -102,9 +103,17 @@ func cmdStart(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "--count must be >= 1")
 		return exitUsage
 	}
+	if startMaster && strings.TrimSpace(os.Getenv("ORABBIT_MASTER_KEY")) == "" {
+		fmt.Fprintln(os.Stderr, "starting master requires ORABBIT_MASTER_KEY (for example: export ORABBIT_MASTER_KEY=\"$(openssl rand -base64 32)\")")
+		return exitUsage
+	}
 	if startMaster && !*insecure && (strings.TrimSpace(*tlsCert) == "" || strings.TrimSpace(*tlsKey) == "") {
 		fmt.Fprintln(os.Stderr, "starting master with TLS requires both --tls-cert and --tls-key")
 		return exitUsage
+	}
+	if v := strings.TrimSpace(*workerEnrollmentToken); startWorker && v != "" {
+		// Hand the token to child workers through the environment, never argv.
+		_ = os.Setenv("ORABBIT_WORKER_ENROLLMENT_TOKEN", v)
 	}
 
 	parentCtx := ctx

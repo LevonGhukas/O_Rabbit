@@ -32,7 +32,11 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
+	"github.com/LevonGhukas/O_Rabbit/internal/telemetry"
 	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
+	"github.com/LevonGhukas/O_Rabbit/internal/workeridentity"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -40,6 +44,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
 	grpcstatus "google.golang.org/grpc/status"
 )
 
@@ -65,6 +70,7 @@ type commitObjectStore interface {
 	GetObjectBytes(context.Context, string) ([]byte, bool, error)
 	PutObjectBytes(context.Context, string, []byte, string, map[string]string) error
 	OpenObject(context.Context, string) (io.ReadCloser, bool, error)
+	ObjectChecksum(context.Context, string) (int64, string, bool, error)
 }
 
 type s3CommitObjectStore struct{ uploader *s3io.Uploader }
@@ -106,8 +112,13 @@ func (s s3CommitObjectStore) OpenObject(ctx context.Context, key string) (io.Rea
 	return s.uploader.OpenObject(ctx, key)
 }
 
+func (s s3CommitObjectStore) ObjectChecksum(ctx context.Context, key string) (int64, string, bool, error) {
+	return s.uploader.ObjectChecksum(ctx, key)
+}
+
 // Server implements the gRPC control plane server.
 type Server struct {
+	commitCatalog CommitCatalogPolicy
 	grpcpb.UnimplementedControlPlaneServer
 
 	log *slog.Logger
@@ -139,6 +150,9 @@ type Server struct {
 	catalogWorkSlots           chan struct{}
 	uploadCapacityLimit        int
 	uploadCapacityLeaseTTL     time.Duration
+	workerCA                   *workeridentity.CA
+	workerCertTTL              time.Duration
+	assumeRoleFn               func(context.Context, stsRequest) (aws.Credentials, error)
 }
 
 type multipartCleaner interface {
@@ -153,7 +167,34 @@ type canceledObjectCleaner interface {
 	DeleteExactObject(context.Context, string, string) error
 }
 
-const workerProtocolVersion = 5
+// WorkerProtocolVersion is the worker/master protocol revision. Version 6
+// moved task secrets from TaskAssignment to GetTaskCredentials; version 7
+// moved multipart lifecycle reports to ReportMultipartLifecycle.
+const WorkerProtocolVersion = 7
+
+const workerProtocolVersion = WorkerProtocolVersion
+
+// ListenAndServe starts the gRPC server and listens for incoming connections.
+const (
+	// maxRecvMsgBytes bounds each worker request. Results and progress
+	// payloads are far smaller; the limit caps worker-supplied data.
+	maxRecvMsgBytes = 4 << 20
+	maxSendMsgBytes = 16 << 20
+
+	// gracefulStopTimeout bounds shutdown: a long commit running inside
+	// ReportTaskResult must not keep a stopping master alive indefinitely.
+	// Its run stays COMMITTING and is resumed by the next leader.
+	gracefulStopTimeout = 30 * time.Second
+)
+
+const (
+	maxWorkerProgressMessageBytes = 4 << 10
+	maxWorkerProgressFieldsBytes  = 64 << 10
+	maxMultipartErrorMessageBytes = 4 << 10
+	maxMultipartObjectKeyBytes    = 4 << 10
+	maxMultipartUploadIDBytes     = 2 << 10
+	maxMultipartErrorClassBytes   = 256
+)
 
 // buildParquetObjectPayloads constructs the task's Parquet object metadata in one pass.
 // rows and bytes remain task totals copied onto each object, not per-object metrics.
@@ -214,6 +255,9 @@ func NewServer(log *slog.Logger, st *db.Store, bc *httpapi.Broadcaster, k crypto
 	s.newCanceledObjectCleanerFn = func(ctx context.Context, cfg s3io.Config) (canceledObjectCleaner, error) {
 		return s3io.New(ctx, cfg)
 	}
+	s.workerCertTTL = 24 * time.Hour
+	s.commitCatalog = DefaultCommitCatalogPolicy()
+	s.assumeRoleFn = assumeRoleWithSTS
 	return s
 }
 
@@ -225,6 +269,68 @@ func (s *Server) ExpireLeases(ctx context.Context) (int, error) {
 }
 
 func (s *Server) SetLeasePolicy(policy db.LeasePolicy) { s.leasePolicy = policy }
+
+// CommitCatalogPolicy holds the timeouts, leases and retry budgets of run
+// publication and catalog registration/reconciliation.
+type CommitCatalogPolicy struct {
+	// CommitTimeout bounds one publication attempt of a run.
+	CommitTimeout time.Duration
+	// CommitMaxAttempts bounds retries of a failing commit.
+	CommitMaxAttempts int
+	// RegistrationTimeout bounds one catalog registration.
+	RegistrationTimeout time.Duration
+	Registration        db.RegistrationPolicy
+	// ReconciliationLease and ReconciliationMaxAttempts govern catalog
+	// observation after an ambiguous registration.
+	ReconciliationLease       time.Duration
+	ReconciliationMaxAttempts int
+}
+
+// DefaultCommitCatalogPolicy returns the built-in commit and catalog policy.
+func DefaultCommitCatalogPolicy() CommitCatalogPolicy {
+	return CommitCatalogPolicy{
+		CommitTimeout:             30 * time.Minute,
+		CommitMaxAttempts:         5,
+		RegistrationTimeout:       30 * time.Minute,
+		Registration:              db.RegistrationPolicy{LeaseDuration: 30 * time.Second, MaxAttempts: 5, BackoffBase: time.Second, BackoffMax: time.Minute},
+		ReconciliationLease:       30 * time.Second,
+		ReconciliationMaxAttempts: 5,
+	}
+}
+
+// SetCommitCatalogPolicy replaces the commit and catalog policy. Zero fields
+// keep their defaults.
+func (s *Server) SetCommitCatalogPolicy(p CommitCatalogPolicy) {
+	d := DefaultCommitCatalogPolicy()
+	if p.CommitTimeout <= 0 {
+		p.CommitTimeout = d.CommitTimeout
+	}
+	if p.CommitMaxAttempts <= 0 {
+		p.CommitMaxAttempts = d.CommitMaxAttempts
+	}
+	if p.RegistrationTimeout <= 0 {
+		p.RegistrationTimeout = d.RegistrationTimeout
+	}
+	if p.Registration.LeaseDuration <= 0 {
+		p.Registration.LeaseDuration = d.Registration.LeaseDuration
+	}
+	if p.Registration.MaxAttempts <= 0 {
+		p.Registration.MaxAttempts = d.Registration.MaxAttempts
+	}
+	if p.Registration.BackoffBase <= 0 {
+		p.Registration.BackoffBase = d.Registration.BackoffBase
+	}
+	if p.Registration.BackoffMax <= 0 {
+		p.Registration.BackoffMax = d.Registration.BackoffMax
+	}
+	if p.ReconciliationLease <= 0 {
+		p.ReconciliationLease = d.ReconciliationLease
+	}
+	if p.ReconciliationMaxAttempts <= 0 {
+		p.ReconciliationMaxAttempts = d.ReconciliationMaxAttempts
+	}
+	s.commitCatalog = p
+}
 func (s *Server) SetUploadCapacityPolicy(limit int, ttl time.Duration) {
 	if limit > 0 {
 		s.uploadCapacityLimit = limit
@@ -319,7 +425,13 @@ func (s *Server) RequestTask(ctx context.Context, req *grpcpb.RequestTaskRequest
 		return nil, err
 	}
 
-	t, ok, err := s.st.AssignNextPendingTaskWithLease(ctx, req.BootId, req.WorkerId, s.nowFn(), s.leasePolicy, s.attemptIDFn, s.fencingTokenFn)
+	// Authenticated workers only receive tasks, and so credentials, of jobs in
+	// their own pool. Unauthenticated development workers are unrestricted.
+	pool := ""
+	if worker, ok := authenticatedWorkerFrom(ctx); ok {
+		pool = worker.Pool
+	}
+	t, ok, err := s.st.AssignNextPendingTaskInPool(ctx, req.BootId, req.WorkerId, pool, s.nowFn(), s.leasePolicy, s.attemptIDFn, s.fencingTokenFn)
 	if err != nil {
 		return nil, err
 	}
@@ -404,31 +516,15 @@ func (s *Server) ReleaseUploadCapacity(ctx context.Context, req *grpcpb.ReleaseU
 
 // ReportTaskProgress is best-effort and does not return an error if the task is not found (e.g. late progress after task completion).
 func (s *Server) ReportTaskProgress(ctx context.Context, req *grpcpb.ReportTaskProgressRequest) (*grpcpb.ReportTaskProgressResponse, error) {
+	if len(req.Message) > maxWorkerProgressMessageBytes {
+		return nil, grpcstatus.Error(codes.InvalidArgument, "progress message too large")
+	}
+
+	if len(req.FieldsJson) > maxWorkerProgressFieldsBytes {
+		return nil, grpcstatus.Error(codes.InvalidArgument, "progress fields too large")
+	}
 	if err := s.requireLeadership(ctx); err != nil {
 		return nil, err
-	}
-	if req.Message == "MULTIPART_LIFECYCLE" {
-		var lifecycle struct {
-			Event        string `json:"event"`
-			FileIndex    int    `json:"file_index"`
-			ObjectKey    string `json:"object_key"`
-			UploadID     string `json:"provider_upload_id"`
-			SHA256       string `json:"sha256"`
-			Size         int64  `json:"size"`
-			ErrorClass   string `json:"error_class"`
-			ErrorMessage string `json:"error_message"`
-		}
-		if err := json.Unmarshal([]byte(req.FieldsJson), &lifecycle); err != nil {
-			return nil, grpcstatus.Error(codes.InvalidArgument, "invalid multipart lifecycle payload")
-		}
-		_, err := s.st.ApplyMultipartLifecycle(ctx, db.MultipartLifecycleUpdate{Event: lifecycle.Event, RunID: req.RunId, TaskID: req.TaskId, AttemptID: req.AttemptId, WorkerID: req.WorkerId, FencingToken: req.FencingToken, FileIndex: lifecycle.FileIndex, ObjectKey: lifecycle.ObjectKey, UploadID: lifecycle.UploadID, SHA256: lifecycle.SHA256, Size: lifecycle.Size, ErrorClass: lifecycle.ErrorClass, ErrorMessage: lifecycle.ErrorMessage}, s.nowFn())
-		if errors.Is(err, db.ErrMultipartFenced) {
-			return nil, grpcstatus.Error(codes.FailedPrecondition, "multipart lifecycle ownership lost")
-		}
-		if err != nil {
-			return nil, err
-		}
-		return &grpcpb.ReportTaskProgressResponse{}, nil
 	}
 	if strings.TrimSpace(req.AttemptId) == "" || strings.TrimSpace(req.FencingToken) == "" {
 		return nil, grpcstatus.Error(codes.FailedPrecondition, "fenced task protocol required")
@@ -499,7 +595,7 @@ func (s *Server) ReportTaskProgress(ctx context.Context, req *grpcpb.ReportTaskP
 	e := db.Event{
 		ID:         eventID,
 		RunID:      eventRunID,
-		TS:         time.Now().UTC().Format(time.RFC3339Nano),
+		TS:         db.FormatTimestamp(time.Now()),
 		Level:      level,
 		Message:    eventMessage,
 		FieldsJSON: []byte(orJSON(fields)),
@@ -513,6 +609,63 @@ func (s *Server) ReportTaskProgress(ctx context.Context, req *grpcpb.ReportTaskP
 		s.bc.Publish(e)
 	}
 	return &grpcpb.ReportTaskProgressResponse{}, nil
+}
+
+func (s *Server) ReportMultipartLifecycle(
+	ctx context.Context,
+	req *grpcpb.ReportMultipartLifecycleRequest,
+) (*grpcpb.ReportMultipartLifecycleResponse, error) {
+	if err := s.requireLeadership(ctx); err != nil {
+		return nil, err
+	}
+	if len(req.ObjectKey) > maxMultipartObjectKeyBytes {
+		return nil, grpcstatus.Error(codes.InvalidArgument, "multipart object key too large")
+	}
+	if len(req.ProviderUploadId) > maxMultipartUploadIDBytes {
+		return nil, grpcstatus.Error(codes.InvalidArgument, "multipart upload id too large")
+	}
+	if len(req.ErrorClass) > maxMultipartErrorClassBytes {
+		return nil, grpcstatus.Error(codes.InvalidArgument, "multipart error class too large")
+	}
+	if len(req.ErrorMessage) > maxMultipartErrorMessageBytes {
+		return nil, grpcstatus.Error(codes.InvalidArgument, "multipart error message too large")
+	}
+	if strings.TrimSpace(req.AttemptId) == "" ||
+		strings.TrimSpace(req.FencingToken) == "" {
+		return nil, grpcstatus.Error(
+			codes.FailedPrecondition,
+			"fenced task protocol required",
+		)
+	}
+	_, err := s.st.ApplyMultipartLifecycle(
+		ctx,
+		db.MultipartLifecycleUpdate{
+			Event:        req.Event,
+			RunID:        req.RunId,
+			TaskID:       req.TaskId,
+			AttemptID:    req.AttemptId,
+			WorkerID:     req.WorkerId,
+			FencingToken: req.FencingToken,
+			FileIndex:    int(req.FileIndex),
+			ObjectKey:    req.ObjectKey,
+			UploadID:     req.ProviderUploadId,
+			SHA256:       req.Sha256,
+			Size:         req.Size,
+			ErrorClass:   req.ErrorClass,
+			ErrorMessage: req.ErrorMessage,
+		},
+		s.nowFn(),
+	)
+	if errors.Is(err, db.ErrMultipartFenced) {
+		return nil, grpcstatus.Error(
+			codes.FailedPrecondition,
+			"multipart lifecycle ownership lost",
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &grpcpb.ReportMultipartLifecycleResponse{}, nil
 }
 
 // ReportTaskResult updates the task status and emits a task event.
@@ -550,7 +703,7 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *grpcpb.ReportTaskRes
 		if a == nil {
 			return nil, grpcstatus.Error(codes.InvalidArgument, "nil artifact integrity record")
 		}
-		records[i] = artifact.Record{ObjectKey: a.ObjectKey, ByteSize: a.ByteSize, SHA256: a.Sha256, RowCount: a.RowCount, SchemaFingerprint: a.SchemaFingerprint, RunID: a.RunId, TaskID: a.TaskId, AttemptID: a.AttemptId, AttemptNumber: int(a.AttemptNumber), FileIndex: int(a.FileIndex), FormatVersion: int(a.FormatVersion), VerificationMethod: a.VerificationMethod, VerificationStatus: a.VerificationStatus, VerifiedAt: a.VerifiedAt, MaxHWM: a.MaxHwm}
+		records[i] = artifact.Record{ObjectKey: a.ObjectKey, ByteSize: a.ByteSize, SHA256: a.Sha256, RowCount: a.RowCount, SchemaFingerprint: a.SchemaFingerprint, RunID: a.RunId, TaskID: a.TaskId, AttemptID: a.AttemptId, AttemptNumber: int(a.AttemptNumber), FileIndex: int(a.FileIndex), FormatVersion: int(a.FormatVersion), VerificationMethod: a.VerificationMethod, VerificationStatus: a.VerificationStatus, VerifiedAt: a.VerifiedAt, MaxHWM: a.MaxHwm, ProviderChecksumSHA256: a.ProviderChecksumSha256}
 		if records[i].RunID != runID {
 			return nil, grpcstatus.Error(codes.InvalidArgument, "artifact run identity mismatch")
 		}
@@ -593,9 +746,10 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *grpcpb.ReportTaskRes
 	}
 
 	if msg != "already accepted" {
+		telemetry.ObserveTaskResult(finalStatus, req.RowsRead, req.BytesRead, req.BytesWritten)
 		// Emit exactly one logical completion event for an accepted attempt.
 		tid := req.TaskId
-		e := db.Event{ID: newID(), RunID: runID, TaskID: &tid, TS: time.Now().UTC().Format(time.RFC3339Nano), Level: "INFO", Message: fmt.Sprintf("task %s %s", req.TaskId, finalStatus), FieldsJSON: []byte(`{}`)}
+		e := db.Event{ID: newID(), RunID: runID, TaskID: &tid, TS: db.FormatTimestamp(time.Now()), Level: "INFO", Message: fmt.Sprintf("task %s %s", req.TaskId, finalStatus), FieldsJSON: []byte(`{}`)}
 		_ = s.st.InsertEvent(ctx, e)
 		if s.bc != nil {
 			s.bc.Publish(e)
@@ -608,43 +762,17 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *grpcpb.ReportTaskRes
 		return nil, ferr
 	}
 	if changed {
-		launchIcebergRegistration := false
-		emitRunStatusEvent := true
-		// NOTE: when a run reaches the SUCCEEDED state, it is not fully finished until we commit it:
-		// promote staged objects into their final keys and write <prefix>/_state.json.
-		//
-		// We publish "run SUCCEEDED" only after commitRun succeeds so clients (and the CLI) can safely
-		// proceed immediately to downstream steps (like Iceberg insert) without racing _state.json.
+		// Publishing a run (verifying artifacts, writing the manifest and
+		// dataset state) can take many minutes, so it never runs inside this
+		// worker's RPC. The run is now COMMITTING; a claimed committer on the
+		// master's own context publishes it and emits "run committed".
+		re := db.Event{ID: newID(), RunID: runID, TS: db.FormatTimestamp(time.Now()), Level: "INFO", Message: fmt.Sprintf("run %s", newStatus), FieldsJSON: []byte(`{}`)}
+		_ = s.st.InsertEvent(ctx, re)
+		if s.bc != nil {
+			s.bc.Publish(re)
+		}
 		if newStatus == "COMMITTING" {
-			commitCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-			defer cancel()
-			if err := s.finalizeRunCommit(commitCtx, runID); err != nil {
-				msg := err.Error()
-
-				fields, _ := json.Marshal(map[string]any{"error": msg})
-				fe := db.Event{ID: newID(), RunID: runID, TS: time.Now().UTC().Format(time.RFC3339Nano), Level: "ERROR", Message: "commit failed", FieldsJSON: fields}
-				_ = s.st.InsertEvent(ctx, fe)
-				if s.bc != nil {
-					s.bc.Publish(fe)
-				}
-
-				return &grpcpb.ReportTaskResultResponse{Accepted: accepted, Message: msg}, nil
-			}
-			newStatus = "SUCCEEDED"
-			launchIcebergRegistration = true
-			// CompleteRunCommit atomically records the sole final completion event.
-			emitRunStatusEvent = false
-		}
-
-		if emitRunStatusEvent {
-			re := db.Event{ID: newID(), RunID: runID, TS: time.Now().UTC().Format(time.RFC3339Nano), Level: "INFO", Message: fmt.Sprintf("run %s", newStatus), FieldsJSON: []byte(`{}`)}
-			_ = s.st.InsertEvent(ctx, re)
-			if s.bc != nil {
-				s.bc.Publish(re)
-			}
-		}
-		if launchIcebergRegistration {
-			s.launchIcebergRegistration(runID)
+			s.launchCommit(runID)
 		}
 	}
 
@@ -670,7 +798,7 @@ func (s *Server) ProcessReconciliationOnce(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	defer release()
-	const reconciliationLease = 30 * time.Second
+	reconciliationLease := s.commitCatalog.ReconciliationLease
 	r, a, ok, err := s.st.ClaimReconciliation(ctx, s.nowFn(), reconciliationLease)
 	if err != nil || !ok {
 		return ok, err
@@ -690,6 +818,7 @@ func (s *Server) ProcessReconciliationOnce(ctx context.Context) (bool, error) {
 	renewDone := make(chan struct{})
 	go func() {
 		defer close(renewDone)
+		defer RecoverPanic(s.log, "reconciliation lease renewal")
 		ticker := time.NewTicker(reconciliationLease / 3)
 		defer ticker.Stop()
 		for {
@@ -712,7 +841,7 @@ func (s *Server) ProcessReconciliationOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return true, err
 	}
-	job, err := s.st.GetJob(ctx, run.JobID)
+	resolved, err := s.resolveRun(ctx, run)
 	if err != nil {
 		return true, err
 	}
@@ -720,19 +849,7 @@ func (s *Server) ProcessReconciliationOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return true, err
 	}
-	tgt, err := s.st.GetConnection(ctx, job.TargetConnectionID)
-	if err != nil {
-		return true, err
-	}
-	src, err := s.st.GetConnection(ctx, job.SourceConnectionID)
-	if err != nil {
-		return true, err
-	}
-	var meta map[string]any
-	_ = json.Unmarshal(tgt.MetadataJSON, &meta)
-	bucket, _ := meta["bucket"].(string)
-	opts, _ := jobopts.Parse(job.OptionsJSON)
-	prefix := datasetPrefixForJob(job, src.Engine, opts, meta)
+	bucket, opts, prefix := resolved.target.Bucket, resolved.opts, resolved.prefix
 	artifacts, err := s.st.ListArtifactsForRun(ctx, r.RunID)
 	if err != nil {
 		return true, err
@@ -743,11 +860,9 @@ func (s *Server) ProcessReconciliationOnce(ctx context.Context) (bool, error) {
 	}
 	table := reg.Table
 	if table == "" {
-		table = icebergreg.DefaultTable(src.Engine, strings.TrimSpace(opts.Table))
+		table = icebergreg.DefaultTable(resolved.config.SourceEngine, strings.TrimSpace(opts.Table))
 	}
-	endpoint, _ := meta["endpoint"].(string)
-	region, _ := meta["region"].(string)
-	obs, err := inspector.InspectCatalog(attemptCtx, icebergreg.InspectionRequest{Registration: reg, Table: table, DatasetBucket: bucket, DatasetPrefix: prefix, DatasetS3: s3io.Config{Endpoint: endpoint, Region: region, Bucket: bucket, ForcePathStyle: true}})
+	obs, err := inspector.InspectCatalog(attemptCtx, icebergreg.InspectionRequest{Registration: reg, Table: table, DatasetBucket: bucket, DatasetPrefix: prefix, DatasetS3: s3io.Config{Endpoint: resolved.target.Endpoint, Region: resolved.target.Region, Bucket: bucket, ForcePathStyle: resolved.target.ForcePathStyle}})
 	if err != nil {
 		if obs.TableExists && obs.MetadataStart != "" {
 			op := icebergreg.OperationIdentity{RegistrationID: r.ID, RunID: r.RunID, CommitID: r.CommitID, ArtifactSetDigest: r.ArtifactSetDigest, ManifestKey: r.ManifestKey}
@@ -756,12 +871,12 @@ func (s *Server) ProcessReconciliationOnce(ctx context.Context) (bool, error) {
 				return true, s.st.ApplyReconciliationDecision(ctx, r.ID, a.ID, a.FencingToken, decision.Outcome, decision.EvidenceDigest, obs.MetadataStart, obs.MetadataEnd, decision.SnapshotID, "", decision.MatchedFiles, decision.ExpectedFiles, s.nowFn(), 2)
 			}
 		}
-		return true, s.st.RetryReconciliationObservation(ctx, r.ID, a.ID, a.FencingToken, "CATALOG_OBSERVATION_UNAVAILABLE", err.Error(), s.nowFn(), time.Second, 5)
+		return true, s.st.RetryReconciliationObservation(ctx, r.ID, a.ID, a.FencingToken, "CATALOG_OBSERVATION_UNAVAILABLE", err.Error(), s.nowFn(), time.Second, s.commitCatalog.ReconciliationMaxAttempts)
 	}
 	op := icebergreg.OperationIdentity{RegistrationID: r.ID, RunID: r.RunID, CommitID: r.CommitID, ArtifactSetDigest: r.ArtifactSetDigest, ManifestKey: r.ManifestKey}
 	decision, err := icebergreg.DecideReconciliation(op, expected, obs)
 	if err != nil {
-		return true, s.st.RetryReconciliationObservation(ctx, r.ID, a.ID, a.FencingToken, "INSUFFICIENT_HISTORY", err.Error(), s.nowFn(), time.Second, 5)
+		return true, s.st.RetryReconciliationObservation(ctx, r.ID, a.ID, a.FencingToken, "INSUFFICIENT_HISTORY", err.Error(), s.nowFn(), time.Second, s.commitCatalog.ReconciliationMaxAttempts)
 	}
 	receipt := ""
 	if decision.Outcome == icebergreg.OutcomeExactlyCommitted {
@@ -805,22 +920,14 @@ func (s *Server) ProcessMultipartCleanupOnce(ctx context.Context) (bool, error) 
 	if err != nil {
 		return finish("RETRY", "MULTIPART_TRACKING_FAILED", err)
 	}
-	job, err := s.st.GetJob(ctx, run.JobID)
+	resolved, err := s.resolveRun(ctx, run)
 	if err != nil {
 		return finish("RETRY", "MULTIPART_TRACKING_FAILED", err)
 	}
-	target, err := s.st.GetConnection(ctx, job.TargetConnectionID)
+	cfg, err := s.targetS3Config(ctx, resolved)
 	if err != nil {
 		return finish("RETRY", "MULTIPART_TRACKING_FAILED", err)
 	}
-	var metadata, secret map[string]any
-	_ = json.Unmarshal(target.MetadataJSON, &metadata)
-	plain, err := crypto.Decrypt(s.k, target.SecretEncBlob, []byte(target.ID))
-	if err != nil {
-		return finish("RETRY", "MULTIPART_TRACKING_FAILED", err)
-	}
-	_ = json.Unmarshal(plain, &secret)
-	cfg := s3io.Config{Endpoint: stringMapValue(metadata, "endpoint"), Region: stringMapValue(metadata, "region"), Bucket: stringMapValue(metadata, "bucket"), ForcePathStyle: true, AccessKeyID: stringMapValue(secret, "access_key_id"), SecretAccessKey: stringMapValue(secret, "secret_access_key"), SessionToken: stringMapValue(secret, "session_token")}
 	uploader, err := s.newMultipartCleanerFn(ctx, cfg)
 	if err != nil {
 		return finish("RETRY", "MULTIPART_TRACKING_FAILED", err)
@@ -892,22 +999,14 @@ func (s *Server) ProcessCanceledObjectCleanupOnce(ctx context.Context) (bool, er
 	if err != nil {
 		return finish("FAILED", "CLEANUP_REFERENCE_AMBIGUOUS", false)
 	}
-	job, err := s.st.GetJob(ctx, run.JobID)
+	resolved, err := s.resolveRun(ctx, run)
 	if err != nil {
 		return finish("FAILED", "CLEANUP_REFERENCE_AMBIGUOUS", false)
 	}
-	target, err := s.st.GetConnection(ctx, job.TargetConnectionID)
+	cfg, err := s.targetS3Config(ctx, resolved)
 	if err != nil {
 		return finish("FAILED", "CLEANUP_REFERENCE_AMBIGUOUS", false)
 	}
-	var metadata, secret map[string]any
-	_ = json.Unmarshal(target.MetadataJSON, &metadata)
-	plain, err := crypto.Decrypt(s.k, target.SecretEncBlob, []byte(target.ID))
-	if err != nil {
-		return finish("FAILED", "CLEANUP_REFERENCE_AMBIGUOUS", false)
-	}
-	_ = json.Unmarshal(plain, &secret)
-	cfg := s3io.Config{Endpoint: stringMapValue(metadata, "endpoint"), Region: stringMapValue(metadata, "region"), Bucket: stringMapValue(metadata, "bucket"), ForcePathStyle: true, AccessKeyID: stringMapValue(secret, "access_key_id"), SecretAccessKey: stringMapValue(secret, "secret_access_key"), SessionToken: stringMapValue(secret, "session_token")}
 	cleaner, err := s.newCanceledObjectCleanerFn(ctx, cfg)
 	if err != nil {
 		return finish("FAILED", "CLEANUP_OBJECT_VERIFICATION_FAILED", false)
@@ -960,86 +1059,37 @@ func (s *Server) buildAssignment(ctx context.Context, t db.Task) (*grpcpb.TaskAs
 	if err != nil {
 		return nil, err
 	}
-	job, err := s.st.GetJob(ctx, run.JobID)
+	// The run's configuration snapshot, not the live job, decides where and
+	// how it writes. Credentials are fetched separately by the leaseholder
+	// with GetTaskCredentials.
+	r, err := s.resolveRun(ctx, run)
 	if err != nil {
 		return nil, err
 	}
-	srcConn, err := s.st.GetConnection(ctx, job.SourceConnectionID)
+	leaseDeadline, err := time.Parse(time.RFC3339Nano, t.LeaseDeadline)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("task %s lease deadline: %w", t.ID, err)
 	}
-	tgtConn, err := s.st.GetConnection(ctx, job.TargetConnectionID)
-	if err != nil {
-		return nil, err
-	}
-
-	srcSecret, err := crypto.Decrypt(s.k, srcConn.SecretEncBlob, []byte(srcConn.ID))
-	if err != nil {
-		return nil, err
-	}
-	tgtSecret, err := crypto.Decrypt(s.k, tgtConn.SecretEncBlob, []byte(tgtConn.ID))
-	if err != nil {
-		return nil, err
-	}
-
-	// Secrets are JSON; decode minimal expected fields.
-	var src map[string]any
-	_ = json.Unmarshal(srcSecret, &src)
-	var tgt map[string]any
-	_ = json.Unmarshal(tgtSecret, &tgt)
-
-	sourceDSN, _ := src["dsn"].(string)
-	accessKey, _ := tgt["access_key_id"].(string)
-	secretKey, _ := tgt["secret_access_key"].(string)
-	sessionToken, _ := tgt["session_token"].(string)
-
-	// Target metadata for S3.
-	var tgtMeta map[string]any
-	_ = json.Unmarshal(tgtConn.MetadataJSON, &tgtMeta)
-	endpoint, _ := tgtMeta["endpoint"].(string)
-	region, _ := tgtMeta["region"].(string)
-	bucket, _ := tgtMeta["bucket"].(string)
-	forcePathStyle := true
-	if v, ok := tgtMeta["force_path_style"].(bool); ok {
-		forcePathStyle = v
-	}
-	if endpoint == "" {
-		endpoint = "http://localhost:9000"
-	}
-	if region == "" {
-		region = "us-east-1"
-	}
-	if strings.TrimSpace(bucket) == "" {
-		return nil, fmt.Errorf("target connection metadata missing bucket")
-	}
-
-	opts, _ := jobopts.Parse(job.OptionsJSON)
-	outPrefix := datasetPrefixForJob(job, srcConn.Engine, opts, tgtMeta)
-
 	return &grpcpb.TaskAssignment{
 		TaskId:              t.ID,
 		RunId:               run.ID,
-		JobId:               job.ID,
+		JobId:               r.config.Job.ID,
 		TaskIndex:           int32(t.TaskIndex),
 		CorrelationId:       run.CorrelationID,
 		AttemptId:           t.AttemptID,
 		FencingToken:        t.FencingToken,
 		AttemptNumber:       int32(t.AttemptNumber),
-		LeaseDeadlineUnixMs: func() int64 { tm, _ := time.Parse(time.RFC3339Nano, t.LeaseDeadline); return tm.UnixMilli() }(),
+		LeaseDeadlineUnixMs: leaseDeadline.UnixMilli(),
 		PartitionSpecJson:   string(t.PartitionSpec),
-		SourceEngine:        srcConn.Engine,
-		SourceDsn:           sourceDSN,
-		SourceSql:           job.SourceSQL,
-		S3Endpoint:          endpoint,
-		S3Region:            region,
-		S3Bucket:            bucket,
-		S3Prefix:            outPrefix,
-		S3ForcePathStyle:    forcePathStyle,
-		S3AccessKeyId:       accessKey,
-		S3SecretAccessKey:   secretKey,
-		S3SessionToken:      sessionToken,
-		TargetFileBytes:     opts.TargetFileBytes,
-		PartitionKeys:       opts.PartitionKeys,
+		SourceEngine:        r.config.SourceEngine,
+		SourceSql:           r.config.Job.SourceSQL,
+		S3Endpoint:          r.target.Endpoint,
+		S3Region:            r.target.Region,
+		S3Bucket:            r.target.Bucket,
+		S3Prefix:            r.prefix,
+		S3ForcePathStyle:    r.target.ForcePathStyle,
+		TargetFileBytes:     r.opts.TargetFileBytes,
+		PartitionKeys:       r.opts.PartitionKeys,
 	}, nil
 }
 
@@ -1055,14 +1105,18 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 	if run.Status == "SUCCEEDED" {
 		return nil
 	}
-	job, err := s.st.GetJob(ctx, run.JobID)
+	// Commit where the run was planned to write, per its configuration
+	// snapshot, even if the job or connections were edited since.
+	resolved, err := s.resolveRun(ctx, run)
 	if err != nil {
 		return err
 	}
+	job := resolved.config.Job
 	srcConn, err := s.st.GetConnection(ctx, job.SourceConnectionID)
 	if err != nil {
 		return err
 	}
+	srcConn.Engine = resolved.config.SourceEngine
 	tasks, err := s.st.ListTasksForRun(ctx, runID)
 	if err != nil {
 		return err
@@ -1116,40 +1170,14 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 	}
 	sort.Strings(committedKeys)
 
-	// Load target connection for S3 writes.
-	tgtConn, err := s.st.GetConnection(ctx, job.TargetConnectionID)
+	s3cfg, err := s.targetS3Config(ctx, resolved)
 	if err != nil {
 		return err
 	}
-	tgtSecret, err := crypto.Decrypt(s.k, tgtConn.SecretEncBlob, []byte(tgtConn.ID))
-	if err != nil {
-		return err
-	}
-	var tgt map[string]any
-	_ = json.Unmarshal(tgtSecret, &tgt)
-	accessKey, _ := tgt["access_key_id"].(string)
-	secretKey, _ := tgt["secret_access_key"].(string)
-	sessionToken, _ := tgt["session_token"].(string)
-
-	var tgtMeta map[string]any
-	_ = json.Unmarshal(tgtConn.MetadataJSON, &tgtMeta)
-	endpoint, _ := tgtMeta["endpoint"].(string)
-	region, _ := tgtMeta["region"].(string)
-	bucket, _ := tgtMeta["bucket"].(string)
-	forcePathStyle := true
-	if v, ok := tgtMeta["force_path_style"].(bool); ok {
-		forcePathStyle = v
-	}
-	if endpoint == "" {
-		endpoint = "http://localhost:9000"
-	}
-	if region == "" {
-		region = "us-east-1"
-	}
-	if strings.TrimSpace(bucket) == "" {
-		return fmt.Errorf("target connection metadata missing bucket")
-	}
-	opts, _ := jobopts.Parse(job.OptionsJSON)
+	endpoint, region, bucket, forcePathStyle := s3cfg.Endpoint, s3cfg.Region, s3cfg.Bucket, s3cfg.ForcePathStyle
+	accessKey, secretKey, sessionToken := s3cfg.AccessKeyID, s3cfg.SecretAccessKey, s3cfg.SessionToken
+	tgtMeta := resolved.target.Metadata
+	opts := resolved.opts
 	if opts.NormalizedSourceMode() == "query" && strings.TrimSpace(opts.QueryHash) == "" {
 		sourceQuery := strings.TrimSpace(opts.Query)
 		if sourceQuery == "" {
@@ -1216,6 +1244,28 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 		}
 	}
 	for _, record := range acceptedArtifacts {
+		// The store's own checksum, recorded when the worker verified the
+		// upload, proves the object is unchanged with a HEAD. Only objects
+		// without one are re-read and hashed through the master.
+		if record.ProviderChecksumSHA256 != "" {
+			size, checksum, found, err := u.ObjectChecksum(ctx, record.ObjectKey)
+			if err != nil {
+				return fmt.Errorf("commit artifact verification %s: %w", record.ObjectKey, err)
+			}
+			if !found {
+				return fmt.Errorf("commit artifact verification: missing object %s", record.ObjectKey)
+			}
+			if size != record.ByteSize {
+				return fmt.Errorf("commit artifact size mismatch: %s", record.ObjectKey)
+			}
+			if checksum != "" {
+				if checksum != record.ProviderChecksumSHA256 {
+					return fmt.Errorf("commit artifact sha256 mismatch: %s", record.ObjectKey)
+				}
+				continue
+			}
+			// The store reported no checksum now; fall back to hashing.
+		}
 		body, found, err := u.OpenObject(ctx, record.ObjectKey)
 		if err != nil {
 			return fmt.Errorf("commit artifact verification %s: %w", record.ObjectKey, err)
@@ -1254,8 +1304,13 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 	}
 
 	cursorDomain := resolveCursorDomain(opts, tasks)
+	// The high-water mark only moves forward: a run that re-read rows below it
+	// (cursor_lookback) and found nothing newer must not move it back. Values
+	// of an unknown cursor type cannot be ordered, so they replace the mark.
 	maxHWM := existingHWM
-	if runMax := deriveMaxCursor(tasks, cursorDomain); strings.TrimSpace(runMax) != "" {
+	if runMax := deriveMaxCursor(tasks, cursorDomain); strings.TrimSpace(runMax) != "" &&
+		(strings.TrimSpace(existingHWM) == "" || cursorDomain == connectors.CursorDomainUnknown ||
+			connectors.CompareCursorValues(cursorDomain, runMax, existingHWM) > 0) {
 		maxHWM = runMax
 	}
 	maxPart := maxInt(maxPartNumber(committedKeys), existingMaxPart)
@@ -1442,7 +1497,7 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 	if err := s.st.SetCommitPhase(ctx, runID, "VERIFIED"); err != nil {
 		return err
 	}
-	e := db.Event{ID: "commit-storage-" + commitID, RunID: runID, TS: time.Now().UTC().Format(time.RFC3339Nano), Level: "INFO", Message: "storage publication verified", FieldsJSON: fields}
+	e := db.Event{ID: "commit-storage-" + commitID, RunID: runID, TS: db.FormatTimestamp(time.Now()), Level: "INFO", Message: "storage publication verified", FieldsJSON: fields}
 	_ = s.st.InsertEventOnce(ctx, e)
 	return nil
 }
@@ -1652,28 +1707,89 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
-// ListenAndServe starts the gRPC server and listens for incoming connections.
+// serverOptions are the control-plane server options besides credentials.
+func serverOptions(cfg Config, srv *Server) []grpc.ServerOption {
+	return []grpc.ServerOption{
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+		grpc.ChainUnaryInterceptor(
+			telemetry.UnaryServerInterceptor(),
+			recoveryUnaryServerInterceptor(srv.log),
+			workerAuthUnaryServerInterceptor(cfg.WorkerAuthToken),
+			srv.workerIdentityUnaryInterceptor(!cfg.Insecure),
+		),
+		grpc.ChainStreamInterceptor(recoveryStreamServerInterceptor(srv.log)),
+		grpc.MaxRecvMsgSize(maxRecvMsgBytes),
+		grpc.MaxSendMsgSize(maxSendMsgBytes),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			// Ping connections idle this long and drop them if the ping is
+			// not acknowledged, so vanished workers are detected promptly.
+			Time:    2 * time.Minute,
+			Timeout: 20 * time.Second,
+			// Bounded connection age makes workers re-handshake periodically,
+			// so a renewed identity certificate replaces the one a connection
+			// was opened with. The grace period covers long result RPCs.
+			MaxConnectionAge:      time.Hour,
+			MaxConnectionAgeGrace: 35 * time.Minute,
+		}),
+		// Accept the worker's keepalive pings (WorkerKeepaliveParams); pings
+		// more frequent than MinTime are answered with GOAWAY.
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             WorkerKeepaliveParams.Time / 2,
+			PermitWithoutStream: false,
+		}),
+	}
+}
+
+// WorkerKeepaliveParams are the client keepalive settings workers use when
+// dialing the master; they must stay within the server enforcement policy.
+var WorkerKeepaliveParams = keepalive.ClientParameters{
+	Time:                30 * time.Second,
+	Timeout:             10 * time.Second,
+	PermitWithoutStream: false,
+}
+
+func stopGracefully(g *grpc.Server, timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		g.GracefulStop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		g.Stop()
+		<-done
+	}
+}
+
 func ListenAndServe(ctx context.Context, cfg Config, srv *Server) error {
 	lis, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
 		return err
 	}
+	return Serve(ctx, lis, cfg, srv)
+}
+
+// Serve runs the control-plane gRPC server on lis until ctx is canceled.
+func Serve(ctx context.Context, lis net.Listener, cfg Config, srv *Server) error {
 
 	var creds credentials.TransportCredentials
 	if cfg.Insecure {
 		creds = insecure.NewCredentials()
 	} else {
-		c, err := credentials.NewServerTLSFromFile(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if srv.workerCA == nil {
+			_ = lis.Close()
+			return errors.New("gRPC TLS requires the worker identity CA; call SetWorkerIdentity")
+		}
+		tlsCfg, err := ServerTLSConfig(cfg.TLSCertFile, cfg.TLSKeyFile, srv.workerCA.Pool())
 		if err != nil {
+			_ = lis.Close()
 			return err
 		}
-		creds = c
+		creds = credentials.NewTLS(tlsCfg)
 	}
 
-	g := grpc.NewServer(
-		grpc.Creds(creds),
-		grpc.UnaryInterceptor(workerAuthUnaryServerInterceptor(cfg.WorkerAuthToken)),
-	)
+	g := grpc.NewServer(append([]grpc.ServerOption{grpc.Creds(creds)}, serverOptions(cfg, srv)...)...)
 	grpcpb.RegisterControlPlaneServer(g, srv)
 	healthSrv := health.NewServer()
 	grpc_health_v1.RegisterHealthServer(g, healthSrv)
@@ -1685,7 +1801,7 @@ func ListenAndServe(ctx context.Context, cfg Config, srv *Server) error {
 	select {
 	case <-ctx.Done():
 		healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
-		g.GracefulStop()
+		stopGracefully(g, gracefulStopTimeout)
 		return nil
 	case err := <-errCh:
 		return err
@@ -1725,7 +1841,7 @@ func datasetPrefixForJob(job db.Job, srcEngine string, opts jobopts.Options, tgt
 
 // defaultFullRunRetainCount is the default number of successful full-refresh runs
 // to keep in S3. Override via ORABBIT_FULL_RUN_RETAIN_COUNT env var.
-const defaultFullRunRetainCount = 1
+const defaultFullRunRetainCount = 1 //nolint:unused // see purgeStaleFullRunsForRun
 
 // purgeStaleFullRunsForRun deletes the S3 objects for obsolete full-refresh run
 // directories after a new full-refresh run has been successfully committed and
@@ -1737,6 +1853,11 @@ const defaultFullRunRetainCount = 1
 //   - Keeps the latest retainCount runs intact.
 //   - Failures are best-effort: logged but never propagated to the caller.
 //   - Idempotent: re-running on already-purged directories is a no-op.
+//
+// It is not called anywhere yet, so ORABBIT_FULL_RUN_RETAIN_COUNT has no
+// effect; enabling it deletes published data and needs a deliberate decision.
+//
+//nolint:unused
 func (s *Server) purgeStaleFullRunsForRun(ctx context.Context, runID string) {
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
@@ -1752,15 +1873,16 @@ func (s *Server) purgeStaleFullRunsForRun(ctx context.Context, runID string) {
 		return
 	}
 
-	job, err := s.st.GetJob(ctx, run.JobID)
+	resolved, err := s.resolveRun(ctx, run)
 	if err != nil {
-		s.log.Warn("full-run purge: failed to load job",
+		s.log.Warn("full-run purge: failed to resolve run configuration",
 			slog.String("run_id", runID),
 			slog.String("job_id", run.JobID),
 			slog.String("err", err.Error()),
 		)
 		return
 	}
+	job := resolved.config.Job
 
 	// Only apply retention to full (non-incremental) jobs.
 	if job.Incremental {
@@ -1794,58 +1916,15 @@ func (s *Server) purgeStaleFullRunsForRun(ctx context.Context, runID string) {
 	// to_purge = all except the latest retainCount runs.
 	toPurge := allRuns[:len(allRuns)-retainCount]
 
-	// Resolve S3 target connection details (needed to build the S3 client).
-	tgtConn, err := s.st.GetConnection(ctx, job.TargetConnectionID)
+	cfg, err := s.targetS3Config(ctx, resolved)
 	if err != nil {
-		s.log.Warn("full-run purge: failed to load target connection",
+		s.log.Warn("full-run purge: failed to resolve target",
 			slog.String("job_id", job.ID),
 			slog.String("err", err.Error()),
 		)
 		return
 	}
-	tgtSecret, err := crypto.Decrypt(s.k, tgtConn.SecretEncBlob, []byte(tgtConn.ID))
-	if err != nil {
-		s.log.Warn("full-run purge: failed to decrypt target credentials",
-			slog.String("job_id", job.ID),
-			slog.String("err", err.Error()),
-		)
-		return
-	}
-	var tgt map[string]any
-	_ = json.Unmarshal(tgtSecret, &tgt)
-	accessKey, _ := tgt["access_key_id"].(string)
-	secretKey, _ := tgt["secret_access_key"].(string)
-	sessionToken, _ := tgt["session_token"].(string)
-
-	var tgtMeta map[string]any
-	_ = json.Unmarshal(tgtConn.MetadataJSON, &tgtMeta)
-	endpoint, _ := tgtMeta["endpoint"].(string)
-	region, _ := tgtMeta["region"].(string)
-	bucket, _ := tgtMeta["bucket"].(string)
-	forcePathStyle := true
-	if v, ok := tgtMeta["force_path_style"].(bool); ok {
-		forcePathStyle = v
-	}
-	if endpoint == "" {
-		endpoint = "http://localhost:9000"
-	}
-	if region == "" {
-		region = "us-east-1"
-	}
-	if strings.TrimSpace(bucket) == "" {
-		s.log.Warn("full-run purge: target connection has no bucket", slog.String("job_id", job.ID))
-		return
-	}
-
-	u, err := s3io.New(ctx, s3io.Config{
-		Endpoint:        endpoint,
-		Region:          region,
-		Bucket:          bucket,
-		ForcePathStyle:  forcePathStyle,
-		AccessKeyID:     accessKey,
-		SecretAccessKey: secretKey,
-		SessionToken:    sessionToken,
-	})
+	u, err := s3io.New(ctx, cfg)
 	if err != nil {
 		s.log.Warn("full-run purge: failed to create S3 client",
 			slog.String("job_id", job.ID),
@@ -1853,18 +1932,7 @@ func (s *Server) purgeStaleFullRunsForRun(ctx context.Context, runID string) {
 		)
 		return
 	}
-
-	// Derive the dataset base prefix for this job (same logic used by commitRun).
-	srcConn, err := s.st.GetConnection(ctx, job.SourceConnectionID)
-	if err != nil {
-		s.log.Warn("full-run purge: failed to load source connection",
-			slog.String("job_id", job.ID),
-			slog.String("err", err.Error()),
-		)
-		return
-	}
-	opts, _ := jobopts.Parse(job.OptionsJSON)
-	basePrefix := strings.TrimSuffix(strings.TrimSpace(datasetPrefixForJob(job, srcConn.Engine, opts, tgtMeta)), "/")
+	basePrefix := strings.TrimSuffix(strings.TrimSpace(resolved.prefix), "/")
 	if basePrefix == "" {
 		s.log.Warn("full-run purge: could not resolve dataset prefix", slog.String("job_id", job.ID))
 		return

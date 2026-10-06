@@ -192,10 +192,11 @@ func TestConnectionCapturesFingerprintWithPasswordAuth(t *testing.T) {
 
 	host, port := splitHostPort(t, srv.addr)
 	result, err := TestConnection(context.Background(), SSHTarget{
-		Host:     host,
-		Port:     port,
-		User:     "deploy",
-		Password: "secret",
+		Host:               host,
+		Port:               port,
+		User:               "deploy",
+		Password:           "secret",
+		HostKeyFingerprint: srv.hostFingerprint,
 	})
 	if err != nil {
 		t.Fatalf("TestConnection: %v", err)
@@ -214,16 +215,31 @@ func TestConnectionSupportsPrivateKeyAuth(t *testing.T) {
 
 	host, port := splitHostPort(t, srv.addr)
 	result, err := TestConnection(context.Background(), SSHTarget{
-		Host:       host,
-		Port:       port,
-		User:       "deploy",
-		PrivateKey: privateKeyPEM,
+		Host:               host,
+		Port:               port,
+		User:               "deploy",
+		PrivateKey:         privateKeyPEM,
+		HostKeyFingerprint: srv.hostFingerprint,
 	})
 	if err != nil {
 		t.Fatalf("TestConnection(private key): %v", err)
 	}
 	if result.HostKeyFingerprint != srv.hostFingerprint {
 		t.Fatalf("fingerprint=%q want %q", result.HostKeyFingerprint, srv.hostFingerprint)
+	}
+}
+
+func TestConnectionRefusesUnpinnedHostKey(t *testing.T) {
+	srv := startTestSSHServer(t, "deploy", "secret", nil)
+	host, port := splitHostPort(t, srv.addr)
+
+	_, err := TestConnection(context.Background(), SSHTarget{Host: host, Port: port, User: "deploy", Password: "secret"})
+	if err == nil {
+		t.Fatal("an unpinned host key must be refused before credentials are sent")
+	}
+	// The error shows the presented key so an operator can verify and pin it.
+	if !strings.Contains(err.Error(), "not pinned") || !strings.Contains(err.Error(), srv.hostFingerprint) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -256,10 +272,11 @@ func TestExecuteCommandCapturesStreamsAndExitCode(t *testing.T) {
 	)
 
 	result, err := ExecuteCommand(context.Background(), SSHTarget{
-		Host:     host,
-		Port:     port,
-		User:     "deploy",
-		Password: "secret",
+		Host:               host,
+		Port:               port,
+		User:               "deploy",
+		Password:           "secret",
+		HostKeyFingerprint: srv.hostFingerprint,
 	}, "mixed", func(chunk StreamChunk) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -295,10 +312,11 @@ func TestExecuteCommandHonorsContextTimeout(t *testing.T) {
 	defer cancel()
 
 	result, err := ExecuteCommand(ctx, SSHTarget{
-		Host:     host,
-		Port:     port,
-		User:     "deploy",
-		Password: "secret",
+		Host:               host,
+		Port:               port,
+		User:               "deploy",
+		Password:           "secret",
+		HostKeyFingerprint: srv.hostFingerprint,
 	}, "sleep", nil)
 	if err == nil {
 		t.Fatal("expected timeout error")

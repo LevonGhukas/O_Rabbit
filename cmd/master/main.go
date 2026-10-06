@@ -1,3 +1,4 @@
+// cmd/master/main.go
 package main
 
 import (
@@ -15,9 +16,28 @@ import (
 	grpcapi "github.com/LevonGhukas/O_Rabbit/internal/grpc"
 	httpapi "github.com/LevonGhukas/O_Rabbit/internal/http"
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
+	"github.com/LevonGhukas/O_Rabbit/internal/telemetry"
+)
+
+// Process exit codes. A supervisor restarts the master on any non-zero code.
+const (
+	exitOK      = 0 // requested shutdown (SIGINT/SIGTERM)
+	exitFailure = 1 // runtime or recovery failure, lost leadership, server error
+	exitConfig  = 2 // invalid configuration
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "rotate-master-key" {
+		os.Exit(runRotateMasterKey(os.Args[2:]))
+	}
+	os.Exit(run())
+}
+
+// run starts the master and returns its exit code. Returning, rather than
+// calling os.Exit, lets deferred cleanup run on every path: the durable
+// leadership lease is released (so a restarted master can take over
+// immediately), the database is closed, and the singleton lock is released.
+func run() int {
 	cfg := loadMasterConfigFromEnv()
 	bindMasterFlags(&cfg)
 	flag.Parse()
@@ -26,55 +46,81 @@ func main() {
 	slog.SetDefault(log)
 	if err := cfg.validateLeasePolicy(); err != nil {
 		log.Error("invalid task lease configuration", slog.String("err", err.Error()))
-		os.Exit(2)
+		return exitConfig
 	}
 	if err := cfg.validateAuthentication(); err != nil {
 		log.Error("invalid control-plane authentication configuration", slog.String("err", err.Error()))
-		os.Exit(2)
+		return exitConfig
+	}
+
+	if cfg.Insecure && cfg.AllowInsecureRemoteGRPC && !isLoopbackListenAddress(cfg.GRPCAddr) {
+		log.Warn("plaintext gRPC is enabled on a non-loopback listener; task credentials are sent unencrypted",
+			slog.String("grpc", cfg.GRPCAddr))
 	}
 
 	k, err := crypto.LoadMasterKeyFromEnv()
 	if err != nil {
 		log.Error("load master key", slog.String("err", err.Error()))
-		os.Exit(1)
+		return exitConfig
+	}
+	if k.IsZero() {
+		log.Error("ORABBIT_MASTER_KEY is required")
+		return exitConfig
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	shutdownTracing, err := telemetry.InitTracing(ctx, "orabbit-master")
+	if err != nil {
+		log.Error("configure tracing", slog.String("err", err.Error()))
+		return exitConfig
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(flushCtx)
+	}()
+
 	instanceID, err := db.NewMasterInstanceID()
 	if err != nil {
 		log.Error("create master instance identity", slog.String("err", err.Error()))
-		os.Exit(1)
+		return exitFailure
 	}
 	processLock, err := db.AcquireMasterProcessLock(cfg.DBPath, instanceID)
 	if err != nil {
 		log.Error("acquire local master singleton lock", slog.String("err", err.Error()))
-		os.Exit(1)
+		return exitFailure
 	}
 	defer processLock.Close()
 	cfg.DBPath = processLock.DatabasePath
 
-	st, err := db.Open(ctx, db.Config{Path: cfg.DBPath}, log)
+	st, err := db.Open(ctx, db.Config{Path: cfg.DBPath, ReadConns: cfg.DBReadConns}, log)
 	if err != nil {
 		log.Error("open db", slog.String("err", err.Error()))
-		os.Exit(1)
+		return exitFailure
 	}
 	defer st.Close()
+
+	st.SetMasterKey(k)
+	if err := st.MigrateLegacySecrets(ctx, k); err != nil {
+		log.Error("migrate legacy secrets", slog.String("err", err.Error()))
+		return exitFailure
+	}
 	st.SetMaxActiveRuns(cfg.MaxActiveRuns)
 	lease, err := st.AcquireLeadership(ctx, instanceID, cfg.LeadershipLeaseDuration, map[string]any{"pid": os.Getpid(), "database_identity": processLock.Identity})
 	if err != nil {
 		log.Error("acquire durable master leadership", slog.String("err", err.Error()))
-		os.Exit(1)
+		return exitFailure
 	}
 	if err := st.ActivateLeadershipFence(ctx, instanceID, lease.Epoch); err != nil {
 		log.Error("activate master mutation fence", slog.String("err", err.Error()))
-		os.Exit(1)
+		return exitFailure
 	}
 	leadership, err := db.NewLeadershipController(st, lease, cfg.LeadershipLeaseDuration, cfg.LeadershipRenewInterval, processLock.Identity)
 	if err != nil {
 		log.Error("configure master leadership", slog.String("err", err.Error()))
-		os.Exit(1)
+		return exitFailure
 	}
 	leaderCtx := leadership.Start(ctx)
 	defer leadership.Stop(context.Background())
@@ -83,165 +129,181 @@ func main() {
 
 	icebergMgr := icebergreg.NewManager(log, icebergreg.ManagerConfig{IceBinary: cfg.IceBin})
 	grpcSrv := grpcapi.NewServer(log, st, bc, k, 5*time.Second, icebergMgr)
+	if !cfg.Insecure {
+		workerCA, err := grpcapi.LoadWorkerCA(ctx, st, k, time.Now())
+		if err != nil {
+			log.Error("load worker identity CA", slog.String("err", err.Error()))
+			return exitFailure
+		}
+		grpcSrv.SetWorkerIdentity(workerCA, cfg.WorkerCertTTL)
+	}
 	grpcSrv.SetLeasePolicy(db.LeasePolicy{Duration: cfg.TaskLeaseDuration, MaxAttempts: cfg.TaskMaxAttempts, MaxActiveTasks: cfg.MaxActiveTasks, BackoffBase: cfg.TaskRetryBackoff, BackoffMax: cfg.TaskRetryBackoffMax})
 	grpcSrv.SetCatalogWorkLimit(cfg.CatalogWorkLimit)
+	commitCatalog := grpcapi.CommitCatalogPolicy{
+		CommitTimeout:             cfg.CommitTimeout,
+		CommitMaxAttempts:         cfg.CommitMaxAttempts,
+		RegistrationTimeout:       cfg.RegistrationTimeout,
+		Registration:              db.RegistrationPolicy{LeaseDuration: cfg.RegistrationLeaseDuration, MaxAttempts: cfg.RegistrationMaxAttempts, BackoffBase: time.Second, BackoffMax: time.Minute},
+		ReconciliationLease:       cfg.ReconciliationLeaseDuration,
+		ReconciliationMaxAttempts: cfg.ReconciliationMaxAttempts,
+	}
+	grpcSrv.SetCommitCatalogPolicy(commitCatalog)
 	grpcSrv.SetUploadCapacityPolicy(cfg.UploadCapacityLimit, cfg.UploadCapacityLeaseTTL)
 	grpcSrv.SetMultipartCleanupPolicy(cfg.MultipartAbandonmentGrace, time.Minute, cfg.MultipartCleanupMaxAttempts)
 	st.SetCanceledObjectRetention(cfg.CanceledObjectRetention)
 	grpcSrv.SetCanceledObjectCleanupPolicy(time.Minute, cfg.CanceledObjectCleanupMaxAttempts, cfg.CanceledObjectCleanupDryRun)
 	st.RecordLeadershipEvent(leaderCtx, instanceID, lease.Epoch, "MASTER_RECOVERY_STARTED", nil)
-	reconcileCtx, reconcileCancel := context.WithTimeout(leaderCtx, 30*time.Minute)
+	reconcileCtx, reconcileCancel := context.WithTimeout(leaderCtx, cfg.CommitTimeout)
 	if err := grpcSrv.ReconcileCommittingRuns(reconcileCtx); err != nil {
 		log.Error("reconcile committing runs", slog.String("err", err.Error()))
 		st.RecordLeadershipEvent(context.Background(), instanceID, lease.Epoch, "MASTER_RECOVERY_FAILED", map[string]any{"phase": "committing_runs"})
 		reconcileCancel()
-		return
+		return recoveryExitCode(ctx)
 	}
 	if n, err := grpcSrv.ExpireLeases(reconcileCtx); err != nil {
 		log.Error("reconcile expired task leases", slog.String("err", err.Error()))
 		st.RecordLeadershipEvent(context.Background(), instanceID, lease.Epoch, "MASTER_RECOVERY_FAILED", map[string]any{"phase": "task_leases"})
 		reconcileCancel()
-		return
+		return recoveryExitCode(ctx)
 	} else if n > 0 {
 		log.Info("reconciled expired task leases", slog.Int("count", n))
 	}
 	reconcileCancel()
-	registrationPolicy := db.RegistrationPolicy{LeaseDuration: 30 * time.Second, MaxAttempts: 5, BackoffBase: time.Second, BackoffMax: time.Minute}
+	if abandoned, err := st.FailAbandonedPlanningRuns(leaderCtx, time.Now()); err != nil {
+		log.Error("fail abandoned planning runs", slog.String("err", err.Error()))
+		st.RecordLeadershipEvent(context.Background(), instanceID, lease.Epoch, "MASTER_RECOVERY_FAILED", map[string]any{"phase": "abandoned_planning_runs"})
+		return recoveryExitCode(ctx)
+	} else if len(abandoned) > 0 {
+		log.Warn("failed runs abandoned during planning", slog.Int("count", len(abandoned)), slog.Any("run_ids", abandoned))
+	}
+	registrationPolicy := commitCatalog.Registration
 	if classified, err := st.ReconcileHistoricalRegistrations(leaderCtx, time.Now()); err != nil {
 		log.Error("classify historical registrations", slog.String("err", err.Error()))
 		st.RecordLeadershipEvent(context.Background(), instanceID, lease.Epoch, "MASTER_RECOVERY_FAILED", map[string]any{"phase": "historical_registrations"})
-		return
+		return recoveryExitCode(ctx)
 	} else if len(classified) > 0 {
 		log.Info("classified historical registrations", slog.Int("count", len(classified)))
 	}
 	if n, err := st.ExpireRegistrationAttempts(leaderCtx, time.Now(), registrationPolicy); err != nil {
 		log.Error("reconcile expired registration leases", slog.String("err", err.Error()))
 		st.RecordLeadershipEvent(context.Background(), instanceID, lease.Epoch, "MASTER_RECOVERY_FAILED", map[string]any{"phase": "registration_leases"})
-		return
+		return recoveryExitCode(ctx)
 	} else if n > 0 {
 		log.Info("reconciled expired registration leases", slog.Int("count", n))
 	}
-	if n, err := st.ExpireReconciliationAttempts(leaderCtx, time.Now(), time.Second, 5); err != nil {
+	if n, err := st.ExpireReconciliationAttempts(leaderCtx, time.Now(), time.Second, cfg.ReconciliationMaxAttempts); err != nil {
 		log.Error("reconcile expired catalog-observation leases", slog.String("err", err.Error()))
 		st.RecordLeadershipEvent(context.Background(), instanceID, lease.Epoch, "MASTER_RECOVERY_FAILED", map[string]any{"phase": "catalog_reconciliation_leases"})
-		return
+		return recoveryExitCode(ctx)
 	} else if n > 0 {
 		log.Info("reconciled expired catalog-observation leases", slog.Int("count", n))
 	}
 	st.RecordLeadershipEvent(leaderCtx, instanceID, lease.Epoch, "MASTER_RECOVERY_COMPLETED", nil)
 	leadership.SetReady(true)
 	grpcSrv.SetLeadershipGuard(leadership)
-	go runCommittingReconciliationLoop(leaderCtx, 2*time.Second, 30*time.Minute, grpcSrv, log)
-	go func() {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-leaderCtx.Done():
-				return
-			case <-ticker.C:
-				for i := 0; i < 2; i++ {
-					processed, err := grpcSrv.ProcessReconciliationOnce(leaderCtx)
-					if err != nil {
-						log.Warn("catalog reconciliation failed", slog.String("err", err.Error()))
-						break
-					}
-					if !processed {
-						break
-					}
-				}
-				for i := 0; i < 4; i++ {
-					processed, err := grpcSrv.ProcessRegistrationOnce(leaderCtx)
-					if err != nil {
-						log.Warn("durable iceberg registration FAILED", slog.String("err", err.Error()))
-						break
-					}
-					if !processed {
-						break
-					}
-				}
-				if _, err := st.ExpireRegistrationAttempts(leaderCtx, time.Now(), registrationPolicy); err != nil && leaderCtx.Err() == nil {
-					log.Warn("registration lease expiration scan failed", slog.String("err", err.Error()))
-				}
-				if _, err := st.ExpireReconciliationAttempts(leaderCtx, time.Now(), time.Second, 5); err != nil && leaderCtx.Err() == nil {
-					log.Warn("reconciliation lease expiration scan failed", slog.String("err", err.Error()))
-				}
+	go runCommittingReconciliationLoop(leaderCtx, 2*time.Second, cfg.CommitTimeout, grpcSrv, log)
+	go runPeriodic(leaderCtx, log, "catalog registration and reconciliation", 2*time.Second, func() {
+		for i := 0; i < 2; i++ {
+			processed, err := grpcSrv.ProcessReconciliationOnce(leaderCtx)
+			if err != nil {
+				log.Warn("catalog reconciliation failed", slog.String("err", err.Error()))
+				break
+			}
+			if !processed {
+				break
 			}
 		}
-	}()
-	go func() {
-		ticker := time.NewTicker(cfg.TaskLeaseScanInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-leaderCtx.Done():
-				return
-			case <-ticker.C:
-				if _, err := grpcSrv.ExpireLeases(leaderCtx); err != nil && leaderCtx.Err() == nil {
-					log.Warn("task lease expiration scan failed", slog.String("err", err.Error()))
-				}
+		for i := 0; i < 4; i++ {
+			processed, err := grpcSrv.ProcessRegistrationOnce(leaderCtx)
+			if err != nil {
+				log.Warn("durable iceberg registration FAILED", slog.String("err", err.Error()))
+				break
+			}
+			if !processed {
+				break
 			}
 		}
-	}()
-	go func() {
-		ticker := time.NewTicker(cfg.MultipartCleanupScanInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-leaderCtx.Done():
-				return
-			case <-ticker.C:
-				for i := 0; i < 4; i++ {
-					processed, err := grpcSrv.ProcessMultipartCleanupOnce(leaderCtx)
-					if err != nil {
-						if leaderCtx.Err() == nil {
-							log.Warn("multipart cleanup failed", slog.String("err", err.Error()))
-						}
-						break
-					}
-					if !processed {
-						break
-					}
+		if _, err := st.ExpireRegistrationAttempts(leaderCtx, time.Now(), registrationPolicy); err != nil && leaderCtx.Err() == nil {
+			log.Warn("registration lease expiration scan failed", slog.String("err", err.Error()))
+		}
+		if _, err := st.ExpireReconciliationAttempts(leaderCtx, time.Now(), time.Second, cfg.ReconciliationMaxAttempts); err != nil && leaderCtx.Err() == nil {
+			log.Warn("reconciliation lease expiration scan failed", slog.String("err", err.Error()))
+		}
+	})
+	go runPeriodic(leaderCtx, log, "task lease expiration", cfg.TaskLeaseScanInterval, func() {
+		if _, err := grpcSrv.ExpireLeases(leaderCtx); err != nil && leaderCtx.Err() == nil {
+			log.Warn("task lease expiration scan failed", slog.String("err", err.Error()))
+		}
+	})
+	go runPeriodic(leaderCtx, log, "multipart cleanup", cfg.MultipartCleanupScanInterval, func() {
+		for i := 0; i < 4; i++ {
+			processed, err := grpcSrv.ProcessMultipartCleanupOnce(leaderCtx)
+			if err != nil {
+				if leaderCtx.Err() == nil {
+					log.Warn("multipart cleanup failed", slog.String("err", err.Error()))
 				}
+				break
+			}
+			if !processed {
+				break
 			}
 		}
-	}()
-	go func() {
-		ticker := time.NewTicker(cfg.CanceledObjectCleanupScanInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-leaderCtx.Done():
-				return
-			case <-ticker.C:
-				for i := 0; i < 4; i++ {
-					processed, err := grpcSrv.ProcessCanceledObjectCleanupOnce(leaderCtx)
-					if err != nil {
-						if leaderCtx.Err() == nil {
-							log.Warn("canceled-object cleanup failed", slog.String("err", err.Error()))
-						}
-						break
-					}
-					if !processed {
-						break
-					}
+	})
+	go runPeriodic(leaderCtx, log, "canceled-object cleanup", cfg.CanceledObjectCleanupScanInterval, func() {
+		if n, err := st.DiscoverOrphanedObjects(leaderCtx, time.Now(), 100); err != nil {
+			if leaderCtx.Err() == nil {
+				log.Warn("orphaned-object discovery failed", slog.String("err", err.Error()))
+			}
+		} else if n > 0 {
+			log.Info("orphaned objects quarantined for cleanup", slog.Int("count", n))
+		}
+		for i := 0; i < 4; i++ {
+			processed, err := grpcSrv.ProcessCanceledObjectCleanupOnce(leaderCtx)
+			if err != nil {
+				if leaderCtx.Err() == nil {
+					log.Warn("canceled-object cleanup failed", slog.String("err", err.Error()))
 				}
+				break
+			}
+			if !processed {
+				break
 			}
 		}
-	}()
+	})
+	if cfg.HistoryRetention > 0 {
+		go runPeriodic(leaderCtx, log, "history retention", cfg.HistoryPruneInterval, func() {
+			res, err := st.PruneHistory(leaderCtx, time.Now().Add(-cfg.HistoryRetention))
+			if err != nil && leaderCtx.Err() == nil {
+				log.Warn("history retention prune failed", slog.String("err", err.Error()))
+			}
+			if res.Total() > 0 {
+				log.Info("history retention pruned rows",
+					slog.Int64("events", res.Events),
+					slog.Int64("task_attempts", res.TaskAttempts),
+					slog.Int64("registration_attempts", res.RegistrationAttempts),
+					slog.Int64("leadership_history", res.LeadershipHistory),
+				)
+			}
+		})
+	}
 
 	httpErr := make(chan error, 1)
 	httpSrv := httpapi.NewServer(log, st, bc, k, httpapi.StatusInfo{PID: os.Getpid(), HTTPAddr: cfg.HTTPAddr, GRPCAddr: cfg.GRPCAddr, DBPath: processLock.Identity}, cfg.HTTPAuthToken)
 	httpSrv.SetLeadershipGuard(leadership)
+	httpSrv.SetRemoteOpsToken(cfg.RemoteOpsAuthToken)
 	httpSrv.SetOperability(cfg.TaskMaxAttempts, grpcSrv)
+	// The servers stop when serveCtx ends: on shutdown, on lost leadership,
+	// or when the other server fails.
+	serveCtx, cancelServe := context.WithCancel(leaderCtx)
+	defer cancelServe()
 	go func() {
-		httpErr <- httpSrv.Serve(leaderCtx, cfg.HTTPAddr)
+		httpErr <- httpSrv.Serve(serveCtx, cfg.HTTPAddr)
 	}()
 
 	gcfg := grpcapi.Config{Addr: cfg.GRPCAddr, Insecure: cfg.Insecure, TLSCertFile: cfg.TLSCert, TLSKeyFile: cfg.TLSKey, WorkerAuthToken: cfg.WorkerAuthToken, HeartbeatInterval: 5 * time.Second}
 	grpcErr := make(chan error, 1)
 	go func() {
-		grpcErr <- grpcapi.ListenAndServe(leaderCtx, gcfg, grpcSrv)
+		grpcErr <- grpcapi.ListenAndServe(serveCtx, gcfg, grpcSrv)
 	}()
 
 	log.Info("master started",
@@ -250,6 +312,8 @@ func main() {
 		slog.Bool("http_auth", strings.TrimSpace(cfg.HTTPAuthToken) != ""),
 		slog.Bool("worker_auth", strings.TrimSpace(cfg.WorkerAuthToken) != ""),
 		slog.Bool("insecure", cfg.Insecure),
+		slog.Bool("worker_identity", !cfg.Insecure),
+		slog.Bool("remote_ops", cfg.RemoteOpsAuthToken != ""),
 		slog.String("iceberg_registration", "persisted-run-snapshot"),
 		slog.String("ice_binary", cfg.IceBin),
 		slog.String("log_level", cfg.LogLevel),
@@ -258,21 +322,71 @@ func main() {
 		slog.Int64("leadership_epoch", lease.Epoch),
 	)
 
+	return awaitShutdown(ctx, leaderCtx, cancelServe, httpErr, grpcErr, log)
+}
+
+// recoveryExitCode is the exit code after a startup recovery step fails: a
+// failure caused by a requested shutdown is not an error.
+func recoveryExitCode(signalCtx context.Context) int {
+	if signalCtx.Err() != nil {
+		return exitOK
+	}
+	return exitFailure
+}
+
+// awaitShutdown blocks until the master must stop, then stops both servers
+// and waits for them to drain before returning the exit code. signalCtx ends
+// on SIGINT/SIGTERM; leaderCtx also ends when leadership is lost.
+func awaitShutdown(signalCtx, leaderCtx context.Context, stopServers context.CancelFunc, httpErr, grpcErr <-chan error, log *slog.Logger) int {
+	code := exitOK
+	httpDone, grpcDone := false, false
 	select {
 	case <-leaderCtx.Done():
-		log.Info("master leadership context stopped", slog.String("state", leadership.Status().State))
-		return
-	case err := <-httpErr:
-		if err != nil {
-			log.Error("http server stopped", slog.String("err", err.Error()))
-			os.Exit(1)
+		if signalCtx.Err() != nil {
+			log.Info("master shutting down", slog.String("reason", "signal"))
+		} else {
+			log.Error("master leadership lost; shutting down")
+			code = exitFailure
 		}
+	case err := <-httpErr:
+		httpDone = true
+		code = serverStopExitCode(log, "http", err, leaderCtx)
 	case err := <-grpcErr:
-		if err != nil {
-			log.Error("grpc server stopped", slog.String("err", err.Error()))
-			os.Exit(1)
+		grpcDone = true
+		code = serverStopExitCode(log, "grpc", err, leaderCtx)
+	}
+	stopServers()
+	for !httpDone || !grpcDone {
+		select {
+		case err := <-httpErr:
+			httpDone = true
+			if err != nil {
+				log.Warn("http server shutdown error", slog.String("err", err.Error()))
+			}
+		case err := <-grpcErr:
+			grpcDone = true
+			if err != nil {
+				log.Warn("grpc server shutdown error", slog.String("err", err.Error()))
+			}
 		}
 	}
+	log.Info("master stopped", slog.Int("exit_code", code))
+	return code
+}
+
+// serverStopExitCode classifies a server that stopped on its own. Servers
+// only return nil once their context ends, so a nil result while the master
+// should still be serving is also a failure.
+func serverStopExitCode(log *slog.Logger, name string, err error, leaderCtx context.Context) int {
+	if err != nil {
+		log.Error(name+" server stopped", slog.String("err", err.Error()))
+		return exitFailure
+	}
+	if leaderCtx.Err() == nil {
+		log.Error(name + " server stopped unexpectedly")
+		return exitFailure
+	}
+	return exitOK
 }
 
 type committingRunReconciler interface {
@@ -296,12 +410,32 @@ func runCommittingReconciliationLoop(ctx context.Context, interval, timeout time
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			reconcileCtx, cancel := context.WithTimeout(ctx, timeout)
-			err := reconciler.ReconcileCommittingRuns(reconcileCtx)
-			cancel()
-			if err != nil && ctx.Err() == nil {
-				log.Warn("live committing-run reconciliation failed", slog.String("err", err.Error()))
-			}
+			func() {
+				defer grpcapi.RecoverPanic(log, "committing-run reconciliation")
+				reconcileCtx, cancel := context.WithTimeout(ctx, timeout)
+				defer cancel()
+				if err := reconciler.ReconcileCommittingRuns(reconcileCtx); err != nil && ctx.Err() == nil {
+					log.Warn("live committing-run reconciliation failed", slog.String("err", err.Error()))
+				}
+			}()
+		}
+	}
+}
+
+// runPeriodic calls tick every interval until ctx ends. A panic in one tick is
+// logged and the loop continues, so a background job cannot crash the master.
+func runPeriodic(ctx context.Context, log *slog.Logger, name string, interval time.Duration, tick func()) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			func() {
+				defer grpcapi.RecoverPanic(log, name)
+				tick()
+			}()
 		}
 	}
 }

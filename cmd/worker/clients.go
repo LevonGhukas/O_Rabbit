@@ -169,6 +169,12 @@ func (c *clientCache) DocumentReader(ctx context.Context, engine, dsn string) (c
 }
 
 func (c *clientCache) S3(ctx context.Context, cfg s3io.Config) (*s3io.Uploader, int64, error) {
+	if cfg.Credentials != nil {
+		// Task-scoped credentials belong to one attempt; never share the client.
+		start := time.Now()
+		u, err := s3io.New(ctx, cfg)
+		return u, time.Since(start).Milliseconds(), err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

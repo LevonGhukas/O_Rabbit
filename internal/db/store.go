@@ -1,8 +1,11 @@
+// internal/db/store.go
+
 package db
 
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,20 +15,93 @@ import (
 	"strings"
 	"time"
 
+	secretcrypto "github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
-
 	_ "modernc.org/sqlite"
 )
 
+const encryptedRegistrationConfigPrefix = "enc:v1:"
+
+func runRegistrationConfigAAD(runID string) []byte {
+	return []byte("run-registration-config:" + runID)
+}
+
+func (s *Store) encryptRunRegistrationConfig(runID string, plaintext []byte) (string, error) {
+	return encryptStoredJSON(s.masterKey, plaintext, runRegistrationConfigAAD(runID))
+}
+
+func (s *Store) decryptRunRegistrationConfig(runID, stored string) ([]byte, error) {
+	plaintext, err := decryptStoredJSON(s.masterKey, stored, runRegistrationConfigAAD(runID))
+	if err != nil {
+		return nil, fmt.Errorf("run %s registration config: %w", runID, err)
+	}
+	return plaintext, nil
+}
+
+// encryptStoredJSON seals a JSON document for a TEXT column as
+// "enc:v1:<base64 blob>". Empty input stays empty.
+func encryptStoredJSON(k secretcrypto.Key, plaintext, aad []byte) (string, error) {
+	if len(plaintext) == 0 {
+		return "", nil
+	}
+	if k.IsZero() {
+		return "", ErrMasterKeyRequired
+	}
+	encrypted, err := secretcrypto.Encrypt(k, plaintext, aad)
+	if err != nil {
+		return "", err
+	}
+	return encryptedRegistrationConfigPrefix + base64.StdEncoding.EncodeToString(encrypted), nil
+}
+
+// decryptStoredJSON opens a value written by encryptStoredJSON. Unprefixed
+// values are legacy plaintext that MigrateLegacySecrets should have sealed at
+// startup, so they are refused rather than trusted.
+func decryptStoredJSON(k secretcrypto.Key, stored string, aad []byte) ([]byte, error) {
+	if strings.TrimSpace(stored) == "" {
+		return nil, nil
+	}
+	if !strings.HasPrefix(stored, encryptedRegistrationConfigPrefix) {
+		return nil, errors.New("value is stored unencrypted; run the legacy secret migration")
+	}
+	if k.IsZero() {
+		return nil, ErrMasterKeyRequired
+	}
+	blob, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(stored, encryptedRegistrationConfigPrefix))
+	if err != nil {
+		return nil, fmt.Errorf("decode encrypted value: %w", err)
+	}
+	plaintext, err := secretcrypto.Decrypt(k, blob, aad)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt value: %w", err)
+	}
+	return plaintext, nil
+}
+
 type Store struct {
-	db                      *sql.DB
+	// db is the single writer connection. It must stay a single connection:
+	// the leadership fence installs per-connection TEMP triggers on it.
+	db *sql.DB
+	// rdb is a read-only pool for observability and list queries. With WAL,
+	// readers never block the writer and always see committed data.
+	rdb                     *sql.DB
 	log                     *slog.Logger
+	masterKey               secretcrypto.Key
 	canceledObjectRetention time.Duration
 	maxActiveRuns           int
 }
 
 type Config struct {
 	Path string
+	// ReadConns sizes the read-only connection pool. Zero means
+	// defaultReadConns.
+	ReadConns int
+}
+
+const defaultReadConns = 4
+
+func (s *Store) SetMasterKey(k secretcrypto.Key) {
+	s.masterKey = k
 }
 
 func Open(ctx context.Context, cfg Config, log *slog.Logger) (*Store, error) {
@@ -68,7 +144,38 @@ func Open(ctx context.Context, cfg Config, log *slog.Logger) (*Store, error) {
 		return nil, err
 	}
 
-	return &Store{db: db, log: log, canceledObjectRetention: 24 * time.Hour}, nil
+	rdb, err := openReadPool(ctx, cfg, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	return &Store{db: db, rdb: rdb, log: log, canceledObjectRetention: 24 * time.Hour}, nil
+}
+
+// openReadPool opens a query_only pool on the same database file so reads do
+// not queue behind the single writer connection. In-memory and URI-style
+// paths cannot be shared across pools, so they reuse the writer.
+func openReadPool(ctx context.Context, cfg Config, writer *sql.DB) (*sql.DB, error) {
+	if cfg.Path == "" || strings.Contains(cfg.Path, ":memory:") || strings.HasPrefix(cfg.Path, "file:") || strings.Contains(cfg.Path, "?") {
+		return writer, nil
+	}
+	conns := cfg.ReadConns
+	if conns <= 0 {
+		conns = defaultReadConns
+	}
+	dsn := "file:" + cfg.Path + "?_pragma=busy_timeout(15000)&_pragma=query_only(1)&_pragma=foreign_keys(1)"
+	rdb, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	rdb.SetMaxOpenConns(conns)
+	rdb.SetMaxIdleConns(conns)
+	if err := rdb.PingContext(ctx); err != nil {
+		_ = rdb.Close()
+		return nil, err
+	}
+	return rdb, nil
 }
 
 func (s *Store) SetCanceledObjectRetention(retention time.Duration) {
@@ -77,7 +184,12 @@ func (s *Store) SetCanceledObjectRetention(retention time.Duration) {
 	}
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	if s.rdb != nil && s.rdb != s.db {
+		_ = s.rdb.Close()
+	}
+	return s.db.Close()
+}
 
 // Ready reports whether the control-plane store is currently queryable.
 // It uses a short, caller-bounded probe suitable for HTTP readiness checks.
@@ -106,7 +218,25 @@ func (s *Store) Ready(ctx context.Context) error {
 	return nil
 }
 
-func nowUTC() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+// TimestampLayout is the one format for every timestamp the store writes: UTC
+// with a fixed nine-digit fraction, so plain string comparison and ORDER BY
+// match chronological order.
+const TimestampLayout = "2006-01-02T15:04:05.000000000Z"
+
+// FormatTimestamp formats t in TimestampLayout.
+func FormatTimestamp(t time.Time) string { return t.UTC().Format(TimestampLayout) }
+
+// normalizeTimestamp rewrites an RFC 3339 string in TimestampLayout. Values
+// that do not parse are returned unchanged.
+func normalizeTimestamp(v string) string {
+	t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(v))
+	if err != nil {
+		return v
+	}
+	return FormatTimestamp(t)
+}
+
+func nowUTC() string { return FormatTimestamp(time.Now()) }
 
 func isSQLiteBusy(err error) bool {
 	if err == nil {
@@ -158,109 +288,47 @@ func wrapRunRegistrationConfigColumnErr(err error) error {
 	return err
 }
 
-func normalizeRunFailureReason(reason string) string {
-	if strings.TrimSpace(reason) == "" {
-		return "superseded"
-	}
-	return reason
-}
-
-func (s *Store) failRunIDs(ctx context.Context, runIDs []string, reason string) error {
-	if len(runIDs) == 0 {
-		return nil
-	}
-	now := nowUTC()
-	return withBusyRetry(ctx, func() error {
-		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+// FailAbandonedPlanningRuns fails runs left in PLANNING without any tasks.
+// Planning creates the run and inserts its tasks in one request, so such a
+// run was interrupted (for example by a master crash) and would otherwise hold
+// its dataset forever. Call it only during startup recovery, before the HTTP
+// API accepts new runs; a PLANNING run with tasks is a queued run and is kept.
+func (s *Store) FailAbandonedPlanningRuns(ctx context.Context, now time.Time) ([]string, error) {
+	var failed []string
+	err := s.withTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable}, func(tx *sql.Tx) error {
+		failed = failed[:0]
+		rows, err := tx.QueryContext(ctx, `SELECT id FROM runs r WHERE r.status='PLANNING' AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.run_id=r.id)`)
 		if err != nil {
 			return err
 		}
-		defer func() { _ = tx.Rollback() }()
-		for _, rid := range runIDs {
-			_, err = tx.ExecContext(ctx, `UPDATE tasks SET status='FAILED', error_message=?, finished_at=? WHERE run_id=? AND status IN ('PENDING','RUNNING');`, reason, now, rid)
-			if err != nil {
-				return err
-			}
-			_, err = tx.ExecContext(ctx, `UPDATE runs SET status='FAILED', finished_at=?, error_summary=? WHERE id=? AND status IN ('RUNNING','PLANNING');`, now, reason, rid)
-			if err != nil {
-				return err
-			}
-		}
-		return tx.Commit()
-	})
-}
-
-func (s *Store) FailAllRunningRuns(ctx context.Context, reason string) (int, error) {
-	reason = normalizeRunFailureReason(reason)
-	var runIDs []string
-	err := withBusyRetry(ctx, func() error {
-		ids := make([]string, 0)
-		rows, err := s.db.QueryContext(ctx, `SELECT id FROM runs WHERE status IN ('RUNNING','PLANNING');`)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
+				rows.Close()
 				return err
 			}
-			ids = append(ids, id)
+			failed = append(failed, id)
+		}
+		if err := rows.Close(); err != nil {
+			return err
 		}
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		runIDs = ids
-		return nil
-	})
-	if err != nil {
-		return 0, err
-	}
-	if len(runIDs) == 0 {
-		return 0, nil
-	}
-	if err := s.failRunIDs(ctx, runIDs, reason); err != nil {
-		return 0, err
-	}
-	return len(runIDs), nil
-}
-
-func (s *Store) FailRunningRunsForJob(ctx context.Context, jobID string, reason string) (int, error) {
-	if strings.TrimSpace(jobID) == "" {
-		return 0, nil
-	}
-	reason = normalizeRunFailureReason(reason)
-	var runIDs []string
-	err := withBusyRetry(ctx, func() error {
-		ids := make([]string, 0)
-		rows, err := s.db.QueryContext(ctx, `SELECT id FROM runs WHERE status IN ('RUNNING','PLANNING') AND job_id=?;`, jobID)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
+		const reason = "run planning was interrupted before tasks were created"
+		ts := now.UTC().Format(TimestampLayout)
+		for _, id := range failed {
+			if _, err := tx.ExecContext(ctx, `UPDATE runs SET status='FAILED', finished_at=?, error_summary=? WHERE id=? AND status='PLANNING'`, ts, reason, id); err != nil {
 				return err
 			}
-			ids = append(ids, id)
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO events(id,run_id,ts,level,message,fields_json) VALUES(?,?,?,'ERROR',?,?)`,
+				"planning-abandoned-"+id, id, ts, "run FAILED", `{"event_type":"RUN_PLANNING_ABANDONED"}`); err != nil {
+				return err
+			}
 		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		runIDs = ids
 		return nil
 	})
-	if err != nil {
-		return 0, err
-	}
-	if len(runIDs) == 0 {
-		return 0, nil
-	}
-	if err := s.failRunIDs(ctx, runIDs, reason); err != nil {
-		return 0, err
-	}
-	return len(runIDs), nil
+	return failed, err
 }
 
 // --- Models
@@ -275,6 +343,7 @@ type Connection struct {
 	CreatedAt     string          `json:"created_at"`
 	UpdatedAt     string          `json:"updated_at"`
 }
+
 type WorkerInstance struct {
 	BootID        string `json:"boot_id"`
 	WorkerID      string `json:"worker_id"`
@@ -323,6 +392,7 @@ type Run struct {
 	FailureClass                   string                    `json:"failure_class,omitempty"`
 	TypeWarnings                   []typesystem.TypeWarning  `json:"type_warnings"`
 	RegistrationConfigJSON         json.RawMessage           `json:"-"`
+	ConfigSnapshotJSON             json.RawMessage           `json:"-"`
 	CommitID                       string                    `json:"commit_id,omitempty"`
 	CommitIntentJSON               json.RawMessage           `json:"-"`
 	CommitPhase                    string                    `json:"commit_phase,omitempty"`
@@ -418,9 +488,21 @@ func (s *Store) GetConnection(ctx context.Context, id string) (Connection, error
 }
 
 func (s *Store) ListConnections(ctx context.Context) ([]Connection, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, kind, engine, metadata_json, secret_enc_blob, created_at, updated_at FROM connections ORDER BY created_at DESC;`)
+	out, _, err := s.ListConnectionsPage(ctx, 0, "")
+	return out, err
+}
+
+// ListConnectionsPage lists connections newest first. With limit > 0 it
+// returns at most limit connections after cursor and the cursor of the next
+// page ("" on the last page); limit 0 returns every connection.
+func (s *Store) ListConnectionsPage(ctx context.Context, limit int, cursor string) ([]Connection, string, error) {
+	query, args, err := keysetPage(`SELECT id, name, kind, engine, metadata_json, secret_enc_blob, created_at, updated_at FROM connections`, "created_at", limit, cursor)
 	if err != nil {
-		return nil, err
+		return nil, "", err
+	}
+	rows, err := s.rdb.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, "", err
 	}
 	defer rows.Close()
 	var out []Connection
@@ -428,12 +510,21 @@ func (s *Store) ListConnections(ctx context.Context) ([]Connection, error) {
 		var c Connection
 		var meta string
 		if err := rows.Scan(&c.ID, &c.Name, &c.Kind, &c.Engine, &meta, &c.SecretEncBlob, &c.CreatedAt, &c.UpdatedAt); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		c.MetadataJSON = []byte(meta)
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+		last := out[len(out)-1]
+		next = formatEventCursor(last.CreatedAt, last.ID)
+	}
+	return out, next, nil
 }
 
 func (s *Store) UpdateConnection(ctx context.Context, c Connection) error {
@@ -484,7 +575,7 @@ func (s *Store) GetJob(ctx context.Context, id string) (Job, error) {
 }
 
 func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, source_connection_id, target_connection_id, source_sql, target_namespace, target_table, write_mode, incremental, hwm_column, options_json, created_at, updated_at FROM jobs ORDER BY created_at DESC;`)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT id, name, source_connection_id, target_connection_id, source_sql, target_namespace, target_table, write_mode, incremental, hwm_column, options_json, created_at, updated_at FROM jobs ORDER BY created_at DESC;`)
 	if err != nil {
 		return nil, err
 	}
@@ -558,14 +649,20 @@ func (s *Store) FindActiveRunByDatasetKey(ctx context.Context, datasetKey string
 
 func (s *Store) CreateRun(ctx context.Context, r Run) error {
 	var err error
-	registrationConfig := string(r.RegistrationConfigJSON)
+	registrationConfig, err := s.encryptRunRegistrationConfig(
+		r.ID,
+		r.RegistrationConfigJSON,
+	)
+	if err != nil {
+		return err
+	}
 	warnings, err := json.Marshal(r.TypeWarnings)
 	if err != nil {
 		return err
 	}
 	err = withBusyRetry(ctx, func() error {
 		_, err = s.db.ExecContext(ctx, `INSERT INTO runs(id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-			r.ID, r.JobID, r.DatasetKey, r.Status, r.CorrelationID, r.StartedAt, r.FinishedAt, r.ErrorSummary, r.FailureClass, registrationConfig, string(warnings))
+			r.ID, r.JobID, r.DatasetKey, r.Status, r.CorrelationID, normalizeTimestamp(r.StartedAt), r.FinishedAt, r.ErrorSummary, r.FailureClass, registrationConfig, string(warnings))
 		if err != nil {
 			msg := err.Error()
 			if strings.Contains(msg, "idx_runs_dataset_active") || strings.Contains(msg, "runs.dataset_key") {
@@ -587,54 +684,104 @@ func (s *Store) SetRunTypeWarnings(ctx context.Context, runID string, warnings [
 }
 
 func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json, commit_id, commit_intent_json, commit_phase FROM runs ORDER BY started_at DESC;`)
+	out, _, err := s.ListRunsPage(ctx, 0, "")
+	return out, err
+}
+
+// ListRunsPage lists runs newest first, paged like ListConnectionsPage.
+func (s *Store) ListRunsPage(ctx context.Context, limit int, cursor string) ([]Run, string, error) {
+	query, args, err := keysetPage(`SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json, commit_id, commit_intent_json, commit_phase FROM runs`, "started_at", limit, cursor)
 	if err != nil {
-		return nil, wrapRunRegistrationConfigColumnErr(err)
+		return nil, "", err
+	}
+	rows, err := s.rdb.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, "", wrapRunRegistrationConfigColumnErr(err)
 	}
 	var out []Run
 	for rows.Next() {
 		var r Run
 		var registrationConfig, warningJSON, commitIntent string
 		if err := rows.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &registrationConfig, &warningJSON, &r.CommitID, &commitIntent, &r.CommitPhase); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if strings.TrimSpace(registrationConfig) != "" {
-			r.RegistrationConfigJSON = []byte(registrationConfig)
+			decrypted, err := s.decryptRunRegistrationConfig(r.ID, registrationConfig)
+			if err != nil {
+				return nil, "", err
+			}
+			r.RegistrationConfigJSON = decrypted
 		}
 		if strings.TrimSpace(commitIntent) != "" {
 			r.CommitIntentJSON = []byte(commitIntent)
 		}
 		if err := decodeRunWarnings(warningJSON, &r); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return nil, err
+		return nil, "", err
 	}
 	if err := rows.Close(); err != nil {
-		return nil, err
+		return nil, "", err
+	}
+	next := ""
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+		last := out[len(out)-1]
+		next = formatEventCursor(last.StartedAt, last.ID)
 	}
 	for i := range out {
 		s.attachCommitReconciliationProjection(ctx, &out[i])
 		s.attachRegistrationProjection(ctx, &out[i])
 	}
-	return out, nil
+	return out, next, nil
+}
+
+// keysetPage orders base newest first by orderColumn then id and, when limit
+// is positive, selects one extra row after cursor to detect a next page.
+func keysetPage(base, orderColumn string, limit int, cursor string) (string, []any, error) {
+	query, args := base, []any{}
+	if strings.TrimSpace(cursor) != "" {
+		if limit <= 0 {
+			return "", nil, fmt.Errorf("cursor requires limit")
+		}
+		ts, id, err := parseEventCursor(cursor)
+		if err != nil {
+			return "", nil, err
+		}
+		query += " WHERE (" + orderColumn + " < ? OR (" + orderColumn + " = ? AND id < ?))"
+		args = append(args, ts, ts, id)
+	}
+	query += " ORDER BY " + orderColumn + " DESC, id DESC"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit+1)
+	}
+	return query, args, nil
 }
 
 func (s *Store) GetRun(ctx context.Context, id string) (Run, error) {
 	var r Run
-	var registrationConfig, warningJSON, commitIntent string
-	row := s.db.QueryRowContext(ctx, `SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json, commit_id, commit_intent_json, commit_phase FROM runs WHERE id=?;`, id)
-	if err := row.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &registrationConfig, &warningJSON, &r.CommitID, &commitIntent, &r.CommitPhase); err != nil {
+	var registrationConfig, warningJSON, commitIntent, configSnapshot string
+	row := s.db.QueryRowContext(ctx, `SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json, commit_id, commit_intent_json, commit_phase, config_snapshot_json FROM runs WHERE id=?;`, id)
+	if err := row.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &registrationConfig, &warningJSON, &r.CommitID, &commitIntent, &r.CommitPhase, &configSnapshot); err != nil {
 		return Run{}, wrapRunRegistrationConfigColumnErr(err)
+	}
+	if strings.TrimSpace(configSnapshot) != "" {
+		r.ConfigSnapshotJSON = []byte(configSnapshot)
 	}
 	if err := decodeRunWarnings(warningJSON, &r); err != nil {
 		return Run{}, err
 	}
 	if strings.TrimSpace(registrationConfig) != "" {
-		r.RegistrationConfigJSON = []byte(registrationConfig)
+		decrypted, err := s.decryptRunRegistrationConfig(r.ID, registrationConfig)
+		if err != nil {
+			return Run{}, err
+		}
+		r.RegistrationConfigJSON = decrypted
 	}
 	if strings.TrimSpace(commitIntent) != "" {
 		r.CommitIntentJSON = []byte(commitIntent)
@@ -662,7 +809,11 @@ func (s *Store) ListSucceededRunsForJob(ctx context.Context, jobID string) ([]Ru
 			return nil, err
 		}
 		if strings.TrimSpace(registrationConfig) != "" {
-			r.RegistrationConfigJSON = []byte(registrationConfig)
+			decrypted, err := s.decryptRunRegistrationConfig(r.ID, registrationConfig)
+			if err != nil {
+				return nil, err
+			}
+			r.RegistrationConfigJSON = decrypted
 		}
 		out = append(out, r)
 	}
@@ -704,7 +855,7 @@ func (s *Store) attachRegistrationProjection(ctx context.Context, r *Run) {
 		if projection, err := s.GetReconciliationProjection(ctx, reg.ID); err == nil {
 			r.Reconciliation = projection
 		}
-		_ = s.db.QueryRowContext(ctx, `SELECT id FROM iceberg_registrations WHERE dataset_id=? AND target_key=? AND dataset_sequence<? AND status<>'REGISTERED' ORDER BY dataset_sequence LIMIT 1`, reg.DatasetID, reg.TargetKey, reg.DatasetSequence).Scan(&r.RegistrationBlockedBy)
+		_ = s.rdb.QueryRowContext(ctx, `SELECT id FROM iceberg_registrations WHERE dataset_id=? AND target_key=? AND dataset_sequence<? AND status<>'REGISTERED' ORDER BY dataset_sequence LIMIT 1`, reg.DatasetID, reg.TargetKey, reg.DatasetSequence).Scan(&r.RegistrationBlockedBy)
 	}
 	r.Readiness = RegistrationReadiness(r.Status, r.CatalogStatus)
 	if r.Status == "COMMITTING" {
@@ -817,7 +968,7 @@ func (s *Store) CancelRun(ctx context.Context, runID, reason string) (bool, stri
 }
 
 func (s *Store) ListTasksForRun(ctx context.Context, runID string) ([]Task, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT t.id,t.run_id,t.task_index,t.partition_spec_json,t.worker_id,t.status,t.rows_read,t.bytes_read,t.bytes_written,t.parquet_objects_json,t.started_at,t.finished_at,t.error_message,t.current_attempt_id,t.attempt_count,t.next_eligible_at,COALESCE(a.attempt_number,0),COALESCE(a.lease_deadline,''),COALESCE(a.last_renewed_at,''),COALESCE(a.status,''),COALESCE(a.failure_class,''),COALESCE(ar.artifact_count,0),COALESCE(ar.artifact_bytes,0),COALESCE(ar.artifact_rows,0),COALESCE(ar.verification_status,''),COALESCE(ar.verification_method,''),COALESCE(ar.verified_at,'') FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_number=t.attempt_count LEFT JOIN (SELECT task_id,COUNT(*) artifact_count,SUM(byte_size) artifact_bytes,SUM(row_count) artifact_rows,MIN(verification_status) verification_status,MIN(verification_method) verification_method,MAX(verified_at) verified_at FROM task_artifacts GROUP BY task_id) ar ON ar.task_id=t.id WHERE t.run_id=? ORDER BY t.task_index ASC;`, runID)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT t.id,t.run_id,t.task_index,t.partition_spec_json,t.worker_id,t.status,t.rows_read,t.bytes_read,t.bytes_written,t.parquet_objects_json,t.started_at,t.finished_at,t.error_message,t.current_attempt_id,t.attempt_count,t.next_eligible_at,COALESCE(a.attempt_number,0),COALESCE(a.lease_deadline,''),COALESCE(a.last_renewed_at,''),COALESCE(a.status,''),COALESCE(a.failure_class,''),COALESCE(ar.artifact_count,0),COALESCE(ar.artifact_bytes,0),COALESCE(ar.artifact_rows,0),COALESCE(ar.verification_status,''),COALESCE(ar.verification_method,''),COALESCE(ar.verified_at,'') FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_number=t.attempt_count LEFT JOIN (SELECT task_id,COUNT(*) artifact_count,SUM(byte_size) artifact_bytes,SUM(row_count) artifact_rows,MIN(verification_status) verification_status,MIN(verification_method) verification_method,MAX(verified_at) verified_at FROM task_artifacts GROUP BY task_id) ar ON ar.task_id=t.id WHERE t.run_id=? ORDER BY t.task_index ASC;`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -958,7 +1109,8 @@ func (s *Store) UpdateWorkerHeartbeat(ctx context.Context, bootID, workerID, add
 				VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
 				ON CONFLICT(boot_id) DO UPDATE SET
 					status='ACTIVE',
-					last_heartbeat=excluded.last_heartbeat;`,
+					last_heartbeat=excluded.last_heartbeat
+				WHERE worker_instances.worker_id=excluded.worker_id;`,
 				bootID, workerID, hostname, pid, version, now, now,
 			)
 			if err != nil {
@@ -976,7 +1128,7 @@ func (s *Store) loadWorkerInstances(ctx context.Context, workers []Worker) error
 		return nil
 	}
 	// Fetch all instances and group by worker
-	rows, err := s.db.QueryContext(ctx, `SELECT boot_id, worker_id, hostname, pid, version, status, started_at, last_heartbeat FROM worker_instances ORDER BY last_heartbeat DESC`)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT boot_id, worker_id, hostname, pid, version, status, started_at, last_heartbeat FROM worker_instances ORDER BY last_heartbeat DESC`)
 	if err != nil {
 		return err
 	}
@@ -1000,7 +1152,7 @@ func (s *Store) loadWorkerInstances(ctx context.Context, workers []Worker) error
 }
 
 func (s *Store) ListWorkers(ctx context.Context) ([]Worker, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, addr, status, last_heartbeat, capabilities_json FROM workers ORDER BY last_heartbeat DESC;`)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT id, addr, status, last_heartbeat, capabilities_json FROM workers ORDER BY last_heartbeat DESC;`)
 	if err != nil {
 		return nil, err
 	}
@@ -1028,7 +1180,7 @@ func (s *Store) ListWorkersActive(ctx context.Context, activeSince string) ([]Wo
 	if strings.TrimSpace(activeSince) == "" {
 		return s.ListWorkers(ctx)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, addr, status, last_heartbeat, capabilities_json FROM workers WHERE last_heartbeat >= ? ORDER BY last_heartbeat DESC;`, activeSince)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT id, addr, status, last_heartbeat, capabilities_json FROM workers WHERE last_heartbeat >= ? ORDER BY last_heartbeat DESC;`, normalizeTimestamp(activeSince))
 	if err != nil {
 		return nil, err
 	}
@@ -1075,8 +1227,8 @@ func (s *Store) TouchWorkerHeartbeat(ctx context.Context, bootID, workerID strin
 
 		if bootID != "" {
 			_, err = tx.ExecContext(ctx, `
-				UPDATE worker_instances SET status='ACTIVE', last_heartbeat=? WHERE boot_id=?;`,
-				now, bootID)
+				UPDATE worker_instances SET status='ACTIVE', last_heartbeat=? WHERE boot_id=? AND worker_id=?;`,
+				now, bootID, workerID)
 			if err != nil {
 				return err
 			}
@@ -1370,7 +1522,22 @@ func (s *Store) CompleteRunCommit(ctx context.Context, runID string) error {
 			return err
 		}
 		now := nowUTC()
-		if err := ensureRegistrationTx(ctx, tx, runID, datasetID, commitID, configJSON, intentJSON, now); err != nil {
+
+		configBytes, err := s.decryptRunRegistrationConfig(runID, configJSON)
+		if err != nil {
+			return err
+		}
+
+		if err := ensureRegistrationTx(
+			ctx,
+			tx,
+			runID,
+			datasetID,
+			commitID,
+			string(configBytes),
+			intentJSON,
+			now,
+		); err != nil {
 			return err
 		}
 		res, err := tx.ExecContext(ctx, `UPDATE runs SET status='SUCCEEDED', finished_at=?, error_summary=NULL, failure_class='', commit_phase='COMPLETE', commit_reconciliation_status='COMPLETE', commit_reconciliation_next_eligible_at=NULL, operator_action_required=0 WHERE id=? AND status='COMMITTING' AND commit_id=? AND commit_phase='VERIFIED';`, now, runID, commitID)
@@ -1401,7 +1568,7 @@ func (s *Store) ListCommittingRunIDs(ctx context.Context) ([]string, error) {
 }
 
 func (s *Store) ListCommittingRunIDsAt(ctx context.Context, now time.Time) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM runs WHERE status='COMMITTING' AND commit_reconciliation_status IN ('','PENDING','RETRY_REQUIRED') AND (commit_reconciliation_next_eligible_at IS NULL OR commit_reconciliation_next_eligible_at<=?) ORDER BY started_at;`, now.UTC().Format(time.RFC3339Nano))
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM runs WHERE status='COMMITTING' AND commit_reconciliation_status IN ('','PENDING','RETRY_REQUIRED') AND (commit_reconciliation_next_eligible_at IS NULL OR commit_reconciliation_next_eligible_at<=?) ORDER BY started_at;`, now.UTC().Format(TimestampLayout))
 	if err != nil {
 		return nil, err
 	}
@@ -1426,7 +1593,7 @@ func (s *Store) InsertEvent(ctx context.Context, e Event) error {
 	var err error
 	err = withBusyRetry(ctx, func() error {
 		_, err = s.db.ExecContext(ctx, `INSERT INTO events(id, run_id, task_id, ts, level, message, fields_json) VALUES (?, ?, ?, ?, ?, ?, ?);`,
-			e.ID, e.RunID, e.TaskID, e.TS, e.Level, e.Message, string(e.FieldsJSON))
+			e.ID, e.RunID, e.TaskID, normalizeTimestamp(e.TS), e.Level, e.Message, string(e.FieldsJSON))
 		return err
 	})
 	return err
@@ -1440,7 +1607,7 @@ func (s *Store) InsertEventOnce(ctx context.Context, e Event) error {
 	}
 	return withBusyRetry(ctx, func() error {
 		_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO events(id, run_id, task_id, ts, level, message, fields_json) VALUES (?, ?, ?, ?, ?, ?, ?);`,
-			e.ID, e.RunID, e.TaskID, e.TS, e.Level, e.Message, string(e.FieldsJSON))
+			e.ID, e.RunID, e.TaskID, normalizeTimestamp(e.TS), e.Level, e.Message, string(e.FieldsJSON))
 		return err
 	})
 }
@@ -1449,7 +1616,7 @@ func (s *Store) ListEventsForRun(ctx context.Context, runID string, limit int) (
 	if limit <= 0 {
 		limit = 500
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, run_id, task_id, ts, level, message, fields_json FROM events WHERE run_id=? ORDER BY ts ASC LIMIT ?;`, runID, limit)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT id, run_id, task_id, ts, level, message, fields_json FROM events WHERE run_id=? ORDER BY ts ASC LIMIT ?;`, runID, limit)
 	if err != nil {
 		return nil, err
 	}

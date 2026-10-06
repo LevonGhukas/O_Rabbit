@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,7 +26,9 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/grpcpb"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
 	"github.com/LevonGhukas/O_Rabbit/internal/sysinfo"
+	"github.com/LevonGhukas/O_Rabbit/internal/telemetry"
 	"github.com/LevonGhukas/O_Rabbit/internal/workerworkspace"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -39,25 +40,25 @@ import (
 )
 
 type partitionSpec struct {
-	Type           string `json:"type"`
-	SourceMode     string `json:"source_mode"`
-	QueryHash      string `json:"query_hash"`
-	Table          string `json:"table"`
-	CursorColumn   string `json:"cursor_column"`
-	CursorDomain   string `json:"cursor_domain"`
-	Lower          string `json:"lower"`
-	Upper          string `json:"upper"`
-	LowerExclusive bool   `json:"lower_exclusive"`
-	UpperInclusive bool   `json:"upper_inclusive"`
-	OutputPart     int64  `json:"output_part"` 
-	WhereClause    string `json:"where_clause,omitempty"` 
-	SelectColumns []string          `json:"select_columns,omitempty"` 
-	ColumnTypes   map[string]string `json:"column_types,omitempty"`
-	RecordPath    string            `json:"record_path,omitempty"`
-	FileFormat    string            `json:"format,omitempty"`
-	IDColumn       string `json:"id_column"` // legacy alias
-	From           int64  `json:"from"`      // legacy alias
-	To             int64  `json:"to"`        // legacy alias
+	Type           string            `json:"type"`
+	SourceMode     string            `json:"source_mode"`
+	QueryHash      string            `json:"query_hash"`
+	Table          string            `json:"table"`
+	CursorColumn   string            `json:"cursor_column"`
+	CursorDomain   string            `json:"cursor_domain"`
+	Lower          string            `json:"lower"`
+	Upper          string            `json:"upper"`
+	LowerExclusive bool              `json:"lower_exclusive"`
+	UpperInclusive bool              `json:"upper_inclusive"`
+	OutputPart     int64             `json:"output_part"`
+	WhereClause    string            `json:"where_clause,omitempty"`
+	SelectColumns  []string          `json:"select_columns,omitempty"`
+	ColumnTypes    map[string]string `json:"column_types,omitempty"`
+	RecordPath     string            `json:"record_path,omitempty"`
+	FileFormat     string            `json:"format,omitempty"`
+	IDColumn       string            `json:"id_column"` // legacy alias
+	From           int64             `json:"from"`      // legacy alias
+	To             int64             `json:"to"`        // legacy alias
 }
 
 type sourceExtract struct {
@@ -113,6 +114,7 @@ func main() {
 	fs.Parse(os.Args[1:])
 
 	cfg.Poll = normalizePollInterval(cfg.Poll)
+	sourceQueryTimeout = cfg.SourceQueryTimeout
 
 	log, normalizedLevel, normalizedFormat, err := newWorkerLogger(cfg.LogLevel, cfg.LogFormat, os.Stdout)
 	if err != nil {
@@ -123,26 +125,52 @@ func main() {
 	cfg.LogFormat = normalizedFormat
 	slog.SetDefault(log)
 
-	var transportCreds credentials.TransportCredentials
-	if cfg.InsecureGRPC {
-		transportCreds = insecure.NewCredentials()
-	} else if strings.TrimSpace(cfg.TLSCAFile) != "" {
-		creds, err := credentials.NewClientTLSFromFile(strings.TrimSpace(cfg.TLSCAFile), strings.TrimSpace(cfg.TLSServerName))
-		if err != nil {
-			log.Error("load worker TLS CA", slog.String("err", err.Error()))
-			os.Exit(2)
-		}
-		transportCreds = creds
-	} else {
-		tlsCfg := &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			ServerName: strings.TrimSpace(cfg.TLSServerName),
-		}
-		transportCreds = credentials.NewTLS(tlsCfg)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	shutdownTracing, err := telemetry.InitTracing(ctx, "orabbit-worker")
+	if err != nil {
+		log.Error("configure tracing", slog.String("err", err.Error()))
+		os.Exit(2)
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(flushCtx)
+	}()
+
+	// With TLS the worker authenticates with its master-issued identity
+	// certificate, enrolling on first start; the master derives the worker ID
+	// from that certificate. Plaintext (loopback development) keeps the
+	// configured worker ID.
+	var transportCreds credentials.TransportCredentials
+	var identity *workerIdentity
+	if cfg.InsecureGRPC {
+		transportCreds = insecure.NewCredentials()
+	} else {
+		identity, err = loadWorkerIdentity(cfg.IdentityDir)
+		if err == nil && identity != nil && time.Now().After(identity.leaf().NotAfter) {
+			log.Warn("worker identity certificate expired; re-enrolling", slog.String("worker_id", identity.workerID()))
+			identity = nil
+		}
+		if err == nil && identity == nil {
+			identity, err = enrollWorker(ctx, log, cfg, cfg.IdentityDir)
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Error("worker identity unavailable", slog.String("err", err.Error()))
+			os.Exit(2)
+		}
+		tlsCfg, err := grpcapi.ClientTLSConfig(cfg.TLSCAFile, cfg.TLSServerName, identity.clientCertificate)
+		if err != nil {
+			log.Error("configure worker gRPC TLS", slog.String("err", err.Error()))
+			os.Exit(2)
+		}
+		transportCreds = credentials.NewTLS(tlsCfg)
+		cfg.WorkerID = identity.workerID()
+	}
 
 	repositoryRoot, _ := os.Getwd()
 	workspaceManager, err := workerworkspace.Open(workerworkspace.Config{
@@ -197,6 +225,8 @@ func main() {
 		cfg.MasterAddr,
 		grpc.WithTransportCredentials(transportCreds),
 		grpc.WithUnaryInterceptor(grpcapi.WorkerAuthUnaryClientInterceptor(cfg.WorkerAuthToken)),
+		grpc.WithKeepaliveParams(grpcapi.WorkerKeepaliveParams),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	)
 	if err != nil {
 		log.Error("dial master", slog.String("err", err.Error()))
@@ -205,6 +235,9 @@ func main() {
 	defer conn.Close()
 
 	cp := grpcpb.NewControlPlaneClient(conn)
+	if identity != nil {
+		go identity.renewLoop(ctx, log, cp)
+	}
 
 	cap := map[string]any{
 		"go":                 runtime.Version(),
@@ -313,7 +346,7 @@ func main() {
 		capJSON, _ := json.Marshal(cap)
 
 		rtctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		tres, err := cp.RequestTask(rtctx, &grpcpb.RequestTaskRequest{WorkerId: cfg.WorkerID, CapabilitiesJson: string(capJSON), ProtocolVersion: 5})
+		tres, err := cp.RequestTask(rtctx, &grpcpb.RequestTaskRequest{WorkerId: cfg.WorkerID, CapabilitiesJson: string(capJSON), ProtocolVersion: grpcapi.WorkerProtocolVersion})
 		cancel()
 		if err != nil {
 			// When master is down, RequestTask will error quickly; back off and avoid log spam.
@@ -354,53 +387,109 @@ func main() {
 
 		log.Info("task assigned", slog.String("task_id", t.TaskId), slog.String("run_id", t.RunId), slog.Int("task_index", int(t.TaskIndex)))
 
-		err = executeTaskManaged(ctx, log, cp, cfg.WorkerID, workerInstanceID, t, clients, workspaceManager)
+		err = executeTaskManaged(
+			ctx,
+			log,
+			cp,
+			cfg.WorkerID,
+			workerInstanceID,
+			t,
+			clients,
+			workspaceManager,
+		)
 		if err != nil {
 			var ownershipLost *taskOwnershipLostError
 			if errors.As(err, &ownershipLost) {
-				log.Warn("task ownership lost; result suppressed", slog.String("task_id", t.TaskId), slog.String("err", err.Error()))
+				log.Warn(
+					"task ownership lost; result suppressed",
+					slog.String("task_id", t.TaskId),
+					slog.String("err", err.Error()),
+				)
 				continue
 			}
 			var transientSuccess *transientSuccessReportError
 			if errors.As(err, &transientSuccess) {
-				log.Warn("successful task result remains unreported after transient outage; failure suppressed", slog.String("task_id", t.TaskId), slog.String("err", err.Error()))
+				log.Warn(
+					"successful task result remains unreported after transient outage; failure suppressed",
+					slog.String("task_id", t.TaskId),
+					slog.String("err", err.Error()),
+				)
 				continue
 			}
 			if cancelErr, ok := asTaskCanceledError(err); ok {
-				_, _ = cp.ReportTaskResult(ctx, &grpcpb.ReportTaskResultRequest{
-					WorkerId:     cfg.WorkerID,
-					TaskId:       t.TaskId,
-					RunId:        t.RunId,
-					AttemptId:    t.AttemptId,
-					FencingToken: t.FencingToken,
-					Status:       "CANCELED",
-					ErrorMessage: cancelErr.Error(),
-					FailureClass: string(failure.FailureCanceled),
-				})
-				log.Info("task canceled", slog.String("task_id", t.TaskId), slog.String("reason", cancelErr.Error()))
+				reportErr := reportResultWithRetry(
+					ctx,
+					log,
+					cp,
+					&grpcpb.ReportTaskResultRequest{
+						WorkerId:     cfg.WorkerID,
+						BootId:       workerInstanceID,
+						TaskId:       t.TaskId,
+						RunId:        t.RunId,
+						AttemptId:    t.AttemptId,
+						FencingToken: t.FencingToken,
+						Status:       "CANCELED",
+						ErrorMessage: cancelErr.Error(),
+						FailureClass: string(failure.FailureCanceled),
+					},
+				)
+				if reportErr != nil {
+					log.Warn(
+						"failed to report canceled task result",
+						slog.String("task_id", t.TaskId),
+						slog.String("err", reportErr.Error()),
+					)
+				}
+				log.Info(
+					"task canceled",
+					slog.String("task_id", t.TaskId),
+					slog.String("reason", cancelErr.Error()),
+				)
 				continue
 			}
-			if failure, ok := artifact.AsFailure(err); ok {
-				reportArtifactFailureBestEffort(ctx, log, cp, cfg.WorkerID, t, failure)
+			if artifactFailure, ok := artifact.AsFailure(err); ok {
+				reportArtifactFailureBestEffort(
+					ctx,
+					log,
+					cp,
+					cfg.WorkerID,
+					t,
+					artifactFailure,
+				)
 			}
 			failureClass := ""
 			var fErr *failure.Failure
 			if errors.As(err, &fErr) {
 				failureClass = string(fErr.Class)
 			}
-
-			// Best-effort report failure.
-			_, _ = cp.ReportTaskResult(ctx, &grpcpb.ReportTaskResultRequest{
-				WorkerId:     cfg.WorkerID,
-				TaskId:       t.TaskId,
-				RunId:        t.RunId,
-				AttemptId:    t.AttemptId,
-				FencingToken: t.FencingToken,
-				Status:       "FAILED",
-				ErrorMessage: err.Error(),
-				FailureClass: failureClass,
-			})
-			log.Error("task failed", slog.String("task_id", t.TaskId), slog.String("err", err.Error()))
+			reportErr := reportResultWithRetry(
+				ctx,
+				log,
+				cp,
+				&grpcpb.ReportTaskResultRequest{
+					WorkerId:     cfg.WorkerID,
+					BootId:       workerInstanceID,
+					TaskId:       t.TaskId,
+					RunId:        t.RunId,
+					AttemptId:    t.AttemptId,
+					FencingToken: t.FencingToken,
+					Status:       "FAILED",
+					ErrorMessage: err.Error(),
+					FailureClass: failureClass,
+				},
+			)
+			if reportErr != nil {
+				log.Warn(
+					"failed to report task failure",
+					slog.String("task_id", t.TaskId),
+					slog.String("err", reportErr.Error()),
+				)
+			}
+			log.Error(
+				"task failed",
+				slog.String("task_id", t.TaskId),
+				slog.String("err", err.Error()),
+			)
 			continue
 		}
 	}
@@ -595,8 +684,6 @@ func (realLeaseClock) NewTimer(d time.Duration) leaseTimer {
 func (t realLeaseTimer) C() <-chan time.Time { return t.timer.C }
 func (t realLeaseTimer) Stop()               { t.timer.Stop() }
 
-
-
 func executeTaskManaged(ctx context.Context, log *slog.Logger, cp grpcpb.ControlPlaneClient, workerID, workerInstanceID string, t *grpcpb.TaskAssignment, clients *clientCache, manager *workerworkspace.Manager) error {
 	workspace, err := manager.Create(t.RunId, t.TaskId, t.AttemptId, t.AttemptNumber, workerID, workerInstanceID)
 	if err != nil {
@@ -605,7 +692,11 @@ func executeTaskManaged(ctx context.Context, log *slog.Logger, cp grpcpb.Control
 	log.Info("workspace created", slog.String("task_id", t.TaskId), slog.String("attempt_id", t.AttemptId))
 	err = executeTaskWithBody(ctx, cp, workerID, t, realLeaseClock{}, func(taskCtx context.Context) error {
 		taskCtx = withWorkspaceDir(taskCtx, workspace.Path)
-		return executeTaskBody(taskCtx, log, cp, workerID, t, clients)
+		creds, err := fetchTaskCredentials(taskCtx, cp, workerID, t)
+		if err != nil {
+			return err
+		}
+		return executeTaskBody(withTaskCredentials(taskCtx, creds), log, cp, workerID, t, clients)
 	})
 	state := "COMPLETED"
 	if err != nil {
@@ -648,8 +739,6 @@ func executeTaskWithBody(ctx context.Context, cp grpcpb.ControlPlaneClient, work
 		return err
 	}
 }
-
-
 
 func renewalDelay(now, deadline time.Time) time.Duration {
 	remaining := deadline.Sub(now)
@@ -811,13 +900,11 @@ func executeTaskBody(ctx context.Context, log *slog.Logger, cp grpcpb.ControlPla
 	}()
 
 	s3Cfg := s3io.Config{
-		Endpoint:        t.S3Endpoint,
-		Region:          t.S3Region,
-		Bucket:          t.S3Bucket,
-		ForcePathStyle:  t.S3ForcePathStyle,
-		AccessKeyID:     t.S3AccessKeyId,
-		SecretAccessKey: t.S3SecretAccessKey,
-		SessionToken:    t.S3SessionToken,
+		Endpoint:       t.S3Endpoint,
+		Region:         t.S3Region,
+		Bucket:         t.S3Bucket,
+		ForcePathStyle: t.S3ForcePathStyle,
+		Credentials:    taskCredentialsFromContext(ctx).S3,
 	}
 	if err := checkTaskCancellation(ctx, log, cp, workerID, t, extracted.Rows, 0, extracted.ParquetBytes); err != nil {
 		return err
@@ -893,8 +980,24 @@ func executeTaskBody(ctx context.Context, log *slog.Logger, cp grpcpb.ControlPla
 				"verification_method": record.VerificationMethod,
 			}
 			multipartObserver := func(eventCtx context.Context, event s3io.MultipartEvent) error {
-				fields, _ := json.Marshal(map[string]any{"event": event.Event, "file_index": event.FileIndex, "object_key": event.ObjectKey, "provider_upload_id": event.ProviderUploadID, "sha256": event.SHA256, "size": event.Size, "error_class": event.ErrorClass})
-				_, err := cp.ReportTaskProgress(eventCtx, &grpcpb.ReportTaskProgressRequest{WorkerId: workerID, TaskId: t.TaskId, RunId: t.RunId, AttemptId: t.AttemptId, FencingToken: t.FencingToken, Message: "MULTIPART_LIFECYCLE", FieldsJson: string(fields)})
+				_, err := cp.ReportMultipartLifecycle(
+					eventCtx,
+					&grpcpb.ReportMultipartLifecycleRequest{
+						WorkerId:         workerID,
+						RunId:            t.RunId,
+						TaskId:           t.TaskId,
+						AttemptId:        t.AttemptId,
+						FencingToken:     t.FencingToken,
+						Event:            event.Event,
+						FileIndex:        int32(event.FileIndex),
+						ObjectKey:        event.ObjectKey,
+						ProviderUploadId: event.ProviderUploadID,
+						Sha256:           event.SHA256,
+						Size:             event.Size,
+						ErrorClass:       event.ErrorClass,
+						ErrorMessage:     event.ErrorMessage,
+					},
+				)
 				return taskCanceledErrorFromRPC(err)
 			}
 			upRes, err := u.UploadFileVerifiedTracked(uploadCtx, objectKeys[idx], path, meta, record.ByteSize, record.Sha256, idx, multipartObserver)
@@ -908,6 +1011,7 @@ func executeTaskBody(ctx context.Context, log *slog.Logger, cp grpcpb.ControlPla
 			if upRes.VerificationMethod != "" {
 				record.VerificationMethod = upRes.VerificationMethod
 			}
+			record.ProviderChecksumSha256 = upRes.ProviderChecksumSHA256
 			skipCh <- upRes.Skipped
 		}(i, pf.Path)
 	}
@@ -1026,6 +1130,17 @@ func buildAttemptRunPrefix(datasetPrefix, runID, _, _ string) string {
 }
 
 // extractSQLCursorTask reads an ordered-cursor partition from a SQL source and writes a local Parquet file.
+// sourceQueryTimeout bounds one partition's source query. It is set once from
+// the worker configuration at startup; 0 means no limit.
+var sourceQueryTimeout = 2 * time.Hour
+
+func withSourceQueryTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if sourceQueryTimeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, sourceQueryTimeout)
+}
+
 func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.ControlPlaneClient, workerID string, t *grpcpb.TaskAssignment, ps partitionSpec, clients *clientCache, sourceEngine string) (sourceExtract, error) {
 	res := sourceExtract{}
 
@@ -1057,13 +1172,13 @@ func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 		res.OutputPart = int64(t.TaskIndex)
 	}
 
-	src, ms, err := clients.SQLReader(ctx, sourceEngine, t.SourceDsn)
+	src, ms, err := clients.SQLReader(ctx, sourceEngine, taskCredentialsFromContext(ctx).SourceDSN)
 	res.DBConnectMS = ms
 	if err != nil {
 		return res, fmt.Errorf("open %s: %w", sourceEngine, err)
 	}
 
-	qctx, cancel := context.WithTimeout(ctx, 2*time.Hour)
+	qctx, cancel := withSourceQueryTimeout(ctx)
 	defer cancel()
 
 	queryStart := time.Now()
@@ -1141,13 +1256,13 @@ func extractFlightSQLTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 	}
 	res.OutputPart = int64(t.TaskIndex)
 
-	src, ms, err := clients.FlightSQL(ctx, t.SourceDsn)
+	src, ms, err := clients.FlightSQL(ctx, taskCredentialsFromContext(ctx).SourceDSN)
 	res.DBConnectMS = ms
 	if err != nil {
 		return res, fmt.Errorf("open flightsql: %w", err)
 	}
 
-	qctx, cancel := context.WithTimeout(ctx, 2*time.Hour)
+	qctx, cancel := withSourceQueryTimeout(ctx)
 	defer cancel()
 
 	pw := newParquetRollingWriterWithContext(ctx, t.TargetFileBytes)
@@ -1202,13 +1317,13 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 	}
 	res.OutputPart = int64(t.TaskIndex)
 
-	src, ms, err := clients.DocumentReader(ctx, sourceEngine, t.SourceDsn)
+	src, ms, err := clients.DocumentReader(ctx, sourceEngine, taskCredentialsFromContext(ctx).SourceDSN)
 	res.DBConnectMS = ms
 	if err != nil {
 		return res, fmt.Errorf("open %s: %w", sourceEngine, err)
 	}
 
-	qctx, cancel := context.WithTimeout(ctx, 2*time.Hour)
+	qctx, cancel := withSourceQueryTimeout(ctx)
 	defer cancel()
 
 	collection := ps.Table
@@ -1329,7 +1444,6 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 			if err != nil {
 				return res, fmt.Errorf("infer schema: %w", err)
 			}
-			schemaInferred = true
 		}
 		if err := writeMongoDocBatch(alloc, pw, schema, docBuf); err != nil {
 			return res, err
