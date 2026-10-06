@@ -810,6 +810,56 @@ func CursorSuccessor(domain CursorDomain, text string) (string, bool) {
 	}
 }
 
+// CursorLookbackStart returns the inclusive lower bound lookback before the
+// high-water mark hwm. Numeric cursors take lookback as a count of units;
+// date and timestamp cursors take a Go duration such as "15m" or "48h".
+// Cursors without a meaningful distance (decimal, string, uuid) are rejected.
+func CursorLookbackStart(domain CursorDomain, hwm, lookback string) (string, error) {
+	domain = NormalizeCursorDomain(string(domain))
+	lookback = strings.TrimSpace(lookback)
+	switch domain {
+	case CursorDomainInt64:
+		n, err := strconv.ParseInt(lookback, 10, 64)
+		v, ok := parseInt64(hwm)
+		if err != nil || n <= 0 || !ok {
+			return "", fmt.Errorf("cursor_lookback for an integer cursor must be a positive integer, got %q", lookback)
+		}
+		if v < math.MinInt64+n {
+			return strconv.FormatInt(math.MinInt64, 10), nil
+		}
+		return strconv.FormatInt(v-n, 10), nil
+	case CursorDomainUInt64:
+		n, err := strconv.ParseUint(lookback, 10, 64)
+		v, ok := parseUint64(hwm)
+		if err != nil || n == 0 || !ok {
+			return "", fmt.Errorf("cursor_lookback for an integer cursor must be a positive integer, got %q", lookback)
+		}
+		if v < n {
+			return "0", nil
+		}
+		return strconv.FormatUint(v-n, 10), nil
+	case CursorDomainDate, CursorDomainTimestamp:
+		d, err := time.ParseDuration(lookback)
+		if err != nil || d <= 0 {
+			return "", fmt.Errorf("cursor_lookback for a %s cursor must be a positive duration such as 30m or 48h, got %q", domain, lookback)
+		}
+		if domain == CursorDomainDate {
+			t, ok := parseDateValue(hwm)
+			if !ok {
+				return "", fmt.Errorf("invalid date high-water mark %q", hwm)
+			}
+			return t.Add(-d).UTC().Format("2006-01-02"), nil
+		}
+		t, ok := parseTimestampValue(hwm)
+		if !ok {
+			return "", fmt.Errorf("invalid timestamp high-water mark %q", hwm)
+		}
+		return t.Add(-d).UTC().Format(time.RFC3339Nano), nil
+	default:
+		return "", fmt.Errorf("cursor_lookback is not supported for %q cursors", domain)
+	}
+}
+
 func SplitCursorRange(domain CursorDomain, startInclusive, endInclusive string, parts int) ([]string, error) {
 	domain = NormalizeCursorDomain(string(domain))
 	if !SupportsCursorRangeSplit(domain) {

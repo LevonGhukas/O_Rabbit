@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
 )
@@ -72,7 +71,7 @@ func TestCanceledObjectCleanupDeletesExactObjectAfterRevalidation(t *testing.T) 
 		{Exists: true, Matches: true, Identity: "stable", VersionID: "v1"},
 		{},
 	}}
-	srv := NewServer(nil, st, nil, crypto.Key{}, time.Second, nil)
+	srv := NewServer(nil, st, nil, testCryptoKey, time.Second, nil)
 	srv.newCanceledObjectCleanerFn = func(context.Context, s3io.Config) (canceledObjectCleaner, error) { return cleaner, nil }
 	srv.SetCanceledObjectCleanupPolicy(time.Second, 3, false)
 	srv.nowFn = func() time.Time { return deadline.Add(time.Second) }
@@ -86,7 +85,7 @@ func TestCanceledObjectCleanupDryRunAndAmbiguousDelete(t *testing.T) {
 	t.Run("dry-run", func(t *testing.T) {
 		st, deadline, _ := canceledObjectGRPCFixture(t, "object-dry-run")
 		cleaner := &fakeCanceledObjectCleaner{observations: []s3io.ExactObjectObservation{{Exists: true, Matches: true, Identity: "stable"}}}
-		srv := NewServer(nil, st, nil, crypto.Key{}, time.Second, nil)
+		srv := NewServer(nil, st, nil, testCryptoKey, time.Second, nil)
 		srv.newCanceledObjectCleanerFn = func(context.Context, s3io.Config) (canceledObjectCleaner, error) { return cleaner, nil }
 		srv.SetCanceledObjectCleanupPolicy(time.Second, 3, true)
 		srv.nowFn = func() time.Time { return deadline.Add(time.Second) }
@@ -104,7 +103,7 @@ func TestCanceledObjectCleanupDryRunAndAmbiguousDelete(t *testing.T) {
 			observeErrs:  []error{nil, errors.New("provider unavailable")},
 			deleteErr:    errors.New("lost delete response"),
 		}
-		srv := NewServer(nil, st, nil, crypto.Key{}, time.Second, nil)
+		srv := NewServer(nil, st, nil, testCryptoKey, time.Second, nil)
 		srv.newCanceledObjectCleanerFn = func(context.Context, s3io.Config) (canceledObjectCleaner, error) { return cleaner, nil }
 		srv.SetCanceledObjectCleanupPolicy(time.Second, 3, false)
 		srv.nowFn = func() time.Time { return deadline.Add(time.Second) }

@@ -612,11 +612,32 @@ func TestCheckTaskCancellationReturnsCanceledError(t *testing.T) {
 }
 
 type fakeControlPlaneClient struct {
-	reportTaskProgress func(context.Context, *grpcpb.ReportTaskProgressRequest, ...grpc.CallOption) (*grpcpb.ReportTaskProgressResponse, error)
-	renewTaskLease     func(context.Context, *grpcpb.RenewTaskLeaseRequest, ...grpc.CallOption) (*grpcpb.RenewTaskLeaseResponse, error)
-	acquireUpload      func(context.Context, *grpcpb.AcquireUploadCapacityRequest, ...grpc.CallOption) (*grpcpb.AcquireUploadCapacityResponse, error)
-	releaseUpload      func(context.Context, *grpcpb.ReleaseUploadCapacityRequest, ...grpc.CallOption) (*grpcpb.ReleaseUploadCapacityResponse, error)
-	reportTaskResult   func(context.Context, *grpcpb.ReportTaskResultRequest, ...grpc.CallOption) (*grpcpb.ReportTaskResultResponse, error)
+	reportTaskProgress       func(context.Context, *grpcpb.ReportTaskProgressRequest, ...grpc.CallOption) (*grpcpb.ReportTaskProgressResponse, error)
+	renewTaskLease           func(context.Context, *grpcpb.RenewTaskLeaseRequest, ...grpc.CallOption) (*grpcpb.RenewTaskLeaseResponse, error)
+	acquireUpload            func(context.Context, *grpcpb.AcquireUploadCapacityRequest, ...grpc.CallOption) (*grpcpb.AcquireUploadCapacityResponse, error)
+	releaseUpload            func(context.Context, *grpcpb.ReleaseUploadCapacityRequest, ...grpc.CallOption) (*grpcpb.ReleaseUploadCapacityResponse, error)
+	reportTaskResult         func(context.Context, *grpcpb.ReportTaskResultRequest, ...grpc.CallOption) (*grpcpb.ReportTaskResultResponse, error)
+	getTaskCredentials       func(context.Context, *grpcpb.GetTaskCredentialsRequest, ...grpc.CallOption) (*grpcpb.GetTaskCredentialsResponse, error)
+	renewCertificate         func(context.Context, *grpcpb.RenewWorkerCertificateRequest, ...grpc.CallOption) (*grpcpb.RenewWorkerCertificateResponse, error)
+	reportMultipartLifecycle func(context.Context, *grpcpb.ReportMultipartLifecycleRequest, ...grpc.CallOption) (*grpcpb.ReportMultipartLifecycleResponse, error)
+}
+
+func (f fakeControlPlaneClient) EnrollWorker(context.Context, *grpcpb.EnrollWorkerRequest, ...grpc.CallOption) (*grpcpb.EnrollWorkerResponse, error) {
+	panic("unexpected EnrollWorker call")
+}
+
+func (f fakeControlPlaneClient) RenewWorkerCertificate(ctx context.Context, in *grpcpb.RenewWorkerCertificateRequest, opts ...grpc.CallOption) (*grpcpb.RenewWorkerCertificateResponse, error) {
+	if f.renewCertificate == nil {
+		panic("unexpected RenewWorkerCertificate call")
+	}
+	return f.renewCertificate(ctx, in, opts...)
+}
+
+func (f fakeControlPlaneClient) GetTaskCredentials(ctx context.Context, in *grpcpb.GetTaskCredentialsRequest, opts ...grpc.CallOption) (*grpcpb.GetTaskCredentialsResponse, error) {
+	if f.getTaskCredentials == nil {
+		panic("unexpected GetTaskCredentials call")
+	}
+	return f.getTaskCredentials(ctx, in, opts...)
 }
 
 func (f fakeControlPlaneClient) RegisterWorker(context.Context, *grpcpb.RegisterWorkerRequest, ...grpc.CallOption) (*grpcpb.RegisterWorkerResponse, error) {
@@ -664,4 +685,15 @@ func (f fakeControlPlaneClient) ReportTaskResult(ctx context.Context, in *grpcpb
 		panic("unexpected ReportTaskResult call")
 	}
 	return f.reportTaskResult(ctx, in, opts...)
+}
+
+func (f fakeControlPlaneClient) ReportMultipartLifecycle(
+	ctx context.Context,
+	in *grpcpb.ReportMultipartLifecycleRequest,
+	opts ...grpc.CallOption,
+) (*grpcpb.ReportMultipartLifecycleResponse, error) {
+	if f.reportMultipartLifecycle == nil {
+		return &grpcpb.ReportMultipartLifecycleResponse{}, nil
+	}
+	return f.reportMultipartLifecycle(ctx, in, opts...)
 }

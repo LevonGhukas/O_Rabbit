@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 )
 
@@ -30,7 +29,7 @@ func TestRunDiagnosisEndpointIsAuthenticatedAndRedacted(t *testing.T) {
 	if err := st.CreateRun(ctx, db.Run{ID: "http-diag", JobID: "job", DatasetKey: "http-diag-dataset", Status: "COMMITTING", CorrelationID: "corr", StartedAt: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)}); err != nil {
 		t.Fatal(err)
 	}
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "admin-token")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "admin-token")
 	h := srv.Handler()
 
 	unauthorized := httptest.NewRecorder()
@@ -80,7 +79,7 @@ func TestRecoveryEndpointAcknowledgesQuarantineIdempotentlyAndAudits(t *testing.
 		t.Fatal(err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "admin-token")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "admin-token")
 	h := srv.Handler()
 	body := []byte(`{"action":"acknowledge_quarantine","reason":"source credentials repaired"}`)
 	unauthorized := httptest.NewRecorder()
@@ -124,7 +123,7 @@ func TestCommitRecoveryEndpointRechecksStateAndAudits(t *testing.T) {
 		t.Fatal(err)
 	}
 	reconciler := &fakeCommitReconciler{}
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	srv.SetOperability(3, reconciler)
 	resp := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(resp, httptest.NewRequest(http.MethodPost, "/api/runs/http-commit-recover/recover", strings.NewReader(`{"action":"reconcile_commit","reason":"live scan is overdue"}`)))
@@ -165,7 +164,7 @@ func TestLifecycleMetricsUseOnlyBoundedLabels(t *testing.T) {
 }
 
 func TestReadyRejectsExpiredDurableLeadershipDespiteCachedReadyState(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "")
 	srv.SetLeadershipGuard(fakeLeadership{status: db.Leadership{State: "LEADER", Ready: true}, err: errors.New("durable lease expired")})
 	resp := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/ready", nil))

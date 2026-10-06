@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 type migration struct {
@@ -36,6 +37,96 @@ var migrations = []migration{
 	{version: 21, sql: schemaV21},
 	{version: 22, sql: schemaV22},
 	{version: 23, sql: schemaV23},
+	{version: 24, sql: schemaV24},
+	{version: 25, sql: schemaV25},
+	{version: 26, sql: schemaV26},
+	{version: 27, sql: schemaV27},
+	{version: 28, apply: normalizeStoredTimestamps},
+}
+
+// normalizeStoredTimestamps rewrites every stored timestamp in
+// TimestampLayout. Older rows used RFC3339Nano, whose variable-length fraction
+// makes string comparison and ORDER BY wrong within the same second. Columns
+// are recognised by name (ts, last_heartbeat, *_at, *_deadline); values that
+// do not parse as RFC 3339 are left untouched.
+func normalizeStoredTimestamps(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	type column struct{ table, name string }
+	var cols []column
+	tables, err := tx.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		return err
+	}
+	var names []string
+	for tables.Next() {
+		var n string
+		if err := tables.Scan(&n); err != nil {
+			_ = tables.Close()
+			return err
+		}
+		names = append(names, n)
+	}
+	if err := tables.Close(); err != nil {
+		return err
+	}
+	for _, table := range names {
+		info, err := tx.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+		if err != nil {
+			return err
+		}
+		for info.Next() {
+			var n string
+			if err := info.Scan(&n); err != nil {
+				_ = info.Close()
+				return err
+			}
+			if n == "ts" || n == "last_heartbeat" || strings.HasSuffix(n, "_at") || strings.HasSuffix(n, "_deadline") {
+				cols = append(cols, column{table, n})
+			}
+		}
+		if err := info.Close(); err != nil {
+			return err
+		}
+	}
+
+	for _, c := range cols {
+		q := fmt.Sprintf(`SELECT rowid, %[2]q FROM %[1]q WHERE %[2]q IS NOT NULL AND length(%[2]q)<>?`, c.table, c.name)
+		rows, err := tx.QueryContext(ctx, q, len(TimestampLayout))
+		if err != nil {
+			return err
+		}
+		type change struct {
+			rowid int64
+			value string
+		}
+		var changes []change
+		for rows.Next() {
+			var id int64
+			var v string
+			if err := rows.Scan(&id, &v); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if nv := normalizeTimestamp(v); nv != v {
+				changes = append(changes, change{id, nv})
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		upd := fmt.Sprintf(`UPDATE %q SET %q=? WHERE rowid=?`, c.table, c.name)
+		for _, ch := range changes {
+			if _, err := tx.ExecContext(ctx, upd, ch.value, ch.rowid); err != nil {
+				return fmt.Errorf("normalize %s.%s: %w", c.table, c.name, err)
+			}
+		}
+	}
+	return tx.Commit()
 }
 
 const schemaV21 = `
@@ -44,6 +135,60 @@ ALTER TABLE iceberg_registrations ADD COLUMN retry_override_config_json TEXT NOT
 
 const schemaV22 = `
 ALTER TABLE iceberg_registrations ADD COLUMN manual_retry_budget INTEGER NOT NULL DEFAULT 0;
+`
+
+// schemaV27 stores the non-secret configuration each run was planned with,
+// so edits to its job or connections cannot change a run in flight.
+const schemaV27 = `
+ALTER TABLE runs ADD COLUMN config_snapshot_json TEXT NOT NULL DEFAULT '';
+`
+
+// schemaV26 records the object store's checksum of each artifact so the
+// commit can verify objects with a HEAD instead of re-reading them.
+const schemaV26 = `
+ALTER TABLE task_artifacts ADD COLUMN provider_checksum_sha256 TEXT NOT NULL DEFAULT '';
+`
+
+// schemaV25 adds a leased claim on committing runs so exactly one committer
+// publishes a run at a time.
+const schemaV25 = `
+ALTER TABLE runs ADD COLUMN commit_claim_token TEXT NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN commit_claim_expires_at TEXT;
+`
+
+// schemaV24 adds master-issued worker identities. worker_ca holds the single
+// CA that signs worker certificates (its key sealed with ORABBIT_MASTER_KEY).
+// Enrollment tokens are stored only as SHA-256 digests.
+const schemaV24 = `
+CREATE TABLE IF NOT EXISTS worker_ca (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  cert_pem TEXT NOT NULL,
+  key_enc BLOB NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS worker_identities (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  hostname TEXT NOT NULL DEFAULT '',
+  pool TEXT NOT NULL,
+  status TEXT NOT NULL,
+  cert_serial TEXT NOT NULL,
+  cert_not_after TEXT NOT NULL,
+  enrollment_token_id TEXT NOT NULL,
+  enrolled_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_worker_identities_pool_status ON worker_identities(pool, status);
+CREATE TABLE IF NOT EXISTS worker_enrollment_tokens (
+  id TEXT PRIMARY KEY,
+  token_sha256 TEXT NOT NULL UNIQUE,
+  pool TEXT NOT NULL,
+  max_uses INTEGER NOT NULL,
+  use_count INTEGER NOT NULL DEFAULT 0,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 `
 
 const schemaV23 = `
@@ -723,7 +868,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 				return fmt.Errorf("apply migration %d: %w", m.version, err)
 			}
 		}
-		if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'));`, m.version); err != nil {
+		if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?);`, m.version, nowUTC()); err != nil {
 			return fmt.Errorf("record migration %d: %w", m.version, err)
 		}
 	}

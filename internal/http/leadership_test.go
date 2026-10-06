@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 )
 
@@ -20,7 +19,7 @@ func (f fakeLeadership) Assert(context.Context) error { return f.err }
 func (f fakeLeadership) Status() db.Leadership        { return f.status }
 
 func TestLeadershipControlsReadinessAndMutations(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "")
 	srv.SetLeadershipGuard(fakeLeadership{status: db.Leadership{State: "LOST", Ready: false}, err: errors.New("lost")})
 	h := srv.Handler()
 

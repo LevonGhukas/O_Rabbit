@@ -1,3 +1,8 @@
+# Local development stack only. It uses well-known credentials (minioadmin,
+# myuser/mypassword, ClickHouse default/default), so every published port is bound to 127.0.0.1. For
+# servers use docker-compose.master.yml / docker-compose.worker.yml with
+# the .env.*.example files.
+
 x-orabbit-build: &orabbit-build
   context: .
   dockerfile: Dockerfile.orabbit
@@ -22,14 +27,14 @@ x-worker-common: &worker-common
 
 services:
   minio:
-    image: minio/minio:latest
+    image: levonghukas/minio:RELEASE.2025-10-15T17-29-55Z-r1
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes:
       - minio_data:/data
     restart: unless-stopped
@@ -37,7 +42,7 @@ services:
       - orabbit_net
 
   minio-init:
-    image: minio/mc:latest
+    image: levonghukas/mc:RELEASE.2025-08-13T08-35-41Z-r1
     depends_on:
       minio:
         condition: service_started
@@ -58,7 +63,7 @@ services:
       POSTGRES_PASSWORD: mypassword
       POSTGRES_DB: mydb
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U myuser -d mydb"]
       interval: 5s
@@ -66,19 +71,18 @@ services:
       retries: 20
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
     restart: unless-stopped
     networks:
       - orabbit_net
 
   ice-rest-catalog:
-    image: altinity/ice-rest-catalog:0.2.0
+    image: altinity/ice-rest-catalog:0.11.0
     command: ["-c", "/etc/ice/ice-rest-catalog.yaml"]
     depends_on:
       minio-init:
         condition: service_completed_successfully
     ports:
-      - "5001:5000"
+      - "127.0.0.1:5001:5000"
     volumes:
       - ice_catalog_data:/var/lib/ice-rest-catalog
       - ./ice-rest-catalog.yaml:/etc/ice/ice-rest-catalog.yaml:ro
@@ -86,14 +90,15 @@ services:
     networks:
       - orabbit_net
 
-  clickhouse: # Indent this line and all below
+  # Optional query engine over the Iceberg catalog.
+  clickhouse:
     image: altinity/clickhouse-server:25.8.9.20207.altinityantalya
     ports:
-      - "8123:8123"
-      - "9090:9090"
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9090:9090"
     environment:
       - CLICKHOUSE_USER=default
-      - CLICKHOUSE_PASSWORD=
+      - CLICKHOUSE_PASSWORD=default
     depends_on:
       ice-rest-catalog:
         condition: service_started
@@ -103,6 +108,27 @@ services:
       - orabbit_net
     volumes:
       - clickhouse_data:/var/lib/clickhouse
+
+  # Exposes the Ice REST catalog to ClickHouse as the database `ice`.
+  clickhouse-init-ice:
+    image: altinity/clickhouse-server:25.8.9.20207.altinityantalya
+    depends_on:
+      clickhouse:
+        condition: service_started
+    restart: "no"
+    entrypoint:
+      - /bin/bash
+      - -ceu
+      - |
+        until clickhouse-client --host=clickhouse --password=default --query 'SELECT 1' >/dev/null 2>&1; do sleep 1; done
+        clickhouse-client --host=clickhouse --password=default --multiquery "
+          SET allow_experimental_database_iceberg = 1;
+          CREATE DATABASE IF NOT EXISTS ice
+          ENGINE = DataLakeCatalog('http://ice-rest-catalog:5000')
+          SETTINGS storage_endpoint = 'http://minio:9000', warehouse = 's3://bucket1';
+        "
+    networks:
+      - orabbit_net
 
   master:
     image: orabbit-master:local
@@ -117,6 +143,9 @@ services:
       - "-grpc-addr"
       - "0.0.0.0:9102"
       - "-insecure=true"
+      # Plaintext gRPC is confined to the private orabbit_net bridge network;
+      # 9102 is not published. Use TLS for any cross-host deployment.
+      - "-allow-insecure-remote-grpc=true"
       - "-log-level"
       - "INFO"
       - "-log-format"
@@ -124,8 +153,9 @@ services:
     environment:
       ORABBIT_HTTP_AUTH_TOKEN: "${ORABBIT_HTTP_AUTH_TOKEN:?set ORABBIT_HTTP_AUTH_TOKEN}"
       ORABBIT_WORKER_AUTH_TOKEN: "${ORABBIT_WORKER_AUTH_TOKEN:?set ORABBIT_WORKER_AUTH_TOKEN}"
+      ORABBIT_MASTER_KEY: "${ORABBIT_MASTER_KEY:?set ORABBIT_MASTER_KEY (openssl rand -base64 32)}"
     ports:
-      - "9100:9100"
+      - "127.0.0.1:9100:9100"
     volumes:
       - master_data:/var/lib/orabbit
     restart: unless-stopped

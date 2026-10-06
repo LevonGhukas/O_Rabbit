@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/connectors"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 )
@@ -266,4 +267,30 @@ func TestValidateDatasetSourceState(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
+}
+
+func TestOrderedCursorRangeLowerBound(t *testing.T) {
+	stats := connectors.CursorStats{MinValue: "1", MaxValue: "1000"}
+	opts := jobopts.Options{PlannedTasks: 2}
+	firstLower := func(lower string, exclusive bool) map[string]any {
+		t.Helper()
+		tasks, err := buildOrderedCursorRangeTasks("run", 1, "t", "id", connectors.CursorDomainInt64, lower, exclusive, stats, opts, "")
+		if err != nil || len(tasks) == 0 {
+			t.Fatalf("tasks=%v err=%v", tasks, err)
+		}
+		var spec map[string]any
+		if err := json.Unmarshal(tasks[0].PartitionSpec, &spec); err != nil {
+			t.Fatal(err)
+		}
+		return spec
+	}
+	// Plain incremental: strictly after the high-water mark.
+	if spec := firstLower("900", true); spec["lower"] != "900" || spec["lower_exclusive"] != true {
+		t.Fatalf("exclusive resume spec=%v", spec)
+	}
+	// Lookback: inclusive from the lookback start, so boundary ties and
+	// late-committed rows below the mark are read again.
+	if spec := firstLower("750", false); spec["lower"] != "750" || spec["lower_exclusive"] != false {
+		t.Fatalf("lookback spec=%v", spec)
+	}
 }

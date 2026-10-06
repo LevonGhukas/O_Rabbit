@@ -1,0 +1,15 @@
+# Continuous replication of the master SQLite database to S3-compatible
+# storage. See docs/master-backup-restore.md. Values come from the
+# environment of the litestream container.
+dbs:
+  - path: /var/lib/orabbit/master.sqlite
+    replicas:
+      - type: s3
+        bucket: ${LITESTREAM_BUCKET}
+        path: ${LITESTREAM_PATH}
+        endpoint: ${LITESTREAM_ENDPOINT}
+        region: ${LITESTREAM_REGION}
+        force-path-style: ${LITESTREAM_FORCE_PATH_STYLE}
+        sync-interval: 1s
+        snapshot-interval: 24h
+        retention: 168h

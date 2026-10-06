@@ -64,7 +64,7 @@ func (s *Store) AcquireLeadership(ctx context.Context, instanceID string, lease 
 		}
 		return LeaderLease{}, err
 	}
-	out.LeaseDeadline = time.UnixMilli(out.LeaseDeadlineMS).UTC().Format(time.RFC3339Nano)
+	out.LeaseDeadline = time.UnixMilli(out.LeaseDeadlineMS).UTC().Format(TimestampLayout)
 	event := "MASTER_LEADERSHIP_ACQUIRED"
 	if out.Epoch > 1 {
 		event = "MASTER_TAKEOVER"

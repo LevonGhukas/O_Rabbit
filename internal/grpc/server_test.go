@@ -37,22 +37,22 @@ func TestBuildParquetObjectPayloadsIncludesOptionalFields(t *testing.T) {
 
 func TestWorkerProtocolCompatibilityFailsClosed(t *testing.T) {
 	st := openGRPCTestStore(t)
-	srv := NewServer(nil, st, nil, crypto.Key{}, 5*time.Second, nil)
-	for _, version := range []int32{0, 4, 6} {
+	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, nil)
+	for _, version := range []int32{0, 5, 6, 8} {
 		_, err := srv.RequestTask(context.Background(), &grpcpb.RequestTaskRequest{WorkerId: "legacy", ProtocolVersion: version})
 		if status.Code(err) != codes.FailedPrecondition ||
-			!strings.Contains(err.Error(), "accepted version=5") ||
+			!strings.Contains(err.Error(), "accepted version=7") ||
 			!strings.Contains(err.Error(), "exact match required") {
 			t.Fatalf("version=%d error=%v", version, err)
 		}
 	}
-	if _, err := srv.RequestTask(context.Background(), &grpcpb.RequestTaskRequest{WorkerId: "current", ProtocolVersion: 5}); err != nil {
+	if _, err := srv.RequestTask(context.Background(), &grpcpb.RequestTaskRequest{WorkerId: "current", ProtocolVersion: WorkerProtocolVersion}); err != nil {
 		t.Fatalf("current protocol rejected: %v", err)
 	}
 }
 
 func TestCatalogWorkAdmissionIsBoundedAndNonblocking(t *testing.T) {
-	srv := NewServer(nil, openGRPCTestStore(t), nil, crypto.Key{}, time.Second, nil)
+	srv := NewServer(nil, openGRPCTestStore(t), nil, testCryptoKey, time.Second, nil)
 	srv.SetCatalogWorkLimit(1)
 	release, ok := srv.tryAcquireCatalogWork()
 	if !ok {
@@ -185,7 +185,7 @@ func TestReportTaskProgressReturnsCanceledForCanceledRun(t *testing.T) {
 		t.Fatalf("cancel run: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, 5*time.Second, nil)
+	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, nil)
 	_, err := srv.ReportTaskProgress(ctx, &grpcpb.ReportTaskProgressRequest{
 		WorkerId:     "worker-1",
 		TaskId:       "task-progress-cancel",
@@ -220,7 +220,7 @@ func TestReportTaskResultCoercesLateSuccessToCanceled(t *testing.T) {
 		t.Fatalf("cancel run: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, 5*time.Second, nil)
+	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, nil)
 	_, err := srv.ReportTaskResult(ctx, &grpcpb.ReportTaskResultRequest{
 		WorkerId:     "worker-1",
 		TaskId:       "task-result-cancel",
@@ -266,7 +266,7 @@ func TestStaleAttemptRejectionEventsAreVisibleAndBounded(t *testing.T) {
 	if _, err := st.ExpireTaskAttempts(ctx, t0.Add(2*time.Second), db.LeasePolicy{Duration: time.Second, MaxAttempts: 3, BackoffBase: time.Second, BackoffMax: time.Second}); err != nil {
 		t.Fatal(err)
 	}
-	srv := NewServer(nil, st, nil, crypto.Key{}, 5*time.Second, nil)
+	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, nil)
 	srv.nowFn = func() time.Time { return t0.Add(3 * time.Second) }
 	for i := 0; i < 20; i++ {
 		_, _ = srv.RenewTaskLease(ctx, &grpcpb.RenewTaskLeaseRequest{WorkerId: "worker-old", TaskId: a.ID, AttemptId: a.AttemptID, FencingToken: a.FencingToken})
@@ -298,7 +298,7 @@ func TestArtifactFailureEventsAreSafeStructuredAndBounded(t *testing.T) {
 	ctx := context.Background()
 	createGRPCTestRunAndTask(t, st, "run-artifact-event", "job-artifact-event", "task-artifact-event", "PENDING")
 	a := assignGRPCTestAttempt(t, st, "task-artifact-event", "worker-1")
-	srv := NewServer(nil, st, nil, crypto.Key{}, 5*time.Second, nil)
+	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, nil)
 	fields := `{"artifact_failure":{"classification":"REMOTE_CHECKSUM_MISMATCH","attempt_id":"` + a.AttemptID + `","attempt_number":1,"worker_id":"worker-1","file_index":2,"object_key":"safe/key.parquet","verification_method":"PORTABLE_FULL_SHA256","retryable":false,"ambiguous":false,"reconciliation_allowed":false,"fencing_token":"` + a.FencingToken + `"}}`
 	for i := 0; i < 20; i++ {
 		if _, err := srv.ReportTaskProgress(ctx, &grpcpb.ReportTaskProgressRequest{WorkerId: "worker-1", TaskId: a.ID, RunId: "worker-invented-run", AttemptId: a.AttemptID, FencingToken: a.FencingToken, FieldsJson: fields}); err != nil {
@@ -374,7 +374,7 @@ func TestDuplicateResultEventsAreIdempotentAndConflictsBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := assignGRPCTestAttempt(t, st, "task-duplicate-events", "worker-1")
-	srv := NewServer(nil, st, nil, crypto.Key{}, 5*time.Second, nil)
+	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, nil)
 	req := &grpcpb.ReportTaskResultRequest{WorkerId: "worker-1", TaskId: a.ID, AttemptId: a.AttemptID, FencingToken: a.FencingToken, Status: "SUCCEEDED", ParquetObjectKeys: []string{"attempt/object.parquet"}}
 	req.BytesWritten = 1
 	req.Artifacts = []*grpcpb.ArtifactIntegrity{{ObjectKey: "attempt/object.parquet", ByteSize: 1, Sha256: strings.Repeat("a", 64), RowCount: 0, SchemaFingerprint: strings.Repeat("b", 64), RunId: "run-duplicate-events", TaskId: a.ID, AttemptId: a.AttemptID, AttemptNumber: int32(a.AttemptNumber), FileIndex: 0, FormatVersion: 1, VerificationMethod: "PORTABLE_FULL_SHA256", VerificationStatus: "VERIFIED"}}
@@ -443,7 +443,7 @@ func TestReportTaskResultSchedulesIcebergRegistrationAfterCommit(t *testing.T) {
 		committed: committed,
 		reqCh:     make(chan icebergreg.RunRequest, 1),
 	}
-	srv := NewServer(nil, st, nil, crypto.Key{}, 5*time.Second, registrar)
+	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, registrar)
 	srv.commitRunFn = func(ctx context.Context, runID string) error {
 		if err := saveGRPCTestVerifiedEmptyIntent(ctx, st, runID, "exports/orders"); err != nil {
 			return err
@@ -494,7 +494,7 @@ func TestRegistrationNoOpCallbackCompletesDurableLifecycle(t *testing.T) {
 	assignGRPCTestAttempt(t, st, "task-ice-noop", "worker-1")
 
 	called := make(chan struct{})
-	srv := NewServer(nil, st, nil, crypto.Key{}, 5*time.Second, noOpLifecycleRegistrar{called: called})
+	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, noOpLifecycleRegistrar{called: called})
 	srv.commitRunFn = func(ctx context.Context, gotRunID string) error {
 		return saveGRPCTestVerifiedEmptyIntent(ctx, st, gotRunID, "exports/orders")
 	}
@@ -561,7 +561,7 @@ func TestRunIcebergRegistrationPassesIceSnapshotToRegistrar(t *testing.T) {
 		committed: committed,
 		reqCh:     make(chan icebergreg.RunRequest, 1),
 	}
-	srv := NewServer(nil, st, nil, crypto.Key{}, 5*time.Second, registrar)
+	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, registrar)
 
 	ran, _, err := srv.runIcebergRegistration(ctx, "run-ice-cli")
 	if err != nil {
@@ -598,7 +598,7 @@ func TestRunIcebergRegistrationPassesQueryModeSourceToRegistrar(t *testing.T) {
 		committed: committed,
 		reqCh:     make(chan icebergreg.RunRequest, 1),
 	}
-	srv := NewServer(nil, st, nil, crypto.Key{}, 5*time.Second, registrar)
+	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, registrar)
 
 	ran, _, err := srv.runIcebergRegistration(ctx, "run-query-ice")
 	if err != nil {
@@ -641,7 +641,7 @@ func TestReportTaskResultDoesNotScheduleIcebergRegistrationWhenCommitFails(t *te
 		committed: make(chan struct{}),
 		reqCh:     make(chan icebergreg.RunRequest, 1),
 	}
-	srv := NewServer(nil, st, nil, crypto.Key{}, 5*time.Second, registrar)
+	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, registrar)
 	srv.commitRunFn = func(context.Context, string) error {
 		return status.Error(codes.Internal, "commit blew up")
 	}
@@ -660,8 +660,24 @@ func TestReportTaskResultDoesNotScheduleIcebergRegistrationWhenCommitFails(t *te
 	if !resp.Accepted {
 		t.Fatalf("accepted=%v want true", resp.Accepted)
 	}
-	if resp.Message != "rpc error: code = Internal desc = commit blew up" {
+	// The worker's RPC returns once the run is COMMITTING; the commit runs
+	// asynchronously and its failure is recorded on the run, not returned.
+	if resp.Message != "accepted" {
 		t.Fatalf("message=%q", resp.Message)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		run, err := st.GetRun(ctx, "run-ice-fail")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run.CommitReconciliationAttempt == 1 && run.CommitReconciliationStatus == db.CommitReconciliationRetryRequired {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("commit failure was not recorded: status=%s reconciliation=%s attempts=%d", run.Status, run.CommitReconciliationStatus, run.CommitReconciliationAttempt)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	select {
@@ -676,7 +692,7 @@ func TestRunIcebergRegistrationFailsClearlyWhenSnapshotMissing(t *testing.T) {
 	ctx := context.Background()
 	createGRPCTestRegistrableRunAndTaskWithSnapshot(t, st, "run-ice-missing-snapshot", "job-ice-missing-snapshot", "task-ice-missing-snapshot", nil)
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, 5*time.Second, &fakeIcebergRegistrar{
+	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, &fakeIcebergRegistrar{
 		t:         t,
 		committed: make(chan struct{}),
 		reqCh:     make(chan icebergreg.RunRequest, 1),
@@ -704,7 +720,7 @@ func TestRunIcebergRegistrationSkipsExplicitDisabledSnapshot(t *testing.T) {
 		committed: make(chan struct{}),
 		reqCh:     make(chan icebergreg.RunRequest, 1),
 	}
-	srv := NewServer(nil, st, nil, crypto.Key{}, 5*time.Second, registrar)
+	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, registrar)
 
 	ran, _, err := srv.runIcebergRegistration(ctx, "run-ice-explicit-disabled")
 	if err != nil {
@@ -731,14 +747,19 @@ func mustJSONRaw(t *testing.T, v any) json.RawMessage {
 
 func openGRPCTestStore(t *testing.T) *db.Store {
 	t.Helper()
+
 	path := filepath.Join(t.TempDir(), "grpc-test.sqlite")
 	st, err := db.Open(context.Background(), db.Config{Path: path}, nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
+
+	st.SetMasterKey(grpcTestKey(t))
+
 	t.Cleanup(func() {
 		_ = st.Close()
 	})
+
 	return st
 }
 
@@ -862,7 +883,7 @@ func createGRPCTestRegistrableRunAndTaskWithSnapshot(t *testing.T, st *db.Store,
 	t.Helper()
 	ctx := context.Background()
 
-	srcSecret, err := crypto.Encrypt(crypto.Key{}, []byte(`{"dsn":"sqlserver://sa:pass@example:1433?database=SalesDB"}`), []byte("src"))
+	srcSecret, err := crypto.Encrypt(testCryptoKey, []byte(`{"dsn":"sqlserver://sa:pass@example:1433?database=SalesDB"}`), []byte("src"))
 	if err != nil {
 		t.Fatalf("encrypt source secret: %v", err)
 	}
@@ -877,7 +898,7 @@ func createGRPCTestRegistrableRunAndTaskWithSnapshot(t *testing.T, st *db.Store,
 		t.Fatalf("create source connection: %v", err)
 	}
 
-	tgtSecret, err := crypto.Encrypt(crypto.Key{}, []byte(`{"access_key_id":"minioadmin","secret_access_key":"minioadmin"}`), []byte("tgt"))
+	tgtSecret, err := crypto.Encrypt(testCryptoKey, []byte(`{"access_key_id":"minioadmin","secret_access_key":"minioadmin"}`), []byte("tgt"))
 	if err != nil {
 		t.Fatalf("encrypt target secret: %v", err)
 	}
@@ -944,7 +965,7 @@ func createGRPCTestQueryRegistrableRunAndTask(t *testing.T, st *db.Store, runID,
 	t.Helper()
 	ctx := context.Background()
 
-	srcSecret, err := crypto.Encrypt(crypto.Key{}, []byte(`{"dsn":"postgres://app:pass@example:5432/app?sslmode=disable"}`), []byte("src-query"))
+	srcSecret, err := crypto.Encrypt(testCryptoKey, []byte(`{"dsn":"postgres://app:pass@example:5432/app?sslmode=disable"}`), []byte("src-query"))
 	if err != nil {
 		t.Fatalf("encrypt source secret: %v", err)
 	}
@@ -959,7 +980,7 @@ func createGRPCTestQueryRegistrableRunAndTask(t *testing.T, st *db.Store, runID,
 		t.Fatalf("create source connection: %v", err)
 	}
 
-	tgtSecret, err := crypto.Encrypt(crypto.Key{}, []byte(`{"access_key_id":"minioadmin","secret_access_key":"minioadmin"}`), []byte("tgt-query"))
+	tgtSecret, err := crypto.Encrypt(testCryptoKey, []byte(`{"access_key_id":"minioadmin","secret_access_key":"minioadmin"}`), []byte("tgt-query"))
 	if err != nil {
 		t.Fatalf("encrypt target secret: %v", err)
 	}
@@ -1089,4 +1110,56 @@ func (f *fakeIcebergRegistrar) RegisterRun(_ context.Context, req icebergreg.Run
 	}
 	f.reqCh <- req
 	return f.result, nil
+}
+
+func grpcTestKey(t *testing.T) crypto.Key {
+	t.Helper()
+
+	t.Setenv(
+		"ORABBIT_MASTER_KEY",
+		"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+	)
+
+	k, err := crypto.LoadMasterKeyFromEnv()
+	if err != nil {
+		t.Fatalf("load test master key: %v", err)
+	}
+
+	return k
+}
+
+func TestReportTaskProgressRejectsOversizedMessage(t *testing.T) {
+	srv := NewServer(nil, openGRPCTestStore(t), nil, testCryptoKey, time.Second, nil)
+
+	_, err := srv.ReportTaskProgress(context.Background(), &grpcpb.ReportTaskProgressRequest{
+		Message: strings.Repeat("x", maxWorkerProgressMessageBytes+1),
+	})
+
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("code=%v want=%v err=%v", status.Code(err), codes.InvalidArgument, err)
+	}
+}
+
+func TestReportTaskProgressRejectsOversizedFields(t *testing.T) {
+	srv := NewServer(nil, openGRPCTestStore(t), nil, testCryptoKey, time.Second, nil)
+
+	_, err := srv.ReportTaskProgress(context.Background(), &grpcpb.ReportTaskProgressRequest{
+		FieldsJson: strings.Repeat("x", maxWorkerProgressFieldsBytes+1),
+	})
+
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("code=%v want=%v err=%v", status.Code(err), codes.InvalidArgument, err)
+	}
+}
+
+func TestReportMultipartLifecycleRejectsOversizedErrorMessage(t *testing.T) {
+	srv := NewServer(nil, openGRPCTestStore(t), nil, testCryptoKey, time.Second, nil)
+
+	_, err := srv.ReportMultipartLifecycle(context.Background(), &grpcpb.ReportMultipartLifecycleRequest{
+		ErrorMessage: strings.Repeat("x", maxMultipartErrorMessageBytes+1),
+	})
+
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("code=%v want=%v err=%v", status.Code(err), codes.InvalidArgument, err)
+	}
 }

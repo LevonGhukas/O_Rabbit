@@ -1,0 +1,152 @@
+name: MinIO images
+
+# Rebuilds levonghukas/minio and levonghukas/mc from pinned upstream source
+# with patched dependencies (docker/minio/Dockerfile). Pull requests build,
+# test and scan; pushes to main also publish <release>-r<revision> tags.
+on:
+  push:
+    branches: [main]
+    paths: ["docker/minio/**", ".github/workflows/minio-images.yml"]
+  pull_request:
+    paths: ["docker/minio/**", ".github/workflows/minio-images.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build, test, scan & push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Read pinned releases
+        id: v
+        run: |
+          get() { sed -n "s/^ARG $1=//p" docker/minio/Dockerfile; }
+          rev="$(get IMAGE_REVISION)"; minio="$(get MINIO_RELEASE)"; mc="$(get MC_RELEASE)"
+          test -n "$rev" && test -n "$minio" && test -n "$mc"
+          {
+            echo "minio_release=$minio"; echo "minio_tag=$minio-r$rev"
+            echo "mc_release=$mc";       echo "mc_tag=$mc-r$rev"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build minio (amd64, for tests)
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/minio
+          target: minio
+          platforms: linux/amd64
+          load: true
+          tags: minio-ci:minio
+          pull: true
+          no-cache-filters: runtime-base
+          cache-from: type=gha,scope=minio-minio
+          cache-to: type=gha,mode=max,scope=minio-minio
+
+      - name: Build mc (amd64, for tests)
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/minio
+          target: mc
+          platforms: linux/amd64
+          load: true
+          tags: minio-ci:mc
+          pull: true
+          no-cache-filters: runtime-base
+          cache-from: type=gha,scope=minio-mc
+          cache-to: type=gha,mode=max,scope=minio-mc
+
+      - name: Version check
+        run: |
+          docker run --rm minio-ci:minio --version | grep -F "${{ steps.v.outputs.minio_release }}"
+          docker run --rm minio-ci:mc --version | grep -F "${{ steps.v.outputs.mc_release }}"
+
+      # The dependency upgrades change code paths, so exercise real S3 calls:
+      # bucket, small object, and a multipart upload verified by checksum.
+      - name: Functional S3 test
+        run: |
+          docker network create minio-ft
+          docker run -d --name ft-minio --network minio-ft \
+            -e MINIO_ROOT_USER=ftuser -e MINIO_ROOT_PASSWORD=ftpassword123 minio-ci:minio
+          for _ in $(seq 1 30); do
+            docker exec ft-minio curl -fsS http://127.0.0.1:9000/minio/health/live && break
+            sleep 1
+          done
+          docker run --rm --network minio-ft --entrypoint sh minio-ci:mc -ec '
+            mc alias set t http://ft-minio:9000 ftuser ftpassword123 >/dev/null
+            mc mb t/functest
+            echo hello | mc pipe t/functest/small.txt
+            test "$(mc cat t/functest/small.txt)" = hello
+            head -c 67108864 /dev/urandom > /tmp/big
+            a=$(sha256sum /tmp/big | cut -d" " -f1)
+            mc cp /tmp/big t/functest/big.bin
+            b=$(mc cat t/functest/big.bin | sha256sum | cut -d" " -f1)
+            test "$a" = "$b"
+            mc rm t/functest/big.bin'
+
+      - name: Functional test logs
+        if: failure()
+        run: docker logs ft-minio || true
+
+      - name: Scan minio
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: minio-ci:minio
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Scan mc
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: minio-ci:mc
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Login to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push minio (amd64 + arm64)
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/minio
+          target: minio
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: true
+          sbom: true
+          tags: levonghukas/minio:${{ steps.v.outputs.minio_tag }}
+          pull: true
+          no-cache-filters: runtime-base
+          cache-from: type=gha,scope=minio-minio
+
+      - name: Push mc (amd64 + arm64)
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/minio
+          target: mc
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: true
+          sbom: true
+          tags: levonghukas/mc:${{ steps.v.outputs.mc_tag }}
+          pull: true
+          no-cache-filters: runtime-base
+          cache-from: type=gha,scope=minio-mc

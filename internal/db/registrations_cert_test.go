@@ -460,6 +460,10 @@ func TestHistoricalClassificationIsIdempotent(t *testing.T) {
 	registered := insertRegistrationFixture(t, st, "hist-registered", "other", 1, RegistrationRegistered)
 	_, _ = st.db.Exec(`UPDATE iceberg_registrations SET registered_snapshot_or_metadata_id='{"receipt":"verified"}' WHERE id=?`, registered.ID)
 	_ = insertRegistrationFixture(t, st, "hist-reconcile", "other", 2, RegistrationReconciling)
+	// Rows above are written as a pre-encryption release would have left them.
+	if err := st.MigrateLegacySecrets(ctx, st.masterKey); err != nil {
+		t.Fatal(err)
+	}
 	first, err := st.ReconcileHistoricalRegistrations(ctx, now)
 	if err != nil {
 		t.Fatal(err)

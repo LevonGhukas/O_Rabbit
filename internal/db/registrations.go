@@ -191,19 +191,34 @@ func ensureRegistrationTx(ctx context.Context, tx *sql.Tx, runID, datasetID, com
 
 func (s *Store) GetRegistrationForRun(ctx context.Context, runID string) (Registration, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id,run_id,dataset_id,dataset_sequence,target_key,commit_id,manifest_key,artifact_set_digest,backend_type,catalog_namespace,table_identifier,status,attempt_count,current_attempt_id,next_eligible_at,last_error_class,last_error_message,registered_snapshot_or_metadata_id,created_at,updated_at,registered_at,retry_override_config_json FROM iceberg_registrations WHERE run_id=? ORDER BY id LIMIT 1`, runID)
-	return scanRegistration(row)
+	return s.scanRegistration(row)
 }
 
 type rowScanner interface{ Scan(...any) error }
 
-func scanRegistration(row rowScanner) (Registration, error) {
+func registrationRetryOverrideAAD(registrationID string) []byte {
+	return []byte("registration-retry-override:" + registrationID)
+}
+
+func (s *Store) encryptRegistrationRetryOverride(registrationID string, plaintext []byte) (string, error) {
+	return encryptStoredJSON(s.masterKey, plaintext, registrationRetryOverrideAAD(registrationID))
+}
+
+func (s *Store) scanRegistration(row rowScanner) (Registration, error) {
 	var r Registration
 	var retryOverride string
 	err := row.Scan(&r.ID, &r.RunID, &r.DatasetID, &r.DatasetSequence, &r.TargetKey, &r.CommitID, &r.ManifestKey, &r.ArtifactSetDigest, &r.BackendType, &r.CatalogNamespace, &r.TableIdentifier, &r.Status, &r.AttemptCount, &r.CurrentAttemptID, &r.NextEligibleAt, &r.LastErrorClass, &r.LastErrorMessage, &r.Receipt, &r.CreatedAt, &r.UpdatedAt, &r.RegisteredAt, &retryOverride)
-	if strings.TrimSpace(retryOverride) != "" {
-		r.RetryOverrideConfigJSON = json.RawMessage(retryOverride)
+	if err != nil {
+		return r, err
 	}
-	return r, err
+	if strings.TrimSpace(retryOverride) != "" {
+		plaintext, derr := decryptStoredJSON(s.masterKey, retryOverride, registrationRetryOverrideAAD(r.ID))
+		if derr != nil {
+			return r, fmt.Errorf("registration %s retry override: %w", r.ID, derr)
+		}
+		r.RetryOverrideConfigJSON = json.RawMessage(plaintext)
+	}
+	return r, nil
 }
 
 // RequeueRegistrationManual moves a terminal, safe registration back to the durable worker queue.
@@ -225,7 +240,11 @@ func (s *Store) RequeueRegistrationManual(ctx context.Context, runID string, ove
 			return fmt.Errorf("registration retry requires a succeeded run with a complete commit")
 		}
 		row := tx.QueryRowContext(ctx, `SELECT id,run_id,dataset_id,dataset_sequence,target_key,commit_id,manifest_key,artifact_set_digest,backend_type,catalog_namespace,table_identifier,status,attempt_count,current_attempt_id,next_eligible_at,last_error_class,last_error_message,registered_snapshot_or_metadata_id,created_at,updated_at,registered_at,retry_override_config_json FROM iceberg_registrations WHERE run_id=? ORDER BY id LIMIT 1`, runID)
-		reg, err := scanRegistration(row)
+		reg, err := s.scanRegistration(row)
+		if err != nil {
+			return err
+		}
+		storedOverride, err := s.encryptRegistrationRetryOverride(reg.ID, override)
 		if err != nil {
 			return err
 		}
@@ -233,7 +252,7 @@ func (s *Store) RequeueRegistrationManual(ctx context.Context, runID string, ove
 		case RegistrationPending, RegistrationRetryRequired:
 			// The endpoint is idempotent for queued work, but a no-override retry
 			// must still clear a prior queued override before it is claimed.
-			if _, err := tx.ExecContext(ctx, `UPDATE iceberg_registrations SET retry_override_config_json=?,updated_at=? WHERE id=? AND status IN ('PENDING','RETRY_REQUIRED') AND current_attempt_id IS NULL`, string(override), now.UTC().Format(time.RFC3339Nano), reg.ID); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE iceberg_registrations SET retry_override_config_json=?,updated_at=? WHERE id=? AND status IN ('PENDING','RETRY_REQUIRED') AND current_attempt_id IS NULL`, storedOverride, now.UTC().Format(TimestampLayout), reg.ID); err != nil {
 				return err
 			}
 			reg.RetryOverrideConfigJSON = append(json.RawMessage(nil), override...)
@@ -245,8 +264,8 @@ func (s *Store) RequeueRegistrationManual(ctx context.Context, runID string, ove
 		default:
 			return fmt.Errorf("registration retry is not allowed while status is %s", reg.Status)
 		}
-		ns := now.UTC().Format(time.RFC3339Nano)
-		res, err := tx.ExecContext(ctx, `UPDATE iceberg_registrations SET status='PENDING',current_attempt_id=NULL,next_eligible_at=NULL,last_error_class='',last_error_message=NULL,retry_override_config_json=?,manual_retry_budget=manual_retry_budget+1,updated_at=? WHERE id=? AND status IN ('FAILED','CANCELED')`, string(override), ns, reg.ID)
+		ns := now.UTC().Format(TimestampLayout)
+		res, err := tx.ExecContext(ctx, `UPDATE iceberg_registrations SET status='PENDING',current_attempt_id=NULL,next_eligible_at=NULL,last_error_class='',last_error_message=NULL,retry_override_config_json=?,manual_retry_budget=manual_retry_budget+1,updated_at=? WHERE id=? AND status IN ('FAILED','CANCELED')`, storedOverride, ns, reg.ID)
 		if err != nil {
 			return err
 		}
@@ -280,8 +299,8 @@ func (s *Store) ClaimRegistration(ctx context.Context, now time.Time, policy Reg
 			return err
 		}
 		defer tx.Rollback()
-		row := tx.QueryRowContext(ctx, `SELECT r.id,r.run_id,r.dataset_id,r.dataset_sequence,r.target_key,r.commit_id,r.manifest_key,r.artifact_set_digest,r.backend_type,r.catalog_namespace,r.table_identifier,r.status,r.attempt_count,r.current_attempt_id,r.next_eligible_at,r.last_error_class,r.last_error_message,r.registered_snapshot_or_metadata_id,r.created_at,r.updated_at,r.registered_at,r.retry_override_config_json FROM iceberg_registrations r WHERE r.status IN ('PENDING','RETRY_REQUIRED') AND (r.next_eligible_at IS NULL OR r.next_eligible_at<=?) AND NOT EXISTS (SELECT 1 FROM iceberg_registrations p WHERE p.dataset_id=r.dataset_id AND p.target_key=r.target_key AND p.dataset_sequence<r.dataset_sequence AND p.status<>'REGISTERED') ORDER BY r.dataset_sequence,r.id LIMIT 1`, now.UTC().Format(time.RFC3339Nano))
-		r, err := scanRegistration(row)
+		row := tx.QueryRowContext(ctx, `SELECT r.id,r.run_id,r.dataset_id,r.dataset_sequence,r.target_key,r.commit_id,r.manifest_key,r.artifact_set_digest,r.backend_type,r.catalog_namespace,r.table_identifier,r.status,r.attempt_count,r.current_attempt_id,r.next_eligible_at,r.last_error_class,r.last_error_message,r.registered_snapshot_or_metadata_id,r.created_at,r.updated_at,r.registered_at,r.retry_override_config_json FROM iceberg_registrations r WHERE r.status IN ('PENDING','RETRY_REQUIRED') AND (r.next_eligible_at IS NULL OR r.next_eligible_at<=?) AND NOT EXISTS (SELECT 1 FROM iceberg_registrations p WHERE p.dataset_id=r.dataset_id AND p.target_key=r.target_key AND p.dataset_sequence<r.dataset_sequence AND p.status<>'REGISTERED') ORDER BY r.dataset_sequence,r.id LIMIT 1`, now.UTC().Format(TimestampLayout))
+		r, err := s.scanRegistration(row)
 		if err == sql.ErrNoRows {
 			blocked, qerr := tx.QueryContext(ctx, `SELECT r.id,p.id FROM iceberg_registrations r JOIN iceberg_registrations p ON p.dataset_id=r.dataset_id AND p.target_key=r.target_key AND p.dataset_sequence=(SELECT MIN(x.dataset_sequence) FROM iceberg_registrations x WHERE x.dataset_id=r.dataset_id AND x.target_key=r.target_key AND x.dataset_sequence<r.dataset_sequence AND x.status<>'REGISTERED') WHERE r.status IN ('PENDING','RETRY_REQUIRED')`)
 			if qerr != nil {
@@ -293,7 +312,7 @@ func (s *Store) ClaimRegistration(ctx context.Context, now time.Time, policy Reg
 					blocked.Close()
 					return err
 				}
-				if err := insertRegistrationEventTx(ctx, tx, "REGISTRATION_BLOCKED", rid, "", "WARN", "registration blocked by earlier unresolved work", now.UTC().Format(time.RFC3339Nano), map[string]any{"blocking_registration_id": blocker}); err != nil {
+				if err := insertRegistrationEventTx(ctx, tx, "REGISTRATION_BLOCKED", rid, "", "WARN", "registration blocked by earlier unresolved work", now.UTC().Format(TimestampLayout), map[string]any{"blocking_registration_id": blocker}); err != nil {
 					blocked.Close()
 					return err
 				}
@@ -309,7 +328,7 @@ func (s *Store) ClaimRegistration(ctx context.Context, now time.Time, policy Reg
 			return err
 		}
 		if r.AttemptCount >= policy.MaxAttempts+manualRetryBudget {
-			_, err = tx.ExecContext(ctx, `UPDATE iceberg_registrations SET status='FAILED',last_error_class='RETRY_LIMIT_EXHAUSTED',updated_at=? WHERE id=?`, now.UTC().Format(time.RFC3339Nano), r.ID)
+			_, err = tx.ExecContext(ctx, `UPDATE iceberg_registrations SET status='FAILED',last_error_class='RETRY_LIMIT_EXHAUSTED',updated_at=? WHERE id=?`, now.UTC().Format(TimestampLayout), r.ID)
 			if err != nil {
 				return err
 			}
@@ -321,8 +340,8 @@ func (s *Store) ClaimRegistration(ctx context.Context, now time.Time, policy Reg
 		}
 		num := r.AttemptCount + 1
 		aid := stableRegistrationID(r.ID, fmt.Sprint(num), token)
-		ns := now.UTC().Format(time.RFC3339Nano)
-		dl := now.Add(policy.LeaseDuration).UTC().Format(time.RFC3339Nano)
+		ns := now.UTC().Format(TimestampLayout)
+		dl := now.Add(policy.LeaseDuration).UTC().Format(TimestampLayout)
 		res, err := tx.ExecContext(ctx, `UPDATE iceberg_registrations SET status='REGISTERING',attempt_count=?,current_attempt_id=?,next_eligible_at=NULL,updated_at=? WHERE id=? AND status IN ('PENDING','RETRY_REQUIRED') AND current_attempt_id IS NULL`, num, aid, ns, r.ID)
 		if err != nil {
 			return err
@@ -353,7 +372,7 @@ func (s *Store) ClaimRegistration(ctx context.Context, now time.Time, policy Reg
 }
 
 func (s *Store) AdvanceRegistrationPhase(ctx context.Context, registrationID, attemptID, token, from, to string, now time.Time) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE iceberg_registration_attempts SET phase=?,updated_at=? WHERE id=? AND registration_id=? AND fencing_token=? AND status='ACTIVE' AND phase=? AND EXISTS(SELECT 1 FROM iceberg_registrations WHERE id=? AND current_attempt_id=? AND status='REGISTERING')`, to, now.UTC().Format(time.RFC3339Nano), attemptID, registrationID, token, from, registrationID, attemptID)
+	res, err := s.db.ExecContext(ctx, `UPDATE iceberg_registration_attempts SET phase=?,updated_at=? WHERE id=? AND registration_id=? AND fencing_token=? AND status='ACTIVE' AND phase=? AND EXISTS(SELECT 1 FROM iceberg_registrations WHERE id=? AND current_attempt_id=? AND status='REGISTERING')`, to, now.UTC().Format(TimestampLayout), attemptID, registrationID, token, from, registrationID, attemptID)
 	if err != nil {
 		return err
 	}
@@ -371,7 +390,7 @@ func (s *Store) PersistCatalogReceipt(ctx context.Context, registrationID, attem
 			return err
 		}
 		defer tx.Rollback()
-		ns := now.UTC().Format(time.RFC3339Nano)
+		ns := now.UTC().Format(TimestampLayout)
 		res, err := tx.ExecContext(ctx, `UPDATE iceberg_registration_attempts SET phase='CATALOG_COMMITTED',catalog_receipt=?,updated_at=? WHERE id=? AND registration_id=? AND fencing_token=? AND status='ACTIVE' AND phase='EXTERNAL_COMMIT_STARTED'`, receipt, ns, attemptID, registrationID, token)
 		if err != nil {
 			return err
@@ -414,7 +433,7 @@ func (s *Store) PersistCatalogNoOpReceipt(ctx context.Context, registrationID, a
 			return err
 		}
 		defer tx.Rollback()
-		ns := now.UTC().Format(time.RFC3339Nano)
+		ns := now.UTC().Format(TimestampLayout)
 		res, err := tx.ExecContext(ctx, `UPDATE iceberg_registration_attempts SET phase='CATALOG_COMMITTED',catalog_receipt=?,updated_at=? WHERE id=? AND registration_id=? AND fencing_token=? AND status='ACTIVE' AND phase='PREPARED'`, receipt, ns, attemptID, registrationID, token)
 		if err != nil {
 			return err
@@ -445,7 +464,7 @@ func (s *Store) CompleteRegistration(ctx context.Context, registrationID, attemp
 			return err
 		}
 		defer tx.Rollback()
-		ns := now.UTC().Format(time.RFC3339Nano)
+		ns := now.UTC().Format(TimestampLayout)
 		res, err := tx.ExecContext(ctx, `UPDATE iceberg_registration_attempts SET status='SUCCEEDED',phase='VERIFIED',finished_at=?,updated_at=? WHERE id=? AND registration_id=? AND fencing_token=? AND status='ACTIVE' AND phase='ICE_STATE_WRITING'`, ns, ns, attemptID, registrationID, token)
 		if err != nil {
 			return err
@@ -493,7 +512,7 @@ func (s *Store) FailRegistrationAttempt(ctx context.Context, registrationID, att
 				if b <= 0 {
 					b = time.Second
 				}
-				next = now.Add(b).UTC().Format(time.RFC3339Nano)
+				next = now.Add(b).UTC().Format(TimestampLayout)
 			} else {
 				class = "RETRY_LIMIT_EXHAUSTED"
 			}
@@ -512,11 +531,11 @@ func (s *Store) FailRegistrationAttempt(ctx context.Context, registrationID, att
 					break
 				}
 			}
-			next = now.Add(b).UTC().Format(time.RFC3339Nano)
+			next = now.Add(b).UTC().Format(TimestampLayout)
 		} else if retryable {
 			class = "RETRY_LIMIT_EXHAUSTED"
 		}
-		ns := now.UTC().Format(time.RFC3339Nano)
+		ns := now.UTC().Format(TimestampLayout)
 		_, err = tx.ExecContext(ctx, `UPDATE iceberg_registration_attempts SET status=?,finished_at=?,failure_class=?,failure_message=?,next_eligible_at=?,updated_at=? WHERE id=?`, astatus, ns, class, message, next, ns, attemptID)
 		if err != nil {
 			return err
@@ -550,7 +569,7 @@ func (s *Store) FailRegistrationAttempt(ctx context.Context, registrationID, att
 }
 
 func (s *Store) RenewRegistrationLease(ctx context.Context, registrationID, attemptID, token string, now time.Time, d time.Duration) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE iceberg_registration_attempts SET lease_deadline=?,last_renewed_at=?,updated_at=? WHERE id=? AND registration_id=? AND fencing_token=? AND status='ACTIVE' AND lease_deadline>?`, now.Add(d).UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano), attemptID, registrationID, token, now.UTC().Format(time.RFC3339Nano))
+	res, err := s.db.ExecContext(ctx, `UPDATE iceberg_registration_attempts SET lease_deadline=?,last_renewed_at=?,updated_at=? WHERE id=? AND registration_id=? AND fencing_token=? AND status='ACTIVE' AND lease_deadline>?`, now.Add(d).UTC().Format(TimestampLayout), now.UTC().Format(TimestampLayout), now.UTC().Format(TimestampLayout), attemptID, registrationID, token, now.UTC().Format(TimestampLayout))
 	if err != nil {
 		return err
 	}
@@ -569,7 +588,7 @@ func (s *Store) ExpireRegistrationAttempts(ctx context.Context, now time.Time, p
 			return err
 		}
 		defer tx.Rollback()
-		rows, err := tx.QueryContext(ctx, `SELECT a.id,a.registration_id,a.phase,r.attempt_count FROM iceberg_registration_attempts a JOIN iceberg_registrations r ON r.id=a.registration_id AND r.current_attempt_id=a.id WHERE a.status='ACTIVE' AND a.lease_deadline<=?`, now.UTC().Format(time.RFC3339Nano))
+		rows, err := tx.QueryContext(ctx, `SELECT a.id,a.registration_id,a.phase,r.attempt_count FROM iceberg_registration_attempts a JOIN iceberg_registrations r ON r.id=a.registration_id AND r.current_attempt_id=a.id WHERE a.status='ACTIVE' AND a.lease_deadline<=?`, now.UTC().Format(TimestampLayout))
 		if err != nil {
 			return err
 		}
@@ -596,7 +615,7 @@ func (s *Store) ExpireRegistrationAttempts(ctx context.Context, now time.Time, p
 				if b <= 0 {
 					b = time.Second
 				}
-				next = now.Add(b).UTC().Format(time.RFC3339Nano)
+				next = now.Add(b).UTC().Format(TimestampLayout)
 			} else if v.phase != "PREPARED" {
 				status, astatus, class = "RECONCILING", "RECONCILING", "EXTERNAL_COMMIT_AMBIGUOUS"
 			} else if v.n >= policy.MaxAttempts {
@@ -613,9 +632,9 @@ func (s *Store) ExpireRegistrationAttempts(ctx context.Context, now time.Time, p
 						break
 					}
 				}
-				next = now.Add(b).UTC().Format(time.RFC3339Nano)
+				next = now.Add(b).UTC().Format(TimestampLayout)
 			}
-			ns := now.UTC().Format(time.RFC3339Nano)
+			ns := now.UTC().Format(TimestampLayout)
 			_, err = tx.ExecContext(ctx, `UPDATE iceberg_registration_attempts SET status=?,finished_at=?,failure_class=?,updated_at=? WHERE id=? AND status='ACTIVE'`, astatus, ns, class, ns, v.id)
 			if err != nil {
 				return err
@@ -694,7 +713,7 @@ func (s *Store) CancelRegistration(ctx context.Context, registrationID string, n
 		if status == RegistrationRegistered || status == RegistrationFailed || status == RegistrationQuarantined || status == RegistrationCanceled {
 			return ErrRegistrationCancelTooLate
 		}
-		ns := now.UTC().Format(time.RFC3339Nano)
+		ns := now.UTC().Format(TimestampLayout)
 		switch {
 		case status == RegistrationPending || status == RegistrationRetryRequired:
 			res, err := tx.ExecContext(ctx, `UPDATE iceberg_registrations SET status='CANCELED',next_eligible_at=NULL,last_error_class='REGISTRATION_CANCELED',last_error_message='canceled by operator',updated_at=? WHERE id=? AND status=?`, ns, registrationID, status)
@@ -751,7 +770,7 @@ func (s *Store) RecordRegistrationStaleResult(ctx context.Context, registrationI
 			return err
 		}
 		defer tx.Rollback()
-		if err := insertRegistrationEventTx(ctx, tx, "REGISTRATION_STALE_RESULT_REJECTED", registrationID, attemptID, "WARN", "stale registration result rejected", now.UTC().Format(time.RFC3339Nano), map[string]any{"classification": classification}); err != nil {
+		if err := insertRegistrationEventTx(ctx, tx, "REGISTRATION_STALE_RESULT_REJECTED", registrationID, attemptID, "WARN", "stale registration result rejected", now.UTC().Format(TimestampLayout), map[string]any{"classification": classification}); err != nil {
 			return err
 		}
 		return tx.Commit()
@@ -787,7 +806,7 @@ func (s *Store) ReconcileHistoricalRegistrations(ctx context.Context, now time.T
 			items = append(items, v)
 		}
 		rows.Close()
-		ns := now.UTC().Format(time.RFC3339Nano)
+		ns := now.UTC().Format(TimestampLayout)
 		for _, v := range items {
 			c := HistoricalClassification{RunID: v.id}
 			var existingID, status, receipt string
@@ -806,21 +825,52 @@ func (s *Store) ReconcileHistoricalRegistrations(ctx context.Context, now time.T
 			} else if err != sql.ErrNoRows {
 				return err
 			} else {
-				var cfg registrationConfigIdentity
 				if strings.TrimSpace(v.cfg) == "" {
 					c.Classification = "NOT_CONFIGURED"
-				} else if json.Unmarshal([]byte(v.cfg), &cfg) != nil || !cfg.Enabled {
-					c.Classification = "CONFIGURATION_UNAVAILABLE"
 				} else {
-					var intent registrationCommitIntent
-					var manifest registrationManifest
-					if v.phase != "COMPLETE" || len(v.commit) != 64 || json.Unmarshal([]byte(v.intent), &intent) != nil || json.Unmarshal(intent.Manifest, &manifest) != nil || manifest.SchemaVersion != 2 || manifest.RunID != v.id || len(manifest.Artifacts) == 0 {
-						c.Classification = "UNSUPPORTED_LEGACY_COMMIT"
-					} else if err := ensureRegistrationTx(ctx, tx, v.id, v.dataset, v.commit, v.cfg, v.intent, ns); err != nil {
+					configBytes, err := s.decryptRunRegistrationConfig(v.id, v.cfg)
+					if err != nil {
+						return err
+					}
+
+					var cfg registrationConfigIdentity
+					if json.Unmarshal(configBytes, &cfg) != nil || !cfg.Enabled {
 						c.Classification = "CONFIGURATION_UNAVAILABLE"
 					} else {
-						c.Classification = "SAFE_TO_ENQUEUE"
-						_ = tx.QueryRowContext(ctx, `SELECT id FROM iceberg_registrations WHERE run_id=?`, v.id).Scan(&c.RegistrationID)
+						var intent registrationCommitIntent
+						var manifest registrationManifest
+
+						if v.phase != "COMPLETE" ||
+							len(v.commit) != 64 ||
+							json.Unmarshal([]byte(v.intent), &intent) != nil ||
+							json.Unmarshal(intent.Manifest, &manifest) != nil ||
+							manifest.SchemaVersion != 2 ||
+							manifest.RunID != v.id ||
+							len(manifest.Artifacts) == 0 {
+
+							c.Classification = "UNSUPPORTED_LEGACY_COMMIT"
+
+						} else if err := ensureRegistrationTx(
+							ctx,
+							tx,
+							v.id,
+							v.dataset,
+							v.commit,
+							string(configBytes),
+							v.intent,
+							ns,
+						); err != nil {
+
+							c.Classification = "CONFIGURATION_UNAVAILABLE"
+
+						} else {
+							c.Classification = "SAFE_TO_ENQUEUE"
+							_ = tx.QueryRowContext(
+								ctx,
+								`SELECT id FROM iceberg_registrations WHERE run_id=?`,
+								v.id,
+							).Scan(&c.RegistrationID)
+						}
 					}
 				}
 			}
