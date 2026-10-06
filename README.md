@@ -82,7 +82,12 @@ The three binaries are:
 Connections contain source or target metadata plus a secret payload. Jobs
 reference connections and describe extraction/planning options. A run snapshots
 one job execution and contains logical tasks; task attempts carry leases and
-fencing credentials. Events, artifact records, high-water marks, registration
+fencing credentials. When a run's tasks are created, the master records the
+job (with the planner's tuned options) and the connections' non-secret
+settings (source engine, target endpoint, region, bucket, prefix). Assignments,
+task credentials, the commit, and cleanup use that snapshot, so editing a job
+or connection affects only later runs. Credentials are always read from the
+connection, so rotating them applies to runs in flight. Events, artifact records, high-water marks, registration
 attempts, and cleanup records provide the durable execution history.
 
 ## Tech stack
@@ -192,13 +197,16 @@ split-worker Compose file translates its other connection settings into flags.
 | `ORABBIT_DB_PATH` | `./master.sqlite` | SQLite database path |
 | `ORABBIT_HTTP_ADDR` | `127.0.0.1:9100` | HTTP listen address |
 | `ORABBIT_GRPC_ADDR` | `127.0.0.1:9102` | gRPC listen address |
-| `ORABBIT_HTTP_AUTH_TOKEN` | empty | Bearer token for known API and SSE routes |
+| `ORABBIT_HTTP_AUTH_TOKEN` | empty | Bearer token for the HTTP API and SSE |
+| `ORABBIT_REMOTE_OPS_AUTH_TOKEN` | empty | Enables the remote operations API (SSH, Docker, deployments) and is the only token it accepts; must differ from the API token. Empty disables it |
 | `ORABBIT_WORKER_AUTH_TOKEN` | empty | Shared bearer token for worker control-plane RPCs; required for non-loopback gRPC |
-| `ORABBIT_MASTER_KEY` | empty | Base64 or hex encoded 32-byte AES-256 key |
+| `ORABBIT_MASTER_KEY` | required | Base64 or hex encoded 32-byte AES-256 key |
 | `ORABBIT_ICE_BIN` | `ice` | `ice` CLI executable used by `engine=ice` registration |
-| `ORABBIT_GRPC_INSECURE` | `true` | Disable master gRPC TLS |
+| `ORABBIT_GRPC_INSECURE` | `false` | Disable master gRPC TLS (loopback only) |
+| `ORABBIT_GRPC_ALLOW_INSECURE_REMOTE` | `false` | Permit plaintext gRPC on a non-loopback listener; isolated private networks only |
 | `ORABBIT_TLS_CERT_FILE` | empty | Master gRPC certificate |
 | `ORABBIT_TLS_KEY_FILE` | empty | Master gRPC private key |
+| `ORABBIT_WORKER_CERT_TTL` | `24h` | Lifetime of master-issued worker certificates (1h-720h); workers renew at two thirds of it |
 | `ORABBIT_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARN`, or `ERROR` |
 | `ORABBIT_LOG_FORMAT` | `json` | `json` or `text` |
 | `ORABBIT_TASK_LEASE_DURATION` | `30s` | Attempt lease duration |
@@ -219,8 +227,18 @@ split-worker Compose file translates its other connection settings into flags.
 | `ORABBIT_CANCELED_OBJECT_CLEANUP_SCAN_INTERVAL` | `5m` | Canceled-object scan cadence |
 | `ORABBIT_CANCELED_OBJECT_RETENTION` | `168h` | Quarantine before object removal |
 | `ORABBIT_CANCELED_OBJECT_CLEANUP_MAX_ATTEMPTS` | `5` | Object cleanup retry limit |
-| `ORABBIT_CANCELED_OBJECT_CLEANUP_DRY_RUN` | `true` | Report candidates without deletion |
+| `ORABBIT_CANCELED_OBJECT_CLEANUP_DRY_RUN` | `true` | **Nothing is deleted while `true`.** Candidates are verified and marked `WOULD_DELETE`; set `false` to delete (see below) |
 | `ORABBIT_FULL_RUN_RETAIN_COUNT` | `1` | Successful full-refresh datasets retained after Iceberg publication |
+| `ORABBIT_HISTORY_RETENTION` | `720h` | Age after which history of finished runs (events, failed-run attempts, old catalog attempts, leadership history) is pruned; `0` disables |
+| `ORABBIT_HISTORY_PRUNE_INTERVAL` | `1h` | History pruning cadence |
+| `ORABBIT_COMMIT_TIMEOUT` | `30m` | Bound on one publication attempt of a run (also the startup commit-recovery budget) |
+| `ORABBIT_COMMIT_MAX_ATTEMPTS` | `5` | Retries of a failing commit before operator action is required |
+| `ORABBIT_REGISTRATION_TIMEOUT` | `30m` | Bound on one catalog registration |
+| `ORABBIT_REGISTRATION_LEASE_DURATION` | `30s` | Catalog registration attempt lease (min `3s`) |
+| `ORABBIT_REGISTRATION_MAX_ATTEMPTS` | `5` | Catalog registration attempts |
+| `ORABBIT_RECONCILIATION_LEASE_DURATION` | `30s` | Catalog observation attempt lease (min `3s`) |
+| `ORABBIT_RECONCILIATION_MAX_ATTEMPTS` | `5` | Catalog observation attempts |
+| `ORABBIT_DB_READ_CONNS` | `4` | Read-only SQLite connections for list, metrics and SSE queries; writes always use one connection |
 
 Admission limits are layered. `ORABBIT_MAX_ACTIVE_RUNS` counts durable
 `RUNNING` and `COMMITTING` runs; excess planned runs keep their tasks
@@ -244,9 +262,8 @@ counts, connected workers, and master logs before raising a limit. Repeated
 upload waiting with healthy task-lease renewal indicates the global upload
 limit is full.
 
-If `ORABBIT_MASTER_KEY` is absent, connection secrets use plaintext
-compatibility storage. Remote SSH credentials and saved remote configuration
-versions require a master key. Keep the key stable: replacing or losing it makes
+The master refuses to start without `ORABBIT_MASTER_KEY`; every stored secret
+is encrypted with it. Keep the key stable: replacing or losing it makes
 previously encrypted values unreadable.
 
 Generate suitable secrets without placing their values in source control:
@@ -275,15 +292,18 @@ These values configure logging and managed temporary storage directly:
 | `ORABBIT_TEMP_MIN_FREE_BYTES` | `1073741824` (1 GiB) |
 | `ORABBIT_TEMP_MAX_MANAGED_BYTES` | `107374182400` (100 GiB) |
 | `ORABBIT_TEMP_DRY_RUN` | `false` |
+| `ORABBIT_SOURCE_QUERY_TIMEOUT` | `2h`; bound on one partition's source query, `0` for no limit (flag `-source-query-timeout`) |
 
 The worker flags `-master`, `-worker-id`, `-worker-addr`, `-insecure`,
-`-tls-ca`, `-tls-server-name`, `-worker-auth-token`, and `-poll` configure
+`-tls-ca`, `-tls-server-name`, `-identity-dir`, `-enrollment-token`,
+`-worker-auth-token`, and `-poll` configure
 control-plane access. Prefer the environment variable over the token flag so
 the credential is not exposed in process arguments. In
 `docker-compose.worker.yml`, `ORABBIT_MASTER_GRPC_ADDR`,
 `ORABBIT_GRPC_INSECURE`, `ORABBIT_TLS_CA_FILE`,
 `ORABBIT_TLS_SERVER_NAME`, and `ORABBIT_WORKER_POLL` are translated to those
-flags.
+flags. The worker reads `ORABBIT_WORKER_IDENTITY_DIR` and
+`ORABBIT_WORKER_ENROLLMENT_TOKEN` directly; see Worker identity below.
 
 ### Connector and CLI environment
 
@@ -308,6 +328,13 @@ Example deployment files are provided as `.env.master.example`,
 ## Running locally
 
 ### Native processes
+
+The master requires an encryption key. Generate one once and keep it; losing
+it makes stored secrets unreadable:
+
+```sh
+export ORABBIT_MASTER_KEY="$(openssl rand -base64 32)"
+```
 
 Start a master:
 
@@ -357,8 +384,9 @@ make docker-build-master
 make docker-build-worker
 ```
 
-The root `docker-compose.yaml` defines MinIO, PostgreSQL, an Ice REST catalog,
-ClickHouse, one master, and two workers:
+The root `docker-compose.yaml` is the local development stack: MinIO,
+PostgreSQL, an Ice REST catalog, ClickHouse (with the catalog attached as
+database `ice`), one master, and two workers. All ports bind to 127.0.0.1:
 
 ```sh
 export ORABBIT_HTTP_AUTH_TOKEN="$(openssl rand -hex 32)"
@@ -368,16 +396,9 @@ docker compose ps
 docker compose down
 ```
 
-At the current revision it mounts `./docker/postgres/initdb`, but that directory
-is not present in the repository. Create it (it may be empty) or remove that
-mount before using this compose file.
-
 Supporting compose files include:
 
 - `docker-compose.ex-db.yml`: development source databases
-- `docker-compose.ice-rest-catalog.yml`: standalone Ice REST catalog
-- `docker-compose.clickhouse-altinity.yml`: standalone Altinity ClickHouse
-  integration example
 - `docker-compose.master.yml`, `.worker.yml`, and `.minio.yml`: split-host
   deployments driven by environment files
 
@@ -481,10 +502,36 @@ orabbit-client run submit --file ./run.yaml
 orabbit-client run watch <run-id>
 ```
 
+Target metadata must include `endpoint` and `bucket`; invalid or wrongly typed
+metadata is rejected instead of being defaulted. For AWS use the regional
+endpoint, for example `https://s3.eu-west-1.amazonaws.com`. `region` defaults to
+`us-east-1` and `force_path_style` to `true`.
+
 When `auto_tune` is `false`, set `max_in_flight_tasks`, `fetch_limit`, and at
 least one of `planned_tasks` or `chunk_size`. FlightSQL requires `source.sql`,
 `incremental: false`, `auto_tune: false`, no `id_column`, and no manual planning
 fields.
+
+### Incremental cursors and late-arriving rows
+
+An incremental run resumes strictly after the dataset's high-water mark, the
+largest cursor value committed so far. Rows that become visible later with a
+cursor value at or below that mark are then never exported. That happens with
+`updated_at` set when a transaction starts but committed after a run read past
+it, with sequences that commit out of order, and with ties at the boundary.
+
+Set the job option `cursor_lookback` to re-read a window below the mark on
+every run: a count for integer cursors (`"cursor_lookback": "1000"`) or a
+duration for date and timestamp cursors (`"30m"`, `"48h"`). Choose it larger
+than your longest transaction or replication delay. Re-read rows are exported
+again, so deduplicate them downstream, for example with Iceberg upsert on the
+table's key. String, UUID and decimal cursors do not support a lookback. The
+high-water mark never moves backwards.
+
+Parquet artifacts are verified by the worker after upload. When the object
+store reports SHA-256 checksums (`x-amz-checksum-sha256`), the worker records
+the store's checksum and the commit verifies each object with a HEAD request;
+otherwise the master re-reads and hashes the object.
 
 ### Iceberg defaults and per-run options
 
@@ -593,11 +640,106 @@ The default HTTP and gRPC listeners bind to `127.0.0.1`. A non-loopback HTTP
 listener is accepted only when `ORABBIT_HTTP_AUTH_TOKEN` is set and must sit
 behind a trusted TLS-terminating proxy or tunnel; the built-in HTTP listener
 does not terminate TLS. A non-loopback gRPC listener is accepted only when
-`ORABBIT_WORKER_AUTH_TOKEN` is set. The master validates the bearer credential
-on every worker-facing RPC; health checks remain unauthenticated.
-`ORABBIT_GRPC_INSECURE=true` disables encryption, not worker authentication,
-and is suitable only for loopback or a trusted private container/VPN network.
-Any public gRPC endpoint must use both worker authentication and TLS.
+`ORABBIT_WORKER_AUTH_TOKEN` is set and gRPC TLS is configured
+(`ORABBIT_TLS_CERT_FILE`/`ORABBIT_TLS_KEY_FILE`). With TLS, every worker RPC
+also requires a master-issued worker certificate; see Worker identity below.
+The master validates the
+bearer credential on every worker-facing RPC; health checks remain
+unauthenticated. gRPC TLS is on by default; `ORABBIT_GRPC_INSECURE=true`
+disables encryption (not worker authentication) and is accepted only on a
+loopback listener, unless `ORABBIT_GRPC_ALLOW_INSECURE_REMOTE=true` is also set
+for an isolated private network such as a single-host Docker network. Task
+assignments carry source and target credentials, so never combine those two
+settings on a routable network.
+
+`ORABBIT_MASTER_KEY` is required. At startup the master encrypts any legacy
+plaintext connection secrets, SSH credentials, saved config versions, run
+registration configs, and registration retry overrides, and it refuses to read
+plaintext secrets afterwards.
+
+### Worker identity
+
+With gRPC TLS enabled, each worker has an immutable identity issued by the
+master:
+
+1. An operator creates an enrollment token:
+   `POST /workers/enrollment-tokens` with an optional body
+   `{"pool": "default", "ttl_seconds": 3600, "max_uses": 1}`. The token is
+   returned once; the master stores only its SHA-256 digest.
+2. The worker starts with `ORABBIT_WORKER_ENROLLMENT_TOKEN`, generates its own
+   private key, and exchanges the token and a CSR for a certificate. The
+   master chooses the worker ID (a UUID) and places it in the certificate's
+   only SAN, `spiffe://orabbit/worker/<uuid>`. The certificate and key are
+   stored together in `ORABBIT_WORKER_IDENTITY_DIR` (mode 0600).
+3. The worker renews the certificate at two thirds of its lifetime
+   (`ORABBIT_WORKER_CERT_TTL`, default 24h). The master closes connections
+   after an hour, so the renewed certificate is picked up on reconnect.
+
+The master signs worker certificates with its own CA, which it creates on
+first start and stores with its key encrypted by `ORABBIT_MASTER_KEY`.
+Every worker RPC except enrollment must present such a certificate. The
+master takes the worker ID from the verified certificate: a request
+`worker_id` naming another worker is rejected, so registration, heartbeats,
+leases, assignments, and attempt audit events always carry the authenticated
+identity. `POST /workers/identities/{id}/revoke` blocks an identity on its
+next RPC; `GET /workers/identities` lists identities with their pool and
+status.
+
+With `ORABBIT_GRPC_INSECURE=true` there are no certificates: the request
+`worker_id` is trusted and pools are not enforced. Use it only for loopback
+development.
+
+### Task credentials and worker pools
+
+Task assignments carry no secrets. After a worker leases a task it calls
+`GetTaskCredentials`, which returns the source DSN and S3 credentials only to
+the authenticated worker holding that attempt's live lease.
+
+Jobs run in the worker pool named by `options_json.worker_pool` (or
+`worker_pool` on `/api/runs/submit`), default `default`. A worker only
+receives tasks, and so credentials, of jobs in the pool of the enrollment
+token it enrolled with. Use separate pools to keep workers of one trust zone
+away from another zone's source databases and buckets.
+
+S3 targets can avoid giving workers long-lived keys by setting target
+connection metadata `"credential_mode": "sts"` and `"sts_role_arn"`. The
+master then calls STS `AssumeRole` with the stored keys and a session policy
+that allows only `PutObject`, `GetObject`, `AbortMultipartUpload`, and
+`ListMultipartUploadParts` under `<dataset prefix>/_runs/run-<run id>/`.
+Workers receive the temporary credentials (default one hour,
+`sts_duration_seconds` 900-43200) and fetch fresh ones from the master before
+they expire. STS is called at `sts_endpoint`, else the target `endpoint` for
+S3-compatible stores such as MinIO, else AWS. Without `credential_mode`, the
+stored keys are delivered to the leaseholder as before. Source databases have
+no portable temporary-credential mechanism; give each source connection a
+read-only database user.
+
+### Source database access
+
+Give every source connection a **read-only database user**. It is the only
+control that holds on every engine; the checks below are defense in depth:
+
+- Postgres, MySQL, MariaDB and ClickHouse sessions are opened read-only
+  (`default_transaction_read_only`, `transaction_read_only` / `tx_read_only`,
+  `readonly=2`), so writes and DDL are refused by the database.
+- SQL Server, Oracle, Trino, Cassandra and MongoDB have no session-level
+  read-only mode that O_Rabbit can set; for them the read-only user is the
+  only enforcement.
+- Query mode accepts a single `SELECT`/`WITH` statement and rejects write
+  keywords. `where_clause` must be one boolean expression: no `;`, no
+  comments, balanced parentheses, and no write keywords.
+
+A read-only session does not stop functions with side effects outside the
+data, such as `pg_terminate_backend` or `dblink`; only database privileges do.
+
+### HTTP limits and pagination
+
+Request bodies are limited to 4 MiB. The server bounds slow clients (10 s to
+send headers, 60 s to send a request, 2 min idle); responses have no write
+timeout so SSE streams can stay open. `GET /runs` and `GET /connections`
+accept `limit` (1-1000) and `cursor`; the next page's cursor is returned in
+the `X-Next-Cursor` response header, and the body stays a JSON array. Without
+`limit` the full list is returned.
 
 ### Core routes
 
@@ -606,6 +748,9 @@ Any public gRPC endpoint must use both worker authentication and TLS.
 | `GET` | `/healthz`, `/ready`, `/status` | Liveness, durable-leader readiness, and master/leadership status |
 | `GET` | `/metrics` | Bounded-label Prometheus lifecycle metrics |
 | `GET` | `/workers` or `/api/workers` | Active workers; use `?all=true` for all |
+| `POST` | `/workers/enrollment-tokens` | Create a one-time worker enrollment token |
+| `GET` | `/workers/identities` | List master-issued worker identities |
+| `POST` | `/workers/identities/{id}/revoke` | Revoke a worker identity |
 | `GET`, `POST` | `/connections` | List or create connections |
 | `GET`, `PUT`, `DELETE` | `/connections/{id}` | Read, replace, or delete a connection |
 | `GET`, `POST` | `/jobs` | List or create jobs |
@@ -674,15 +819,28 @@ The master also exposes a control-panel API for registered SSH servers:
 - `GET /deployments/{id}` and `/deployments/{id}/stream`
 - `GET /executions/{id}` and `/executions/{id}/stream`
 
-These operations execute allowlisted actions on remote hosts. SSH credentials
-and stored configuration versions require `ORABBIT_MASTER_KEY`.
+These operations execute allowlisted actions on remote hosts, so they are
+separated from the data API:
+
+- They are disabled (404) unless `ORABBIT_REMOTE_OPS_AUTH_TOKEN` is set, and
+  then accept only that token. The API token cannot reach them, and the
+  remote-operations token cannot reach the data API. Audit records identify
+  which token was used.
+- Every server must have a pinned SSH host key (`host_key_fingerprint`, for
+  example `SHA256:...`). An unpinned or mismatching host key is refused before
+  credentials are sent; the error shows the key the server presented so you
+  can verify it out of band (`ssh-keyscan <host> | ssh-keygen -lf -`) and pin
+  it.
+
+SSH credentials and stored configuration versions require `ORABBIT_MASTER_KEY`.
 
 ### gRPC service
 
 Workers use the `orabbit.v1.ControlPlane` service on port 9102:
 `RegisterWorker`, `Heartbeat`, `RequestTask`, `RenewTaskLease`,
-`AcquireUploadCapacity`, `ReleaseUploadCapacity`, `ReportTaskProgress`, and
-`ReportTaskResult`. When configured, the worker sends
+`AcquireUploadCapacity`, `ReleaseUploadCapacity`, `ReportTaskProgress`,
+`ReportTaskResult`, `EnrollWorker`, `RenewWorkerCertificate`, and
+`GetTaskCredentials`. When configured, the worker sends
 `ORABBIT_WORKER_AUTH_TOKEN` as gRPC `authorization: Bearer ...` metadata on
 every call. See
 [proto/controlplane.proto](proto/controlplane.proto) for the wire contract.
@@ -708,8 +866,11 @@ Only one master process may use a given local database identity. The database
 uses durable leadership records and mutation fencing in addition to a local
 process lock.
 
-Back up the SQLite database together with its `-wal` and `-shm` files using a
-SQLite-aware backup procedure. Preserve `ORABBIT_MASTER_KEY` separately.
+The master is a single point of failure: there is no automatic failover or
+replication. Run Litestream beside it (`docker-compose.master.backup.yml`) or
+take `sqlite3 .backup` copies, and preserve `ORABBIT_MASTER_KEY` separately.
+See [docs/master-backup-restore.md](docs/master-backup-restore.md) for the
+deployment model, backup setup, restore runbook and history retention.
 
 ## Development
 
@@ -736,27 +897,50 @@ go test ./internal/grpc -run TestName -v
 ```
 
 Tests are package-level unit and integration-style tests using temporary SQLite
-databases and test servers. There is no committed CI workflow and no enforced
-coverage threshold.
+databases and test servers. There is no enforced coverage threshold.
+
+CI (`.github/workflows/orrabit-docker.yml`) runs on every push and pull
+request:
+
+- `go test -race ./...` and `go vet ./...`
+- connector integration tests against PostgreSQL, MySQL, MariaDB and ClickHouse
+  service containers (`ORABBIT_IT_*_DSN`, see
+  `internal/connectors/readonly_integration_test.go`)
+- `golangci-lint` with `.golangci.yml`, `shellcheck` on the shell scripts, and
+  `docker compose config` on every Compose file
+- `scripts/vulncheck.sh`: `govulncheck`, failing on any reachable
+  vulnerability that is not reviewed in `.govulncheck-allow`. Remove an entry
+  as soon as a fixed release exists.
+
+Master and worker images are built, smoke-tested (non-root user, binary
+starts) and scanned on every run; `.github/workflows/minio-images.yml` does the
+same for the MinIO images when `docker/minio/` changes. On pushes, images are
+built, scanned with Trivy (fails on fixable CRITICAL/HIGH
+findings), and pushed as `levonghukas/orabbit:sha-<commit>-<target>`, plus
+`<version>-<target>` and `<major>.<minor>-<target>` for `vX.Y.Z` tags and
+`latest-<target>` for `main`. Deploy by SHA or version tag, not `latest`.
+Release by pushing a semver tag:
+
+```sh
+git tag v1.2.3 && git push origin v1.2.3
+```
 
 The generated files in `internal/grpcpb` correspond to
 `proto/controlplane.proto`; no protobuf generation target or pinned generator
 tooling is currently provided.
 
-Worker/master compatibility is an exact protocol-version contract. See
-[Worker protocol compatibility](docs/WORKER_PROTOCOL_COMPATIBILITY.md) for the
-accepted version, fail-closed matrix, rolling-upgrade order, deprecation
-policy, and protobuf reservation rules.
+Worker/master compatibility is an exact protocol-version contract:
+`WorkerProtocolVersion` in `internal/grpc/server.go`. The master rejects any
+other version, so bump it whenever the worker RPC contract changes, and deploy
+the master and workers together.
 
 For connector fixtures:
 
 ```sh
 docker compose -f docker-compose.ex-db.yml up -d
-./seed-databases.sh
 ```
 
-The seed script covers PostgreSQL, MySQL, MariaDB, Oracle, MongoDB, SQL Server,
-Cassandra, and ClickHouse containers. It does not seed Trino.
+The containers start empty; create test tables with each database's client.
 
 ## Deployment
 
@@ -792,8 +976,51 @@ For production:
 - replace all example MinIO and catalog credentials
 - review cleanup dry-run and retention settings before enabling deletion
 
-The repository does not contain a CI/CD pipeline, Kubernetes manifests,
-Terraform, or an automated release process.
+MinIO no longer publishes container images, and its repository is archived
+(`RELEASE.2025-10-15T17-29-55Z` is the final release). The Compose files use
+`levonghukas/minio` and `levonghukas/mc`, built unmodified from pinned upstream
+tags by `docker/minio/Dockerfile` (AGPL-3.0; the exact source commit is in the
+image labels). The MinIO server runs as uid `10001`. Because MinIO no longer
+receives fixes, prefer managed S3 (or another maintained S3-compatible store)
+for production data. To rebuild or bump the images, see the header of
+`docker/minio/Dockerfile`.
+
+Both images run as the unprivileged user `orabbit` (uid/gid `10001`), and
+`/var/lib/orabbit` is owned by it. New named volumes inherit that ownership.
+Volumes created by older, root-running images must be handed over once, with the
+service stopped:
+
+```sh
+docker run --rm -v orabbit-master_orabbit_master_data:/d debian:bookworm-slim chown -R 10001:10001 /d
+docker run --rm -v orabbit-worker_orabbit_worker_identity:/d debian:bookworm-slim chown -R 10001:10001 /d
+```
+
+Mounted TLS certificates and keys must be readable by uid `10001`.
+
+The repository does not contain Kubernetes manifests or Terraform.
+
+### Observability
+
+`GET /metrics` (Prometheus text format, behind the API token) exposes:
+
+- lifecycle gauges: runs, tasks, leases, registrations, reconciliation, leadership
+- `orabbit_grpc_server_handled_total{method,code}` and
+  `orabbit_grpc_server_handling_seconds{method}`: worker RPC rate, errors, latency
+- `orabbit_http_requests_total{route,code}` and
+  `orabbit_http_request_duration_seconds{route}`: API traffic by route pattern
+  (SSE streams are counted, not timed)
+- `orabbit_task_results_total{status}`, `orabbit_task_rows_read_total`,
+  `orabbit_task_bytes_read_total`, `orabbit_task_bytes_written_total`: task
+  outcomes and throughput (use `rate()`)
+- `orabbit_run_commit_duration_seconds{outcome}`: publication latency
+- Go runtime and process metrics (`go_*`, `process_*`)
+
+Tracing is off by default. Set the standard OpenTelemetry variables on the
+master and workers to export spans over OTLP/gRPC, for example
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317`. Optional:
+`OTEL_TRACES_SAMPLER=parentbased_traceidratio`, `OTEL_TRACES_SAMPLER_ARG=0.1`,
+`OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`. Worker RPCs and HTTP requests
+are traced, and trace context propagates from worker to master.
 
 ## Troubleshooting
 
@@ -817,19 +1044,104 @@ the token.
 ### The master cannot decrypt stored secrets
 
 Restore the exact `ORABBIT_MASTER_KEY` used when the values were written. A new
-key cannot decrypt existing AES-GCM blobs.
+key cannot decrypt existing AES-GCM blobs. To change the key, rotate it
+instead (below).
+
+### Rotating the master key
+
+`orabbit-master rotate-master-key` re-encrypts every stored secret in one
+transaction: connection secrets, remote-server credentials, config versions,
+per-run registration configs, registration retry overrides and the worker CA
+key. If any value does not open with the current key, nothing is changed.
+
+1. Back up the database (see [docs/master-backup-restore.md](docs/master-backup-restore.md)).
+2. Stop the master. The command takes the master's lock and refuses to run while
+   a master holds it.
+3. Run it with both keys:
+
+   ```sh
+   ORABBIT_MASTER_KEY=<current key> ORABBIT_NEW_MASTER_KEY="$(openssl rand -base64 32)" \
+     orabbit-master rotate-master-key -db /var/lib/orabbit/master.sqlite
+   ```
+
+   With Docker Compose:
+
+   ```sh
+   docker compose -f docker-compose.master.yml run --rm -e ORABBIT_NEW_MASTER_KEY=<new key> orabbit-master rotate-master-key
+   ```
+
+4. Replace `ORABBIT_MASTER_KEY` with the new key everywhere it is stored, and
+   start the master. Existing worker certificates stay valid; the CA itself is
+   unchanged.
+5. Older backups still need the old key, so keep it until they expire.
+
+### Master exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Requested shutdown (SIGINT/SIGTERM), including one that interrupted startup recovery |
+| `1` | Runtime failure: startup recovery failed, leadership was lost, or the HTTP/gRPC server failed |
+| `2` | Invalid configuration, including a missing or malformed `ORABBIT_MASTER_KEY` |
+
+Run the master under a supervisor that restarts it on non-zero exit
+(`restart: on-failure` or `unless-stopped`, or a Kubernetes Deployment). On
+every exit the master releases its leadership lease, so a replacement can
+take over without waiting for the lease to expire. On shutdown it stops
+accepting work and waits up to 30 seconds for in-flight HTTP and gRPC
+requests before closing them; runs interrupted mid-commit are resumed by the
+next leader.
 
 ### TLS startup or worker connection fails
 
 When master `-insecure=false`, both `-tls-cert` and `-tls-key` are required.
 Workers must use `-insecure=false`, a trusted `-tls-ca`, and, when needed,
-`-tls-server-name`.
+`-tls-server-name`. "worker certificate required; enroll the worker first"
+means the worker has no identity: start it once with
+`ORABBIT_WORKER_ENROLLMENT_TOKEN`. "worker identity is unknown or revoked"
+means the identity was revoked or the master database was replaced; enroll
+again with a new token and a fresh `ORABBIT_WORKER_IDENTITY_DIR`.
 
-### A canceled run leaves objects temporarily
+### Starting a run returns `dataset_busy` (409)
 
-Canceled objects are quarantined and cleanup defaults to dry-run for seven
-days. Review the cleanup records and explicitly change the dry-run setting only
-after validating the target and retention policy.
+A dataset (target bucket and prefix) has at most one active run. Starting
+another run for it, including a second start of the same job, is rejected
+rather than replacing the active run. The error details name the run holding
+the dataset (`active_run_id`, `active_job_id`, `active_run_status`). Wait for
+that run to finish, or cancel it explicitly with
+`orabbit-client run cancel <run-id>` (`POST /runs/{id}/cancel`), then retry.
+Canceling stops its attempts and quarantines its uploaded objects for cleanup.
+
+A run left in `PLANNING` without tasks by a master crash is marked `FAILED`
+at the next master startup, which frees its dataset.
+
+### A canceled or failed run leaves objects behind
+
+Objects that no published dataset will reference enter one cleanup path:
+
+- completed uploads of canceled attempts, when the run is canceled;
+- accepted artifacts of `FAILED` or `CANCELED` runs that never began a commit;
+- completed multipart uploads of attempts that failed, expired or were
+  canceled and were never accepted, in any finished run.
+
+The master discovers them on every cleanup scan once the run has no active
+attempt or open upload. Each object is quarantined for
+`ORABBIT_CANCELED_OBJECT_RETENTION` (7 days), re-checked against run, commit
+and registration state, and its size, SHA-256 and metadata are verified before
+any delete. Runs whose commit started and then failed are not collected
+automatically. Neither are small single-request uploads of failed attempts,
+because the master never learns their keys; both stay under the run's
+`_runs/run-<id>/` prefix.
+
+**Cleanup is dry-run by default: with `ORABBIT_CANCELED_OBJECT_CLEANUP_DRY_RUN=true`
+nothing is ever deleted.** Candidates only get `dry_run_result=WOULD_DELETE`
+and a `canceled object delete scheduled` event. To enable deletion:
+
+1. Review candidates in the `canceled_object_cleanup` field of `GET /runs/{id}` and confirm
+   the listed keys are really unreferenced in your target bucket.
+2. Confirm the retention period gives you enough time to notice mistakes, and
+   ideally enable bucket versioning.
+3. Set `ORABBIT_CANCELED_OBJECT_CLEANUP_DRY_RUN=false` and restart the master.
+   Candidates already marked `WOULD_DELETE` are deleted on their next retry.
 
 ### Root Docker Compose fails on the PostgreSQL mount
 

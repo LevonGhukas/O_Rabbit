@@ -14,6 +14,7 @@ func TestGlobalActiveRunAdmissionIsAtomicAndReusesTerminalCapacity(t *testing.T)
 	ctx := context.Background()
 
 	const runs = 8
+	createRunConnections(t, st, "src", "dst")
 	for i := 0; i < runs; i++ {
 		jobID := fmt.Sprintf("admission-job-%02d", i)
 		runID := fmt.Sprintf("admission-run-%02d", i)
@@ -107,6 +108,7 @@ func TestGlobalRunAdmissionPreservesPerJobTaskLimit(t *testing.T) {
 	st.SetMaxActiveRuns(1)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 29, 13, 0, 0, 0, time.UTC)
+	createRunConnections(t, st, "src", "dst")
 	if err := st.CreateJob(ctx, Job{ID: "limited-job", Name: "limited-job", SourceConnectionID: "src", TargetConnectionID: "dst", SourceSQL: "select 1", TargetNamespace: "ns", TargetTable: "tbl", WriteMode: "append", OptionsJSON: []byte(`{"max_in_flight_tasks":1}`)}); err != nil {
 		t.Fatal(err)
 	}
@@ -134,5 +136,19 @@ func TestGlobalRunAdmissionPreservesPerJobTaskLimit(t *testing.T) {
 	}
 	if _, ok, err := st.AssignNextPendingTaskWithLease(ctx, "", "worker-2", now.Add(2*time.Second), policy, fixedGenerator("limited-attempt-2"), fixedGenerator("limited-fence-2")); err != nil || !ok {
 		t.Fatalf("per-job capacity was not reused ok=%v err=%v", ok, err)
+	}
+}
+
+// createRunConnections creates the source and target connections a run's
+// configuration snapshot reads when its tasks start.
+func createRunConnections(t *testing.T, st *Store, sourceID, targetID string) {
+	t.Helper()
+	for _, c := range []Connection{
+		{ID: sourceID, Name: sourceID, Kind: "source", Engine: "postgres", MetadataJSON: []byte(`{}`), SecretEncBlob: []byte{1}},
+		{ID: targetID, Name: targetID, Kind: "target", Engine: "s3", MetadataJSON: []byte(`{"bucket":"b"}`), SecretEncBlob: []byte{1}},
+	} {
+		if err := st.CreateConnection(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

@@ -45,6 +45,9 @@ type runSubmitRequest struct {
 	Performance runSubmitPerformanceRequest `json:"performance"`
 	Iceberg     runSubmitIcebergRequest     `json:"iceberg"`
 	Consistency runSubmitConsistencyRequest `json:"consistency"`
+	// WorkerPool limits the run's tasks and credentials to workers enrolled
+	// into this pool. Empty means "default".
+	WorkerPool string `json:"worker_pool,omitempty"`
 }
 
 type runSubmitConsistencyRequest struct {
@@ -99,6 +102,7 @@ type existingJobRunRequest struct {
 }
 
 type validatedRunSubmitSpec struct {
+	WorkerPool              string
 	SourceEngine            string
 	SourceDSN               string
 	SourceMode              string
@@ -681,7 +685,7 @@ func (s *Server) activeWorkerCount(ctx context.Context) int {
 	if s == nil || s.st == nil {
 		return 0
 	}
-	cutoff := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
+	cutoff := db.FormatTimestamp(time.Now().UTC().Add(-30 * time.Second))
 	workers, err := s.st.ListWorkersActive(ctx, cutoff)
 	if err != nil {
 		return 0
@@ -815,9 +819,19 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 	if icebergTable == "" {
 		icebergTable = icebergreg.DefaultTable(engine, sourceName)
 	}
+	if clause := strings.TrimSpace(req.Source.WhereClause); clause != "" {
+		if err := connectors.ValidateWhereClause(clause); err != nil {
+			return validatedRunSubmitSpec{}, invalidSubmitField("source.where_clause", err.Error(), nil)
+		}
+	}
+	workerPool := strings.TrimSpace(req.WorkerPool)
+	if workerPool != "" && !jobopts.ValidWorkerPool(workerPool) {
+		return validatedRunSubmitSpec{}, invalidSubmitField("worker_pool", "worker_pool must be 1-63 lowercase letters, digits, '-' or '_', starting with a letter or digit", nil)
+	}
 	// Build the spec once so every submit path carries the same source
 	// options (e.g. column_types); Iceberg only adds its own fields below.
 	spec := validatedRunSubmitSpec{
+		WorkerPool:              workerPool,
 		SourceEngine:            engine,
 		SourceDSN:               sourceDSN,
 		SourceMode:              sourceMode,
@@ -979,6 +993,10 @@ func buildFrontendJobRequest(spec validatedRunSubmitSpec, sourceConnectionID, ta
 		"select_columns":         spec.SelectColumns,
 		"column_types":           spec.ColumnTypes,
 	}
+	if spec.WorkerPool != "" {
+		options["worker_pool"] = spec.WorkerPool
+	}
+
 	if strings.TrimSpace(spec.RecordPath) != "" {
 		options["record_path"] = strings.TrimSpace(spec.RecordPath)
 	}
@@ -1079,7 +1097,10 @@ func (s *Server) buildExistingJobRunRegistrationConfig(ctx context.Context, job 
 		table = strings.TrimSpace(jobRegCfg.Table)
 	}
 	if table == "" {
-		opts, _ := jobopts.Parse(job.OptionsJSON)
+		opts, err := jobopts.Parse(job.OptionsJSON)
+		if err != nil {
+			return nil, fmt.Errorf("job options are invalid: %w", err)
+		}
 		sourceTable := strings.TrimSpace(opts.Table)
 		if sourceTable == "" {
 			sourceTable = job.TargetTable
@@ -1110,29 +1131,26 @@ func (s *Server) buildExistingJobRunRegistrationConfig(ctx context.Context, job 
 }
 
 func (s *Server) loadConnectionS3Config(conn db.Connection) (s3io.Config, error) {
-	var metadata map[string]any
-	_ = json.Unmarshal(conn.MetadataJSON, &metadata)
-
+	target, err := dataset.ParseTarget(conn.MetadataJSON)
+	if err != nil {
+		return s3io.Config{}, err
+	}
 	secretPlain, err := crypto.Decrypt(s.k, conn.SecretEncBlob, []byte(conn.ID))
 	if err != nil {
 		return s3io.Config{}, err
 	}
 	var secret map[string]any
-	_ = json.Unmarshal(secretPlain, &secret)
-
-	forcePathStyle := true
-	if v, ok := metadata["force_path_style"].(bool); ok {
-		forcePathStyle = v
+	if err := json.Unmarshal(secretPlain, &secret); err != nil {
+		return s3io.Config{}, fmt.Errorf("target connection secret is not a JSON object: %w", err)
 	}
-	cfg := s3io.Config{
-		Endpoint:        strings.TrimSpace(anyStringValue(metadata["endpoint"])),
-		Region:          strings.TrimSpace(anyStringValue(metadata["region"])),
-		Bucket:          strings.TrimSpace(anyStringValue(metadata["bucket"])),
-		ForcePathStyle:  forcePathStyle,
+	return s3io.Config{
+		Endpoint:        target.Endpoint,
+		Region:          target.Region,
+		Bucket:          target.Bucket,
+		ForcePathStyle:  target.ForcePathStyle,
 		AccessKeyID:     strings.TrimSpace(anyStringValue(secret["access_key_id"])),
 		SecretAccessKey: strings.TrimSpace(anyStringValue(secret["secret_access_key"])),
-	}
-	return cfg, nil
+	}, nil
 }
 
 func anyStringValue(v any) string {

@@ -49,7 +49,7 @@ func TestClickHouseTypeMapping(t *testing.T) {
 		hasDecimal bool
 		wantType   arrow.DataType
 	}{
-		{"UInt64", 0, 0, false, arrow.BinaryTypes.String},
+		{"UInt64", 0, 0, false, &arrow.Decimal128Type{Precision: 20, Scale: 0}},
 		{"UInt32", 0, 0, false, arrow.PrimitiveTypes.Int64},
 		{"UInt16", 0, 0, false, arrow.PrimitiveTypes.Uint16},
 		{"UInt8", 0, 0, false, arrow.PrimitiveTypes.Uint8},
@@ -214,4 +214,3 @@ func TestClickHouseUInt32ParquetRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(len(values)), meta.RowCount)
 }
-

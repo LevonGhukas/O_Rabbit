@@ -1,17 +1,14 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 )
 
 func TestHandleMaintenanceSubmitMethodNotAllowed(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{}, "")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/maintenance", nil)
@@ -24,7 +21,7 @@ func TestHandleMaintenanceSubmitMethodNotAllowed(t *testing.T) {
 }
 
 func TestHandleMaintenanceSubmitInvalidJSON(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{}, "")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/maintenance", strings.NewReader("{"))
@@ -37,7 +34,7 @@ func TestHandleMaintenanceSubmitInvalidJSON(t *testing.T) {
 }
 
 func TestHandleMaintenanceSubmitInvalidOperation(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{}, "")
 
 	body := `{"operation":"drop"}`
 	rec := httptest.NewRecorder()
@@ -50,8 +47,8 @@ func TestHandleMaintenanceSubmitInvalidOperation(t *testing.T) {
 	}
 }
 
-func TestHandleMaintenanceSubmitCompact(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, "")
+func TestHandleMaintenanceSubmitCompactNotImplemented(t *testing.T) {
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{}, "")
 
 	body := `{
 		"operation":"compact",
@@ -63,28 +60,13 @@ func TestHandleMaintenanceSubmitCompact(t *testing.T) {
 
 	srv.handleMaintenanceSubmit(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d want=%d", rec.Code, http.StatusOK)
-	}
-
-	var resp map[string]string
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatal(err)
-	}
-
-	if resp["status"] != "submitted" {
-		t.Fatalf("status=%q", resp["status"])
-	}
-	if resp["operation"] != "compact" {
-		t.Fatalf("operation=%q", resp["operation"])
-	}
-	if resp["table"] != "orders.events" {
-		t.Fatalf("table=%q", resp["table"])
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status=%d want=%d", rec.Code, http.StatusNotImplemented)
 	}
 }
 
-func TestHandleMaintenanceSubmitVacuum(t *testing.T) {
-	srv := NewServer(nil, nil, nil, crypto.Key{}, StatusInfo{}, "")
+func TestHandleMaintenanceSubmitVacuumNotImplemented(t *testing.T) {
+	srv := NewServer(nil, nil, nil, testCryptoKey, StatusInfo{}, "")
 
 	body := `{
 		"operation":"vacuum",
@@ -96,7 +78,7 @@ func TestHandleMaintenanceSubmitVacuum(t *testing.T) {
 
 	srv.handleMaintenanceSubmit(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d want=%d", rec.Code, http.StatusOK)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status=%d want=%d", rec.Code, http.StatusNotImplemented)
 	}
 }

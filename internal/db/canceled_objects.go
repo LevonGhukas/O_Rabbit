@@ -102,24 +102,117 @@ func (s *Store) createCanceledObjectCandidatesTx(ctx context.Context, tx *sql.Tx
 		return err
 	}
 	defer rows.Close()
+	var found []CanceledObjectCandidate
 	for rows.Next() {
 		var c CanceledObjectCandidate
 		if err := rows.Scan(&c.RunID, &c.TaskID, &c.AttemptID, &c.ObjectKey, &c.ExpectedSize, &c.ExpectedSHA256, &c.DatasetID); err != nil {
 			return err
 		}
-		c.ID = canceledCandidateID(c.AttemptID, c.ObjectKey, c.ExpectedSHA256)
-		res, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO canceled_object_candidates(id,run_id,task_id,attempt_id,dataset_id,object_key,expected_size,expected_sha256,status,eligibility_reason,discovered_at,quarantine_until,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'QUARANTINED','CANCELED_ATTEMPT_COMPLETED_UPLOAD',?,?,?,?)`, c.ID, c.RunID, c.TaskID, c.AttemptID, c.DatasetID, c.ObjectKey, c.ExpectedSize, c.ExpectedSHA256, now, quarantine, now, now)
-		if err != nil {
+		found = append(found, c)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, c := range found {
+		if _, err := insertCanceledObjectCandidateTx(ctx, tx, c, "CANCELED_ATTEMPT_COMPLETED_UPLOAD", now, quarantine); err != nil {
 			return err
 		}
-		if n, _ := res.RowsAffected(); n == 1 {
-			for _, event := range []string{"CANCELED_OBJECT_DISCOVERED", "CANCELED_OBJECT_QUARANTINED"} {
-				fields, _ := json.Marshal(map[string]any{"event_type": event, "candidate_id": c.ID, "task_id": c.TaskID, "attempt_id": c.AttemptID, "object_key": c.ObjectKey, "quarantine_until": quarantine})
-				_, _ = tx.ExecContext(ctx, `INSERT OR IGNORE INTO events(id,run_id,ts,level,message,fields_json) VALUES(?,?,?,?,?,?)`, "canceled-object-event-"+c.ID+"-"+strings.ToLower(event), runID, now, "WARN", strings.ToLower(strings.ReplaceAll(event, "_", " ")), string(fields))
+	}
+	return nil
+}
+
+// insertCanceledObjectCandidateTx quarantines one object for cleanup. It is
+// idempotent per (attempt, key, digest) and reports whether a row was added.
+func insertCanceledObjectCandidateTx(ctx context.Context, tx *sql.Tx, c CanceledObjectCandidate, reason, now, quarantine string) (bool, error) {
+	c.ID = canceledCandidateID(c.AttemptID, c.ObjectKey, c.ExpectedSHA256)
+	res, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO canceled_object_candidates(id,run_id,task_id,attempt_id,artifact_id,dataset_id,object_key,expected_size,expected_sha256,status,eligibility_reason,discovered_at,quarantine_until,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'QUARANTINED',?,?,?,?,?)`, c.ID, c.RunID, c.TaskID, c.AttemptID, c.ArtifactID, c.DatasetID, c.ObjectKey, c.ExpectedSize, c.ExpectedSHA256, reason, now, quarantine, now, now)
+	if err != nil {
+		return false, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return false, nil
+	}
+	for _, event := range []string{"CANCELED_OBJECT_DISCOVERED", "CANCELED_OBJECT_QUARANTINED"} {
+		fields, _ := json.Marshal(map[string]any{"event_type": event, "candidate_id": c.ID, "task_id": c.TaskID, "attempt_id": c.AttemptID, "object_key": c.ObjectKey, "eligibility_reason": reason, "quarantine_until": quarantine})
+		_, _ = tx.ExecContext(ctx, `INSERT OR IGNORE INTO events(id,run_id,ts,level,message,fields_json) VALUES(?,?,?,?,?,?)`, "canceled-object-event-"+c.ID+"-"+strings.ToLower(event), c.RunID, now, "WARN", strings.ToLower(strings.ReplaceAll(event, "_", " ")), string(fields))
+	}
+	return true, nil
+}
+
+// orphanDiscoveryQueries find uploaded objects that no published run will
+// ever reference. Both only consider settled runs: no attempt still ACTIVE
+// and no multipart upload still open.
+var orphanDiscoveryQueries = []struct{ reason, query string }{
+	// Accepted artifacts of FAILED or CANCELED runs that never began
+	// publication. A commit that started and failed is left to the operator.
+	{"UNPUBLISHED_RUN_ARTIFACT", `
+		SELECT ar.run_id,ar.task_id,ar.attempt_id,ar.id,ar.object_key,ar.byte_size,ar.sha256,r.dataset_key
+		FROM task_artifacts ar JOIN runs r ON r.id=ar.run_id
+		WHERE r.status IN ('FAILED','CANCELED') AND r.commit_id='' AND r.commit_phase=''
+		  AND NOT EXISTS(SELECT 1 FROM task_attempts a JOIN tasks t ON t.id=a.task_id WHERE t.run_id=r.id AND a.status='ACTIVE')
+		  AND NOT EXISTS(SELECT 1 FROM multipart_uploads m WHERE m.run_id=r.id AND m.status NOT IN ('COMPLETED','ABORTED'))
+		  AND NOT EXISTS(SELECT 1 FROM canceled_object_candidates c WHERE c.object_key=ar.object_key)
+		LIMIT ?`},
+	// Completed uploads of attempts that failed, expired or were canceled and
+	// whose object was never accepted, in any finished run.
+	{"UNACCEPTED_ATTEMPT_COMPLETED_UPLOAD", `
+		SELECT m.run_id,m.task_id,m.attempt_id,'',m.object_key,m.object_size,m.object_sha256,r.dataset_key
+		FROM multipart_uploads m
+		JOIN runs r ON r.id=m.run_id
+		JOIN task_attempts a ON a.id=m.attempt_id
+		WHERE r.status IN ('SUCCEEDED','FAILED','CANCELED') AND m.status='COMPLETED'
+		  AND a.status IN ('FAILED','EXPIRED','CANCELED')
+		  AND NOT EXISTS(SELECT 1 FROM task_artifacts ar WHERE ar.object_key=m.object_key)
+		  AND NOT EXISTS(SELECT 1 FROM canceled_object_candidates c WHERE c.object_key=m.object_key)
+		LIMIT ?`},
+}
+
+// DiscoverOrphanedObjects quarantines up to limit objects left behind by
+// failed runs and superseded attempts, so the canceled-object cleanup path
+// verifies and removes them after the retention period. It returns the number
+// of new candidates.
+func (s *Store) DiscoverOrphanedObjects(ctx context.Context, now time.Time, limit int) (int, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	retention := s.canceledObjectRetention
+	if retention <= 0 {
+		retention = 24 * time.Hour
+	}
+	ns := FormatTimestamp(now)
+	quarantine := canceledObjectTimestamp(now.Add(retention))
+	added := 0
+	err := s.withTx(ctx, nil, func(tx *sql.Tx) error {
+		for _, q := range orphanDiscoveryQueries {
+			rows, err := tx.QueryContext(ctx, q.query, limit)
+			if err != nil {
+				return err
+			}
+			var found []CanceledObjectCandidate
+			for rows.Next() {
+				var c CanceledObjectCandidate
+				if err := rows.Scan(&c.RunID, &c.TaskID, &c.AttemptID, &c.ArtifactID, &c.ObjectKey, &c.ExpectedSize, &c.ExpectedSHA256, &c.DatasetID); err != nil {
+					_ = rows.Close()
+					return err
+				}
+				found = append(found, c)
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+			for _, c := range found {
+				ok, err := insertCanceledObjectCandidateTx(ctx, tx, c, q.reason, ns, quarantine)
+				if err != nil {
+					return err
+				}
+				if ok {
+					added++
+				}
 			}
 		}
-	}
-	return rows.Err()
+		return nil
+	})
+	return added, err
 }
 
 const canceledObjectSelect = `SELECT id,run_id,task_id,attempt_id,artifact_id,dataset_id,object_key,expected_size,expected_sha256,object_version,status,eligibility_reason,reference_decision,reference_evidence_digest,discovered_at,quarantine_until,COALESCE(last_verified_at,''),delete_attempt_count,operator_action_required,COALESCE(current_attempt_id,''),last_error_class,dry_run_result FROM canceled_object_candidates`
@@ -135,12 +228,12 @@ func scanCanceledObject(row rowScanner, c *CanceledObjectCandidate) error {
 
 func (s *Store) GetCanceledObjectCandidate(ctx context.Context, id string) (CanceledObjectCandidate, error) {
 	var c CanceledObjectCandidate
-	err := scanCanceledObject(s.db.QueryRowContext(ctx, canceledObjectSelect+` WHERE id=?`, id), &c)
+	err := scanCanceledObject(s.rdb.QueryRowContext(ctx, canceledObjectSelect+` WHERE id=?`, id), &c)
 	return c, err
 }
 
 func (s *Store) ListCanceledObjectCandidates(ctx context.Context, runID string) ([]CanceledObjectCandidate, error) {
-	rows, err := s.db.QueryContext(ctx, canceledObjectSelect+` WHERE run_id=? ORDER BY discovered_at,id`, runID)
+	rows, err := s.rdb.QueryContext(ctx, canceledObjectSelect+` WHERE run_id=? ORDER BY discovered_at,id`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +250,7 @@ func (s *Store) ListCanceledObjectCandidates(ctx context.Context, runID string) 
 }
 
 func (s *Store) CancelCanceledObjectCleanup(ctx context.Context, candidateID string, now time.Time) error {
-	ns := now.UTC().Format(time.RFC3339Nano)
+	ns := now.UTC().Format(TimestampLayout)
 	return s.withTx(ctx, nil, func(tx *sql.Tx) error {
 		var current string
 		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(current_attempt_id,'') FROM canceled_object_candidates WHERE id=? AND status<>'DELETED'`, candidateID).Scan(&current); err != nil {
@@ -172,7 +265,7 @@ func (s *Store) CancelCanceledObjectCleanup(ctx context.Context, candidateID str
 }
 
 func referenceEvidenceTx(ctx context.Context, tx *sql.Tx, c CanceledObjectCandidate, now time.Time) (ReferenceEvidence, error) {
-	e := ReferenceEvidence{CandidateID: c.ID, Checks: map[string]bool{}, Details: map[string]string{}, ObservedAt: now.UTC().Format(time.RFC3339Nano)}
+	e := ReferenceEvidence{CandidateID: c.ID, Checks: map[string]bool{}, Details: map[string]string{}, ObservedAt: now.UTC().Format(TimestampLayout)}
 	var commitID, commitIntent, registrationConfig string
 	if err := tx.QueryRowContext(ctx, `SELECT status,commit_phase,commit_id,commit_intent_json,registration_config_json FROM runs WHERE id=?`, c.RunID).Scan(&e.RunStatus, &e.CommitPhase, &commitID, &commitIntent, &registrationConfig); err != nil {
 		return e, err
@@ -192,14 +285,22 @@ func referenceEvidenceTx(ctx context.Context, tx *sql.Tx, c CanceledObjectCandid
 	e.Checks["commit_identity"] = commitID != "" || e.CommitPhase != "" || strings.Contains(commitIntent, c.ObjectKey)
 	e.Checks["registration_evidence"] = registrations > 0
 	e.Checks["registration_configured"] = strings.TrimSpace(registrationConfig) != ""
+	// An unpublished run is FAILED or CANCELED and never began a commit, so
+	// no catalog or dataset can reference its objects.
+	unpublished := (e.RunStatus == "FAILED" || e.RunStatus == "CANCELED") && commitID == "" && e.CommitPhase == ""
+	attemptDead := e.AttemptStatus == "CANCELED" || e.AttemptStatus == "FAILED" || e.AttemptStatus == "EXPIRED"
 	switch {
-	case e.RunStatus != "CANCELED" || e.TaskStatus != "CANCELED" || e.AttemptStatus != "CANCELED":
+	case e.RunStatus != "CANCELED" && e.RunStatus != "FAILED" && e.RunStatus != "SUCCEEDED", e.AttemptStatus == "ACTIVE":
 		e.Decision = "ACTIVE"
-	case e.Checks["artifact_reference"] || e.Checks["commit_identity"]:
+	case strings.Contains(commitIntent, c.ObjectKey):
+		e.Decision = "REFERENCED"
+	case !unpublished && (e.Checks["artifact_reference"] || !attemptDead):
+		// In a run that published (or tried to), accepted objects and objects
+		// of live attempts are part of the dataset.
 		e.Decision = "REFERENCED"
 	case e.Checks["active_multipart"]:
 		e.Decision = "ACTIVE"
-	case e.Checks["registration_evidence"] || e.Checks["registration_configured"]:
+	case unpublished && e.Checks["registration_evidence"]:
 		e.Decision = "AMBIGUOUS"
 	default:
 		e.Decision = "UNREFERENCED"
@@ -241,12 +342,12 @@ func (s *Store) ClaimCanceledObjectCleanup(ctx context.Context, now time.Time, l
 				status = "BLOCKED_REFERENCED"
 				event = "CANCELED_OBJECT_REFERENCED"
 			}
-			_, err = tx.ExecContext(ctx, `UPDATE canceled_object_candidates SET status=?,reference_decision=?,reference_evidence_digest=?,operator_action_required=?,updated_at=? WHERE id=?`, status, evidence.Decision, evidence.EvidenceDigest, boolInt(status == "BLOCKED_AMBIGUOUS"), now.UTC().Format(time.RFC3339Nano), c.ID)
+			_, err = tx.ExecContext(ctx, `UPDATE canceled_object_candidates SET status=?,reference_decision=?,reference_evidence_digest=?,operator_action_required=?,updated_at=? WHERE id=?`, status, evidence.Decision, evidence.EvidenceDigest, boolInt(status == "BLOCKED_AMBIGUOUS"), now.UTC().Format(TimestampLayout), c.ID)
 			if err != nil {
 				return err
 			}
 			fields, _ := json.Marshal(map[string]any{"event_type": event, "candidate_id": c.ID, "reference_decision": evidence.Decision, "evidence_digest": evidence.EvidenceDigest})
-			_, _ = tx.ExecContext(ctx, `INSERT OR IGNORE INTO events(id,run_id,ts,level,message,fields_json) VALUES(?,?,?,?,?,?)`, "canceled-object-event-"+c.ID+"-"+strings.ToLower(event), c.RunID, now.UTC().Format(time.RFC3339Nano), "WARN", strings.ToLower(strings.ReplaceAll(event, "_", " ")), string(fields))
+			_, _ = tx.ExecContext(ctx, `INSERT OR IGNORE INTO events(id,run_id,ts,level,message,fields_json) VALUES(?,?,?,?,?,?)`, "canceled-object-event-"+c.ID+"-"+strings.ToLower(event), c.RunID, now.UTC().Format(TimestampLayout), "WARN", strings.ToLower(strings.ReplaceAll(event, "_", " ")), string(fields))
 			return tx.Commit()
 		}
 		token, err := randomCanceledObjectToken()
@@ -256,8 +357,8 @@ func (s *Store) ClaimCanceledObjectCleanup(ctx context.Context, now time.Time, l
 		a.AttemptNumber = c.DeleteAttemptCount + 1
 		a.ID = fmt.Sprintf("cleanup-%s-%d", c.ID, a.AttemptNumber)
 		a.CandidateID, a.FencingToken = c.ID, token
-		a.LeaseDeadline = now.Add(lease).UTC().Format(time.RFC3339Nano)
-		ns := now.UTC().Format(time.RFC3339Nano)
+		a.LeaseDeadline = now.Add(lease).UTC().Format(TimestampLayout)
+		ns := now.UTC().Format(TimestampLayout)
 		res, err := tx.ExecContext(ctx, `UPDATE canceled_object_candidates SET status='DELETE_PENDING',reference_decision='UNREFERENCED',reference_evidence_digest=?,delete_attempt_count=?,current_attempt_id=?,updated_at=? WHERE id=? AND current_attempt_id IS NULL`, evidence.EvidenceDigest, a.AttemptNumber, a.ID, ns, c.ID)
 		if err != nil {
 			return err
@@ -296,7 +397,7 @@ func (s *Store) AuthorizeCanceledObjectDelete(ctx context.Context, candidateID, 
 		if err != nil || evidence.Decision != "UNREFERENCED" || evidence.EvidenceDigest != c.EvidenceDigest {
 			return ErrCanceledObjectFenced
 		}
-		ns := now.UTC().Format(time.RFC3339Nano)
+		ns := now.UTC().Format(TimestampLayout)
 		_, err = tx.ExecContext(ctx, `UPDATE canceled_object_candidates SET status='DELETING',object_version=?,last_verified_at=?,delete_requested_at=?,updated_at=? WHERE id=? AND current_attempt_id=?`, version, ns, ns, ns, candidateID, attemptID)
 		if err != nil {
 			return err
@@ -343,7 +444,7 @@ func (s *Store) FinishCanceledObjectCleanup(ctx context.Context, candidateID, at
 				status, event, operator, next = "OPERATOR_REVIEW", "CANCELED_OBJECT_CLEANUP_EXHAUSTED", 1, nil
 			}
 		}
-		ns := now.UTC().Format(time.RFC3339Nano)
+		ns := now.UTC().Format(TimestampLayout)
 		_, err = tx.ExecContext(ctx, `UPDATE canceled_object_cleanup_attempts SET status=?,finished_at=?,next_eligible_at=?,error_class=?,updated_at=? WHERE id=? AND fencing_token=?`, attemptStatus, ns, next, class, ns, attemptID, token)
 		if err != nil {
 			return err
@@ -369,7 +470,7 @@ func (s *Store) ExpireCanceledObjectCleanupAttempts(ctx context.Context, now tim
 			return err
 		}
 		defer tx.Rollback()
-		expired, err = expireCanceledObjectCleanupAttemptsTx(ctx, tx, now.UTC().Format(time.RFC3339Nano), nil)
+		expired, err = expireCanceledObjectCleanupAttemptsTx(ctx, tx, now.UTC().Format(TimestampLayout), nil)
 		if err != nil {
 			return err
 		}

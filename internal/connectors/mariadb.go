@@ -28,7 +28,7 @@ var (
 )
 
 func OpenMariaDB(ctx context.Context, dsn string) (*MariaDB, error) {
-	m, err := OpenMySQL(ctx, dsn)
+	m, err := openMySQL(ctx, dsn, "tx_read_only")
 	if err != nil {
 		return nil, err
 	}

@@ -144,4 +144,3 @@ func TestMySQLIntUnsignedPromotion(t *testing.T) {
 		})
 	}
 }
-
