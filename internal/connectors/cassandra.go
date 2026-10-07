@@ -707,13 +707,7 @@ func cassandraColumnType(name, cqlType string, nullable bool) (*sql.ColumnType, 
 		scanType: cqlType,
 		nullable: nullable,
 	}
-	driverName := fmt.Sprintf("cassandra-type-synth-%p", &def)
-	sql.Register(driverName, &cassandraTypeDriver{cols: []cassandraColDef{def}})
-
-	db, err := sql.Open(driverName, "")
-	if err != nil {
-		return nil, fmt.Errorf("cassandraColumnType: open synthetic db: %w", err)
-	}
+	db := openSyntheticDB(&cassandraTypeDriver{cols: []cassandraColDef{def}})
 	defer db.Close()
 
 	rows, err := db.QueryContext(context.Background(), "")
@@ -809,22 +803,30 @@ func newCassandraRows(iter *gocql.Iter, cols []string) (*sql.Rows, error) {
 		return nil, fmt.Errorf("cassandra rows iterator: %w", err)
 	}
 
-	d := &cassandraRowsDriver{cols: cols, data: data}
-	driverName := fmt.Sprintf("cassandra-rows-%p", d)
-	sql.Register(driverName, d)
-
-	db, err := sql.Open(driverName, "")
-	if err != nil {
-		return nil, fmt.Errorf("cassandra rows: open synthetic db: %w", err)
-	}
-
+	db := openSyntheticDB(&cassandraRowsDriver{cols: cols, data: data})
 	rows, err := db.QueryContext(context.Background(), "")
+	// Closing the DB right away is safe: the open rows keep their connection
+	// until rows.Close, and nothing else uses this DB.
+	_ = db.Close()
 	if err != nil {
-		db.Close()
 		return nil, fmt.Errorf("cassandra rows: query: %w", err)
 	}
 	return rows, nil
 }
+
+// openSyntheticDB wraps an in-process driver in a *sql.DB without
+// sql.Register. Registration is global, permanent and panics on a duplicate
+// name, so registering one driver per call both leaked every driver (and the
+// rows it held) and could panic when a reused address produced a duplicate
+// name.
+func openSyntheticDB(d driver.Driver) *sql.DB {
+	return sql.OpenDB(syntheticConnector{d: d})
+}
+
+type syntheticConnector struct{ d driver.Driver }
+
+func (c syntheticConnector) Connect(context.Context) (driver.Conn, error) { return c.d.Open("") }
+func (c syntheticConnector) Driver() driver.Driver                        { return c.d }
 
 // cassandraToDriverValue converts a gocql scan value to a driver.Value.
 func cassandraToDriverValue(v any) (driver.Value, error) {
