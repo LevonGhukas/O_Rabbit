@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -23,7 +24,6 @@ import (
 )
 
 const (
-	defaultFrontendSourceConnectionName = ""
 	defaultFrontendTargetConnectionName = "s3"
 	defaultFrontendTargetNamespace      = "orders"
 	defaultFrontendTargetTable          = "Orders"
@@ -176,12 +176,32 @@ func cloneRequestWithPath(r *http.Request, path string) *http.Request {
 	return clone
 }
 
-func frontendSourceConnectionName(engine string) string {
+// sourceConnectionIdentityDomain separates one-shot source identity tags
+// from any other use of crypto.IdentityTag.
+const sourceConnectionIdentityDomain = "oneshot-source-connection"
+
+// sourceConnectionName names the source connection a one-shot submit reuses.
+// It is scoped to the exact engine and DSN, so submits for different
+// databases or credentials never share (and overwrite) one connection, while
+// repeated submits for the same source reuse it. The tag is keyed by the
+// master key, so the name does not reveal the DSN.
+func sourceConnectionName(k crypto.Key, engine, dsn string) (string, error) {
 	engine = connectors.NormalizeSourceEngine(engine)
-	if strings.TrimSpace(engine) == "" {
-		return defaultFrontendSourceConnectionName
+	tag, err := crypto.IdentityTag(k, sourceConnectionIdentityDomain, []byte(engine+"\x00"+strings.TrimSpace(dsn)))
+	if err != nil {
+		return "", err
 	}
-	return engine + "_source"
+	return engine + "_source-" + tag, nil
+}
+
+// applySourceIdentity scopes the spec's source connection to its DSN.
+func (s *Server) applySourceIdentity(spec *validatedRunSubmitSpec) error {
+	name, err := sourceConnectionName(s.k, spec.SourceEngine, spec.SourceDSN)
+	if err != nil {
+		return err
+	}
+	spec.SourceConnectionName = name
+	return nil
 }
 
 func frontendDefaultJobName(engine, table string) string {
@@ -369,13 +389,11 @@ func (s *Server) handleRunValidate(w http.ResponseWriter, r *http.Request) {
 		s.writeRunSubmitError(w, err)
 		return
 	}
-	for column, target := range spec.ColumnTypes {
-		if err := typesystem.ValidateOverride(target); err != nil {
-			writeInvalidInput(w, "invalid column_types", map[string]any{"column": column, "error": err.Error()})
-			return
-		}
-	}
 	applyFrontendDestinationIdentity(&spec)
+	if err := s.applySourceIdentity(&spec); err != nil {
+		writeInternalError(w, "failed to derive source connection identity")
+		return
+	}
 	mappings, warnings, err := validationTypeMappings(r.Context(), spec)
 	if err != nil {
 		writeInvalidInput(w, "source schema validation failed", map[string]any{"error": err.Error()})
@@ -494,6 +512,10 @@ func (s *Server) handleRunSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	applyFrontendDestinationIdentity(&spec)
+	if err := s.applySourceIdentity(&spec); err != nil {
+		writeInternalError(w, "failed to derive source connection identity")
+		return
+	}
 
 	sourceReq, err := buildFrontendSourceConnectionRequest(spec)
 	if err != nil {
@@ -693,7 +715,30 @@ func (s *Server) activeWorkerCount(ctx context.Context) int {
 	return len(workers)
 }
 
+// validateColumnTypeOverrides rejects malformed column type overrides before
+// anything is persisted or planned. Columns are checked in sorted order so
+// the reported column is deterministic.
+func validateColumnTypeOverrides(overrides map[string]string) error {
+	columns := make([]string, 0, len(overrides))
+	for column := range overrides {
+		columns = append(columns, column)
+	}
+	sort.Strings(columns)
+	for _, column := range columns {
+		if err := typesystem.ValidateOverride(overrides[column]); err != nil {
+			return &requestValidationError{
+				message: "invalid column_types",
+				details: map[string]any{"field": "source.column_types", "column": column, "error": err.Error()},
+			}
+		}
+	}
+	return nil
+}
+
 func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, error) {
+	if err := validateColumnTypeOverrides(req.Source.ColumnTypes); err != nil {
+		return validatedRunSubmitSpec{}, err
+	}
 	engine := connectors.NormalizeSourceEngine(req.Source.Engine)
 	if strings.TrimSpace(engine) == "" {
 		return validatedRunSubmitSpec{}, invalidSubmitField("source.engine", "source.engine is required", nil)
@@ -859,7 +904,6 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 		PlannedTasks:            req.Performance.PlannedTasks,
 		TargetRowsPerTask:       req.Performance.TargetRowsPerTask,
 		TargetFileBytes:         req.Performance.TargetFileBytes,
-		SourceConnectionName:    frontendSourceConnectionName(engine),
 		TargetConnectionName:    defaultFrontendTargetConnectionName,
 		JobName:                 frontendDefaultJobName(engine, sourceName),
 		TargetNamespace:         defaultFrontendTargetNamespace,
