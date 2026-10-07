@@ -116,3 +116,21 @@ func TestCassandraRawValueDecodesVectorsAndKeepsOtherCustomTypesLossless(t *test
 		}
 	}
 }
+
+func TestCassandraTimeOfDayBecomesClockText(t *testing.T) {
+	// 08:30:00.123456789, the value gocql returns for a CQL time column.
+	got, err := cassandraToDriverValue(time.Duration(30600123456789))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "08:30:00.123456789" {
+		t.Fatalf("time = %#v", got)
+	}
+	got, err = cassandraToDriverValue([]time.Duration{0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != `json:["00:00:00.000000000"]` {
+		t.Fatalf("list<time> = %#v", got)
+	}
+}

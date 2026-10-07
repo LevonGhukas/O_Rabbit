@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
 
     # Real databases for the connector tests that are skipped without
-    # ORABBIT_IT_* (internal/connectors/*integration_test.go).
+    # ORABBIT_IT_* (internal/connectors and internal/arrowio *integration_test.go).
     services:
       postgres:
         image: postgres:17
@@ -108,7 +108,7 @@ jobs:
             "CREATE TABLE orabbit_it_snapshot (id bigint PRIMARY KEY); INSERT INTO orabbit_it_snapshot SELECT generate_series(1, 10);"
 
       - name: Run integration tests
-        run: go test -race -count=1 -v -run 'Integration|ReadOnly' ./internal/connectors/
+        run: go test -race -count=1 -v -run 'Integration|ReadOnly' ./internal/connectors/ ./internal/arrowio/
 
   lint:
     name: Lint

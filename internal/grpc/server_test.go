@@ -1200,3 +1200,29 @@ func TestFailureReportAcceptedWithAssignmentBootID(t *testing.T) {
 		t.Fatalf("failure not recorded: tasks=%+v err=%v", tasks, err)
 	}
 }
+
+// When another task already failed the run, a sibling attempt is fenced; the
+// rejection must name the run failure instead of a bare "ownership lost".
+func TestOwnershipLostNamesTerminalRun(t *testing.T) {
+	st := openGRPCTestStore(t)
+	ctx := context.Background()
+	createGRPCTestRegistrableRunAndTask(t, st, "run-sibling", "job-sibling", "task-sibling")
+	assignGRPCTestAttempt(t, st, "task-sibling", "worker-1")
+	summary := "1 task(s) failed"
+	if err := st.UpdateRunStatus(ctx, "run-sibling", "FAILED", true, &summary); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, nil)
+	_, err := srv.ReportTaskResult(ctx, &grpcpb.ReportTaskResultRequest{
+		WorkerId:     "worker-1",
+		TaskId:       "task-sibling",
+		RunId:        "run-sibling",
+		AttemptId:    "attempt-task-sibling",
+		FencingToken: "token-task-sibling",
+		Status:       "FAILED",
+		ErrorMessage: "boom",
+	})
+	if status.Code(err) != codes.FailedPrecondition || status.Convert(err).Message() != "task ownership lost (run failed: 1 task(s) failed)" {
+		t.Fatalf("err=%v", err)
+	}
+}

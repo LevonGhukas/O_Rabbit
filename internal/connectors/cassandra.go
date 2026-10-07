@@ -872,12 +872,20 @@ func scanCassandraRow(iter *gocql.Iter, columns []gocql.ColumnInfo) (map[string]
 	for i, col := range columns {
 		if _, isTuple := col.TypeInfo.(gocql.TupleTypeInfo); isTuple {
 			elems := make([]any, spans[i])
+			allNull := true
 			for j := range elems {
-				elems[j] = reflect.Indirect(reflect.ValueOf(dests[next+j])).Interface()
+				elems[j] = cassandraScannedValue(dests[next+j])
+				allNull = allNull && elems[j] == nil
 			}
-			row[col.Name] = elems
+			// gocql scans a NULL tuple as all-NULL elements and cannot tell it
+			// apart from a tuple of NULLs; both become NULL.
+			if allNull {
+				row[col.Name] = nil
+			} else {
+				row[col.Name] = elems
+			}
 		} else {
-			row[col.Name] = reflect.Indirect(reflect.ValueOf(dests[next])).Interface()
+			row[col.Name] = cassandraScannedValue(dests[next])
 		}
 		next += spans[i]
 	}
@@ -892,7 +900,22 @@ func newCassandraScanDest(info gocql.TypeInfo) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unsupported CQL type %s: %w", info, err)
 	}
-	return dest, nil
+	// Scan through a pointer to a pointer: gocql sets it to nil for NULL,
+	// whereas a plain *T receives the zero value (0, false, 00:00:00).
+	return reflect.New(reflect.TypeOf(dest)).Interface(), nil
+}
+
+// cassandraScannedValue returns the value a scan destination received, or
+// nil for NULL.
+func cassandraScannedValue(dest any) any {
+	if raw, ok := dest.(*cassandraRawValue); ok {
+		return *raw
+	}
+	inner := reflect.ValueOf(dest).Elem()
+	if inner.IsNil() {
+		return nil
+	}
+	return inner.Elem().Interface()
 }
 
 // cassandraRawValue receives the serialized bytes of a custom CQL type,
@@ -993,6 +1016,9 @@ func cassandraToDriverValue(v any) (driver.Value, error) {
 		return x.String(), nil
 	case time.Time:
 		return x, nil
+	case time.Duration:
+		// CQL time: nanoseconds since midnight.
+		return formatCassandraTimeOfDay(x), nil
 	default:
 		normalized := normalizeCassandraValue(reflect.ValueOf(v))
 		if normalized == nil {
@@ -1011,9 +1037,17 @@ func cassandraToDriverValue(v any) (driver.Value, error) {
 	}
 }
 
+// formatCassandraTimeOfDay renders a CQL time value (nanoseconds since
+// midnight, as gocql returns it) as HH:MM:SS.nnnnnnnnn.
+func formatCassandraTimeOfDay(d time.Duration) string {
+	ns := int64(d)
+	return fmt.Sprintf("%02d:%02d:%02d.%09d", ns/int64(time.Hour), ns/int64(time.Minute)%60, ns/int64(time.Second)%60, ns%int64(time.Second))
+}
+
 // normalizeCassandraValue rewrites gocql values that have no safe JSON form
 // into their exact text: decimal (*inf.Dec), varint (*big.Int), inet
-// (net.IP), uuid/timeuuid (gocql.UUID) and timestamp (time.Time), also
+// (net.IP), uuid/timeuuid (gocql.UUID), timestamp (time.Time) and time
+// (time.Duration), also
 // inside lists, sets, maps, tuples and UDTs. Map keys become strings so the
 // result can be encoded as JSON. Other values are returned unchanged.
 func normalizeCassandraValue(v reflect.Value) any {
@@ -1038,6 +1072,8 @@ func normalizeCassandraValue(v reflect.Value) any {
 		return x.String()
 	case time.Time:
 		return x.UTC().Format(time.RFC3339Nano)
+	case time.Duration:
+		return formatCassandraTimeOfDay(x)
 	case []byte:
 		return x
 	}

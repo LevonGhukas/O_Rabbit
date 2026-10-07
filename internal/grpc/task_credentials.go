@@ -42,7 +42,7 @@ func (s *Server) GetTaskCredentials(ctx context.Context, req *grpcpb.GetTaskCred
 	if err != nil {
 		if db.IsAttemptFenced(err) {
 			s.recordAttemptRejection(ctx, req.TaskId, req.AttemptId, req.WorkerId, "STALE_CREDENTIAL_REQUEST_REJECTED", "OWNERSHIP_FENCED")
-			return nil, grpcstatus.Error(codes.FailedPrecondition, "task ownership lost")
+			return nil, s.ownershipLostError(ctx, req.TaskId)
 		}
 		return nil, err
 	}

@@ -461,7 +461,7 @@ func (s *Server) RenewTaskLease(ctx context.Context, req *grpcpb.RenewTaskLeaseR
 	if err != nil {
 		if db.IsAttemptFenced(err) {
 			s.recordAttemptRejection(ctx, req.TaskId, req.AttemptId, req.WorkerId, "STALE_RENEWAL_REJECTED", "OWNERSHIP_FENCED")
-			return nil, grpcstatus.Error(codes.FailedPrecondition, "task ownership lost")
+			return nil, s.ownershipLostError(ctx, req.TaskId)
 		}
 		return nil, err
 	}
@@ -479,7 +479,7 @@ func (s *Server) AcquireUploadCapacity(ctx context.Context, req *grpcpb.AcquireU
 	lease, acquired, err := s.st.AcquireUploadCapacity(ctx, req.BootId, req.TaskId, req.AttemptId, req.FencingToken, req.WorkerId, s.nowFn(), s.uploadCapacityLeaseTTL, s.uploadCapacityLimit, nil, nil)
 	if err != nil {
 		if db.IsUploadCapacityFenced(err) {
-			return nil, grpcstatus.Error(codes.FailedPrecondition, "task ownership lost")
+			return nil, s.ownershipLostError(ctx, req.TaskId)
 		}
 		return nil, err
 	}
@@ -554,7 +554,7 @@ func (s *Server) ReportTaskProgress(ctx context.Context, req *grpcpb.ReportTaskP
 	if err := s.st.UpdateTaskProgressFencedAt(ctx, req.BootId, req.TaskId, req.AttemptId, req.FencingToken, req.WorkerId, req.RowsRead, req.BytesRead, req.BytesWritten, s.nowFn()); err != nil {
 		if db.IsAttemptFenced(err) {
 			s.recordAttemptRejection(ctx, req.TaskId, req.AttemptId, req.WorkerId, "STALE_PROGRESS_REJECTED", "OWNERSHIP_FENCED")
-			return nil, grpcstatus.Error(codes.FailedPrecondition, "task ownership lost")
+			return nil, s.ownershipLostError(ctx, req.TaskId)
 		}
 		return nil, err
 	}
@@ -736,7 +736,7 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *grpcpb.ReportTaskRes
 	if err != nil {
 		if db.IsAttemptFenced(err) {
 			s.recordAttemptRejection(ctx, req.TaskId, req.AttemptId, req.WorkerId, "STALE_RESULT_REJECTED", "OWNERSHIP_FENCED")
-			return nil, grpcstatus.Error(codes.FailedPrecondition, "task ownership lost")
+			return nil, s.ownershipLostError(ctx, req.TaskId)
 		}
 		if strings.Contains(err.Error(), "result conflict") {
 			s.recordAttemptRejection(ctx, req.TaskId, req.AttemptId, req.WorkerId, "CONFLICTING_RESULT_REJECTED", "RESULT_CONFLICT")
@@ -777,6 +777,22 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *grpcpb.ReportTaskRes
 	}
 
 	return &grpcpb.ReportTaskResultResponse{Accepted: accepted, Message: msg}, nil
+}
+
+// ownershipLostError rejects a call from an attempt that no longer owns its
+// task. When the run has already ended (for example another task of the run
+// failed), it says so, so the worker log does not read like a fencing bug.
+func (s *Server) ownershipLostError(ctx context.Context, taskID string) error {
+	const msg = "task ownership lost"
+	state, err := s.st.GetTaskExecutionState(ctx, taskID)
+	if err != nil || state.RunStatus == "RUNNING" {
+		return grpcstatus.Error(codes.FailedPrecondition, msg)
+	}
+	reason := "run " + strings.ToLower(state.RunStatus)
+	if state.RunError != nil && strings.TrimSpace(*state.RunError) != "" {
+		reason += ": " + strings.TrimSpace(*state.RunError)
+	}
+	return grpcstatus.Error(codes.FailedPrecondition, msg+" ("+reason+")")
 }
 
 func (s *Server) recordAttemptRejection(ctx context.Context, taskID, attemptID, workerID, eventType, classification string) {
