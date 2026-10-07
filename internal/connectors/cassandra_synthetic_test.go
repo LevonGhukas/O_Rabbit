@@ -95,3 +95,24 @@ func TestCassandraToDriverValueConvertsAllCQLTypesExactly(t *testing.T) {
 		}
 	}
 }
+
+func TestCassandraRawValueDecodesVectorsAndKeepsOtherCustomTypesLossless(t *testing.T) {
+	floats := []byte{0x3f, 0x80, 0, 0, 0x40, 0, 0, 0, 0x40, 0x40, 0, 0} // 1, 2, 3 as float32
+	cases := []struct {
+		name string
+		raw  cassandraRawValue
+		want driver.Value
+	}{
+		{"vector<float,3>", cassandraRawValue{custom: "org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.FloatType, 3)", data: floats}, `json:[1,2,3]`},
+		{"vector<int,2>", cassandraRawValue{custom: "org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.Int32Type, 2)", data: []byte{0, 0, 0, 7, 0xff, 0xff, 0xff, 0xff}}, `json:[7,-1]`},
+		{"wrong length stays lossless", cassandraRawValue{custom: "org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.FloatType, 3)", data: []byte{1, 2}}, "base64:AQI="},
+		{"unknown custom type", cassandraRawValue{custom: "com.example.MyType", data: []byte("hi")}, "base64:aGk="},
+		{"null", cassandraRawValue{custom: "com.example.MyType", null: true}, nil},
+	}
+	for _, tc := range cases {
+		got, err := cassandraToDriverValue(tc.raw)
+		if err != nil || got != tc.want {
+			t.Errorf("%s: got %#v err=%v, want %#v", tc.name, got, err, tc.want)
+		}
+	}
+}

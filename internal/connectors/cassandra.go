@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"net"
 	"net/url"
@@ -787,9 +790,14 @@ func (r *cassandraRowsIter) Next(dest []driver.Value) error {
 // bounded column widths).
 func newCassandraRows(iter *gocql.Iter, cols []string) (*sql.Rows, error) {
 	data := make([][]driver.Value, 0, 1024)
+	columns := iter.Columns()
 	for {
-		row := make(map[string]any)
-		if !iter.MapScan(row) {
+		row, ok, err := scanCassandraRow(iter, columns)
+		if err != nil {
+			_ = iter.Close()
+			return nil, fmt.Errorf("cassandra rows: %w", err)
+		}
+		if !ok {
 			break
 		}
 		vals := make([]driver.Value, len(cols))
@@ -832,10 +840,131 @@ type syntheticConnector struct{ d driver.Driver }
 func (c syntheticConnector) Connect(context.Context) (driver.Conn, error) { return c.d.Open("") }
 func (c syntheticConnector) Driver() driver.Driver                        { return c.d }
 
+// scanCassandraRow scans the next row into a map keyed by column name. It
+// replaces gocql's MapScan, which ignores errors creating scan destinations
+// (so a column type the driver cannot represent, such as Cassandra 5
+// vector<...>, surfaced only as "not enough columns to scan into") and which
+// stores tuple elements under "col[i]" keys instead of the column name.
+// Custom types are scanned as raw bytes; tuples become []any. Destinations
+// are allocated per row because gocql reuses them between scans.
+func scanCassandraRow(iter *gocql.Iter, columns []gocql.ColumnInfo) (map[string]any, bool, error) {
+	dests := make([]any, 0, len(columns))
+	spans := make([]int, len(columns))
+	for i, col := range columns {
+		elems := []gocql.TypeInfo{col.TypeInfo}
+		if tuple, ok := col.TypeInfo.(gocql.TupleTypeInfo); ok {
+			elems = tuple.Elems
+		}
+		for _, info := range elems {
+			dest, err := newCassandraScanDest(info)
+			if err != nil {
+				return nil, false, fmt.Errorf("column %s: %w", col.Name, err)
+			}
+			dests = append(dests, dest)
+		}
+		spans[i] = len(elems)
+	}
+	if !iter.Scan(dests...) {
+		return nil, false, nil
+	}
+	row := make(map[string]any, len(columns))
+	next := 0
+	for i, col := range columns {
+		if _, isTuple := col.TypeInfo.(gocql.TupleTypeInfo); isTuple {
+			elems := make([]any, spans[i])
+			for j := range elems {
+				elems[j] = reflect.Indirect(reflect.ValueOf(dests[next+j])).Interface()
+			}
+			row[col.Name] = elems
+		} else {
+			row[col.Name] = reflect.Indirect(reflect.ValueOf(dests[next])).Interface()
+		}
+		next += spans[i]
+	}
+	return row, true, nil
+}
+
+func newCassandraScanDest(info gocql.TypeInfo) (any, error) {
+	if info.Type() == gocql.TypeCustom {
+		return &cassandraRawValue{}, nil
+	}
+	dest, err := info.NewWithError()
+	if err != nil {
+		return nil, fmt.Errorf("unsupported CQL type %s: %w", info, err)
+	}
+	return dest, nil
+}
+
+// cassandraRawValue receives the serialized bytes of a custom CQL type,
+// which gocql v1 cannot decode itself (gocql passes raw data to Unmarshalers).
+type cassandraRawValue struct {
+	custom string
+	data   []byte
+	null   bool
+}
+
+func (v *cassandraRawValue) UnmarshalCQL(info gocql.TypeInfo, data []byte) error {
+	v.custom = info.Custom()
+	v.null = data == nil
+	v.data = append([]byte(nil), data...)
+	return nil
+}
+
+// cassandraVectorElemSizes maps fixed-width CQL vector element types to
+// their byte width.
+var cassandraVectorElemSizes = map[string]int{
+	"org.apache.cassandra.db.marshal.FloatType":  4,
+	"org.apache.cassandra.db.marshal.Int32Type":  4,
+	"org.apache.cassandra.db.marshal.DoubleType": 8,
+	"org.apache.cassandra.db.marshal.LongType":   8,
+}
+
+// cassandraVectorPattern matches "VectorType(<element type>, <dimension>)".
+var cassandraVectorPattern = regexp.MustCompile(`^org\.apache\.cassandra\.db\.marshal\.VectorType\((\S+)\s*,\s*(\d+)\)$`)
+
+// value decodes vectors of fixed-width numbers into a Go slice; anything
+// else is kept losslessly as base64 of the serialized bytes.
+func (v cassandraRawValue) value() any {
+	if v.null {
+		return nil
+	}
+	if m := cassandraVectorPattern.FindStringSubmatch(strings.TrimSpace(v.custom)); m != nil {
+		width, known := cassandraVectorElemSizes[m[1]]
+		dim, _ := strconv.Atoi(m[2])
+		if known && dim > 0 && len(v.data) == width*dim {
+			out := make([]any, dim)
+			for i := range out {
+				b := v.data[i*width : (i+1)*width]
+				switch m[1] {
+				case "org.apache.cassandra.db.marshal.FloatType":
+					out[i] = math.Float32frombits(binary.BigEndian.Uint32(b))
+				case "org.apache.cassandra.db.marshal.DoubleType":
+					out[i] = math.Float64frombits(binary.BigEndian.Uint64(b))
+				case "org.apache.cassandra.db.marshal.Int32Type":
+					out[i] = int32(binary.BigEndian.Uint32(b))
+				case "org.apache.cassandra.db.marshal.LongType":
+					out[i] = int64(binary.BigEndian.Uint64(b))
+				}
+			}
+			return out
+		}
+	}
+	return "base64:" + base64.StdEncoding.EncodeToString(v.data)
+}
+
 // cassandraToDriverValue converts a gocql scan value to a driver.Value.
 func cassandraToDriverValue(v any) (driver.Value, error) {
 	if v == nil {
 		return nil, nil
+	}
+	if raw, ok := v.(cassandraRawValue); ok {
+		v = raw.value()
+		if v == nil {
+			return nil, nil
+		}
+		if text, ok := v.(string); ok {
+			return text, nil
+		}
 	}
 	switch x := v.(type) {
 	case int8:

@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
 
     # Real databases for the connector tests that are skipped without
-    # ORABBIT_IT_*_DSN (internal/connectors/readonly_integration_test.go).
+    # ORABBIT_IT_* (internal/connectors/*integration_test.go).
     services:
       postgres:
         image: postgres:17
@@ -76,6 +76,14 @@ jobs:
         ports: ["9000:9000"]
         options: >-
           --health-cmd "clickhouse-client --password pw --query 'SELECT 1'" --health-interval 5s --health-timeout 5s --health-retries 30
+      cassandra:
+        image: cassandra:5
+        env:
+          MAX_HEAP_SIZE: 512M
+          HEAP_NEWSIZE: 128M
+        ports: ["9042:9042"]
+        options: >-
+          --health-cmd "cqlsh -e 'describe keyspaces'" --health-interval 10s --health-timeout 10s --health-retries 30
 
     env:
       ORABBIT_IT_POSTGRES_DSN: postgres://postgres:pw@localhost:5432/postgres?sslmode=disable
@@ -83,6 +91,7 @@ jobs:
       ORABBIT_IT_MYSQL_DSN: root:pw@tcp(localhost:3306)/mysql
       ORABBIT_IT_MARIADB_DSN: root:pw@tcp(localhost:3307)/mysql
       ORABBIT_IT_CLICKHOUSE_DSN: clickhouse://default:pw@localhost:9000/default
+      ORABBIT_IT_CASSANDRA_HOSTS: localhost:9042
 
     steps:
       - name: Checkout
