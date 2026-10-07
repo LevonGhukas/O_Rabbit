@@ -6,13 +6,17 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"io"
+	"math/big"
+	"net"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gocql/gocql"
+	"gopkg.in/inf.v0"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
@@ -861,10 +865,74 @@ func cassandraToDriverValue(v any) (driver.Value, error) {
 	case time.Time:
 		return x, nil
 	default:
-		text, err := typesystem.ToLosslessString(v)
+		normalized := normalizeCassandraValue(reflect.ValueOf(v))
+		if normalized == nil {
+			// A typed nil, e.g. a NULL decimal scanned as (*inf.Dec)(nil).
+			return nil, nil
+		}
+		if text, ok := normalized.(string); ok {
+			// decimal, varint and inet: exact canonical text.
+			return text, nil
+		}
+		text, err := typesystem.ToLosslessString(normalized)
 		if err != nil {
 			return nil, fmt.Errorf("lossless Cassandra driver conversion: %w", err)
 		}
 		return text, nil
 	}
+}
+
+// normalizeCassandraValue rewrites gocql values that have no safe JSON form
+// into their exact text: decimal (*inf.Dec), varint (*big.Int), inet
+// (net.IP), uuid/timeuuid (gocql.UUID) and timestamp (time.Time), also
+// inside lists, sets, maps, tuples and UDTs. Map keys become strings so the
+// result can be encoded as JSON. Other values are returned unchanged.
+func normalizeCassandraValue(v reflect.Value) any {
+	if !v.IsValid() {
+		return nil
+	}
+	if (v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface) && v.IsNil() {
+		return nil
+	}
+	switch x := v.Interface().(type) {
+	case *inf.Dec:
+		return x.String()
+	case inf.Dec:
+		return x.String()
+	case *big.Int:
+		return x.String()
+	case big.Int:
+		return x.String()
+	case net.IP:
+		return x.String()
+	case gocql.UUID:
+		return x.String()
+	case time.Time:
+		return x.UTC().Format(time.RFC3339Nano)
+	case []byte:
+		return x
+	}
+	switch v.Kind() {
+	case reflect.Interface, reflect.Pointer:
+		return normalizeCassandraValue(v.Elem())
+	case reflect.Slice, reflect.Array:
+		out := make([]any, v.Len())
+		for i := range out {
+			out[i] = normalizeCassandraValue(v.Index(i))
+		}
+		return out
+	case reflect.Map:
+		out := make(map[string]any, v.Len())
+		iter := v.MapRange()
+		for iter.Next() {
+			key := normalizeCassandraValue(iter.Key())
+			keyText, ok := key.(string)
+			if !ok {
+				keyText = fmt.Sprint(key)
+			}
+			out[keyText] = normalizeCassandraValue(iter.Value())
+		}
+		return out
+	}
+	return v.Interface()
 }

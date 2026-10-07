@@ -1163,3 +1163,40 @@ func TestReportMultipartLifecycleRejectsOversizedErrorMessage(t *testing.T) {
 		t.Fatalf("code=%v want=%v err=%v", status.Code(err), codes.InvalidArgument, err)
 	}
 }
+
+// Regression: the worker sent BootId only on failure/cancel reports while
+// tasks were requested and recorded without one, so the master rejected every
+// failure report as "task ownership lost" and the real error was replaced by
+// lease expiry. Reports must use the same (empty) boot ID as RequestTask.
+func TestFailureReportAcceptedWithAssignmentBootID(t *testing.T) {
+	st := openGRPCTestStore(t)
+	ctx := context.Background()
+	createGRPCTestRegistrableRunAndTask(t, st, "run-fail-report", "job-fail-report", "task-fail-report")
+	assignGRPCTestAttempt(t, st, "task-fail-report", "worker-1")
+	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, nil)
+
+	failure := func(bootID string) (*grpcpb.ReportTaskResultResponse, error) {
+		return srv.ReportTaskResult(ctx, &grpcpb.ReportTaskResultRequest{
+			WorkerId:     "worker-1",
+			BootId:       bootID,
+			TaskId:       "task-fail-report",
+			RunId:        "run-fail-report",
+			AttemptId:    "attempt-task-fail-report",
+			FencingToken: "token-task-fail-report",
+			Status:       "FAILED",
+			ErrorMessage: "source conversion failed",
+		})
+	}
+
+	if _, err := failure("boot-not-used-at-assignment"); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("mismatched boot id: err=%v, want FailedPrecondition", err)
+	}
+	resp, err := failure("")
+	if err != nil || !resp.Accepted {
+		t.Fatalf("failure report with assignment boot id: resp=%+v err=%v", resp, err)
+	}
+	tasks, err := st.ListTasksForRun(ctx, "run-fail-report")
+	if err != nil || len(tasks) != 1 || tasks[0].ErrorMessage == nil || *tasks[0].ErrorMessage != "source conversion failed" {
+		t.Fatalf("failure not recorded: tasks=%+v err=%v", tasks, err)
+	}
+}

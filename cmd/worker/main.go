@@ -422,8 +422,9 @@ func main() {
 					log,
 					cp,
 					&grpcpb.ReportTaskResultRequest{
-						WorkerId:     cfg.WorkerID,
-						BootId:       workerInstanceID,
+						WorkerId: cfg.WorkerID,
+						// Leave BootId empty, as in RequestTask: attempts are recorded
+						// with an empty boot ID and the master requires an exact match.
 						TaskId:       t.TaskId,
 						RunId:        t.RunId,
 						AttemptId:    t.AttemptId,
@@ -467,8 +468,9 @@ func main() {
 				log,
 				cp,
 				&grpcpb.ReportTaskResultRequest{
-					WorkerId:     cfg.WorkerID,
-					BootId:       workerInstanceID,
+					WorkerId: cfg.WorkerID,
+					// Leave BootId empty, as in RequestTask: attempts are recorded
+					// with an empty boot ID and the master requires an exact match.
 					TaskId:       t.TaskId,
 					RunId:        t.RunId,
 					AttemptId:    t.AttemptId,

@@ -3,9 +3,15 @@ package connectors
 import (
 	"context"
 	"database/sql/driver"
+	"math/big"
+	"net"
 	"runtime"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/gocql/gocql"
+	"gopkg.in/inf.v0"
 )
 
 // Regression: cassandraColumnType registered a global sql driver per call,
@@ -56,5 +62,36 @@ func TestSyntheticRowsReadableAfterDBClosed(t *testing.T) {
 	}
 	if err := rows.Err(); err != nil || len(got) != 2 || got[0] != 1 || got[1] != 2 {
 		t.Fatalf("rows=%v err=%v", got, err)
+	}
+}
+
+// Regression: decimal/varint/inet values (and collections containing them,
+// UUIDs or timestamps) failed conversion, failing every task of the table.
+func TestCassandraToDriverValueConvertsAllCQLTypesExactly(t *testing.T) {
+	u, _ := gocql.ParseUUID("6f1b6c1e-0b8e-4d1a-9a8c-1d2e3f4a5b6c")
+	huge, _ := new(big.Int).SetString("123456789012345678901234567890", 10)
+	cases := []struct {
+		name string
+		in   any
+		want driver.Value
+	}{
+		{"decimal", inf.NewDec(12345, 2), "123.45"},
+		{"decimal high precision", inf.NewDecBig(huge, 10), "12345678901234567890.1234567890"},
+		{"varint beyond int64", huge, "123456789012345678901234567890"},
+		{"inet", net.ParseIP("10.0.0.1"), "10.0.0.1"},
+		{"list<decimal>", []*inf.Dec{inf.NewDec(1, 0), inf.NewDec(25, 1)}, `json:["1","2.5"]`},
+		{"map<text,decimal>", map[string]*inf.Dec{"k": inf.NewDec(5, 1)}, `json:{"k":"0.5"}`},
+		{"map<uuid,varint>", map[gocql.UUID]*big.Int{u: big.NewInt(7)}, `json:{"6f1b6c1e-0b8e-4d1a-9a8c-1d2e3f4a5b6c":"7"}`},
+		{"list<uuid>", []gocql.UUID{u}, `json:["6f1b6c1e-0b8e-4d1a-9a8c-1d2e3f4a5b6c"]`},
+		{"list<timestamp>", []time.Time{time.Unix(0, 0).UTC()}, `json:["1970-01-01T00:00:00Z"]`},
+		{"list<text>", []string{"a", "b"}, `json:["a","b"]`},
+		{"udt", map[string]interface{}{"lat": 1.5}, `json:{"lat":1.5}`},
+		{"null decimal", (*inf.Dec)(nil), nil},
+	}
+	for _, tc := range cases {
+		got, err := cassandraToDriverValue(tc.in)
+		if err != nil || got != tc.want {
+			t.Errorf("%s: got %#v err=%v, want %#v", tc.name, got, err, tc.want)
+		}
 	}
 }
