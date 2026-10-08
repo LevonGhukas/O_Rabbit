@@ -741,6 +741,50 @@ accept `limit` (1-1000) and `cursor`; the next page's cursor is returned in
 the `X-Next-Cursor` response header, and the body stays a JSON array. Without
 `limit` the full list is returned.
 
+### Errors and run failures
+
+Every HTTP error uses one JSON envelope:
+
+```json
+{
+  "error": {
+    "code": "run_planning_failed",
+    "message": "run planning failed",
+    "details": {"error": "cursor column \"AGE\" is nullable; ..."},
+    "failure_class": "DATA_INTEGRITY_ERROR",
+    "retryable": false,
+    "request_id": "..."
+  }
+}
+```
+
+`failure_class` and `retryable` are present when the error was caused by a
+source, target or catalog. Classes are defined in `internal/failure`
+(`AUTHENTICATION_FAILED`, `AUTHORIZATION_FAILED`, `NETWORK_CONNECTION_FAILED`,
+`TIMEOUT`, `QUERY_SYNTAX_ERROR`, `TABLE_IDENTIFIER_INVALID`,
+`DATA_INTEGRITY_ERROR`, catalog classes, `UNKNOWN_PERMANENT`, ...).
+
+Run planning failures (`/api/runs/submit`, `/jobs/{id}/runs`) return:
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| `422` | `run_planning_failed` | A recognized source or configuration problem; change the request. |
+| `503` | `run_planning_failed` | A dependency was unreachable or timed out; retrying may succeed. |
+| `500` | `internal_error` | An unrecognized failure. |
+
+A run that ends `FAILED` describes itself in `GET /api/runs/{id}`:
+
+- `failure_phase`: `planning`, `extract` or `commit`.
+- `failure_class`: for task failures, the class of the first failed task's
+  last attempt.
+- `error_summary`: for task failures, `"<n> of <total> task(s) failed: <first
+  task error>"`. Passwords embedded in URLs are redacted.
+
+One-shot submits (`/api/runs/submit`) store the source DSN in a connection
+named `<engine>_source-<tag>`, where the tag is a keyed hash of the engine and
+DSN. Different databases or credentials never share a connection, and the
+name does not reveal the DSN.
+
 ### Core routes
 
 | Method | Route | Purpose |

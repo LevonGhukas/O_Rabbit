@@ -17,6 +17,7 @@ const (
 	CodeMethodNotAllowed      Code = "method_not_allowed"
 	CodeDatasetBusy           Code = "dataset_busy"
 	CodeNotImplemented        Code = "not_implemented"
+	CodeRunPlanningFailed     Code = "run_planning_failed"
 )
 
 type Response struct {
@@ -24,10 +25,15 @@ type Response struct {
 }
 
 type APIError struct {
-	Code      Code   `json:"code"`
-	Message   string `json:"message"`
-	Details   any    `json:"details,omitempty"`
-	RequestID string `json:"request_id,omitempty"`
+	Code    Code   `json:"code"`
+	Message string `json:"message"`
+	Details any    `json:"details,omitempty"`
+	// FailureClass and Retryable are set for errors caused by a source,
+	// target or catalog (see internal/failure), so clients can react without
+	// parsing Message.
+	FailureClass string `json:"failure_class,omitempty"`
+	Retryable    *bool  `json:"retryable,omitempty"`
+	RequestID    string `json:"request_id,omitempty"`
 }
 
 func Write(w http.ResponseWriter, status int, code Code, message string, details any) {
@@ -35,17 +41,15 @@ func Write(w http.ResponseWriter, status int, code Code, message string, details
 }
 
 func WriteWithRequestID(w http.ResponseWriter, status int, code Code, message string, details any, requestID string) {
-	if code == "" {
-		code = CodeForStatus(status)
+	WriteAPIError(w, status, APIError{Code: code, Message: message, Details: details, RequestID: requestID})
+}
+
+// WriteAPIError writes apiErr as the standard error envelope.
+func WriteAPIError(w http.ResponseWriter, status int, apiErr APIError) {
+	if apiErr.Code == "" {
+		apiErr.Code = CodeForStatus(status)
 	}
-	resp := Response{
-		Error: APIError{
-			Code:      code,
-			Message:   message,
-			Details:   details,
-			RequestID: requestID,
-		},
-	}
+	resp := Response{Error: apiErr}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	enc := json.NewEncoder(w)

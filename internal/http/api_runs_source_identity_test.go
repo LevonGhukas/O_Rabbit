@@ -2,12 +2,16 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
+	"github.com/LevonGhukas/O_Rabbit/internal/db"
+	"github.com/LevonGhukas/O_Rabbit/internal/httperr"
 )
 
 func submitOneShotForSource(t *testing.T, srv *submitTestServer, dsn, table string) (jobID, connID string) {
@@ -117,5 +121,28 @@ func TestRunSubmitRejectsInvalidColumnTypeOverrides(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// An unreachable source is not the caller's fault and may succeed later.
+func TestRunPlanningFailureForUnreachableSourceIsRetryable503(t *testing.T) {
+	srv := newSubmitTestServer(openTestStore(t))
+	srv.runPlanner = func(context.Context, *db.Store, crypto.Key, db.Job, json.RawMessage, *db.AuditRecord) (db.Run, []db.TaskInsert, error) {
+		return db.Run{}, nil, errors.New("open source reader: dial tcp 10.0.0.5:5432: connect: connection refused")
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/submit", strings.NewReader(`{
+		"source": {"engine": "postgres", "dsn": "postgresql://u:p@db:5432/app", "table": "public.orders", "cursor_column": "id", "incremental": false},
+		"target": {"s3_endpoint": "http://minio:9000", "s3_bucket": "b", "s3_access_key_id": "k", "s3_secret_access_key": "s"},
+		"iceberg": {"enabled": false}
+	}`))
+	srv.Handler().ServeHTTP(rec, req)
+
+	resp := decodeErrorResponse(t, rec)
+	if rec.Code != http.StatusServiceUnavailable || resp.Error.Code != httperr.CodeRunPlanningFailed {
+		t.Fatalf("status=%d code=%q, want 503 run_planning_failed", rec.Code, resp.Error.Code)
+	}
+	if resp.Error.FailureClass != "NETWORK_CONNECTION_FAILED" || resp.Error.Retryable == nil || !*resp.Error.Retryable {
+		t.Fatalf("failure_class=%q retryable=%v", resp.Error.FailureClass, resp.Error.Retryable)
 	}
 }
