@@ -48,18 +48,22 @@ func TestAPIRunSubmitPlannerFailureIncludesDetails(t *testing.T) {
 
 	srv.Handler().ServeHTTP(rec, req)
 
+	// A nullable cursor is a problem with the request, not with O_Rabbit.
 	resp := decodeErrorResponse(t, rec)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status=%d want=%d body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d want=%d body=%s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
 	}
-	if resp.Error.Code != httperr.CodeInternalError {
-		t.Fatalf("error code=%q want=%q", resp.Error.Code, httperr.CodeInternalError)
+	if resp.Error.Code != httperr.CodeRunPlanningFailed {
+		t.Fatalf("error code=%q want=%q", resp.Error.Code, httperr.CodeRunPlanningFailed)
 	}
 	if resp.Error.Message != "run planning failed" {
 		t.Fatalf("error message=%q want=%q", resp.Error.Message, "run planning failed")
 	}
-	if resp.Error.Details != details {
-		t.Fatalf("error details=%q want=%q", resp.Error.Details, details)
+	if got, _ := resp.Error.Details.(map[string]any)["error"].(string); got != details {
+		t.Fatalf("error details=%#v want error=%q", resp.Error.Details, details)
+	}
+	if resp.Error.FailureClass != "DATA_INTEGRITY_ERROR" || resp.Error.Retryable == nil || *resp.Error.Retryable {
+		t.Fatalf("failure_class=%q retryable=%v, want DATA_INTEGRITY_ERROR, false", resp.Error.FailureClass, resp.Error.Retryable)
 	}
 }
 
