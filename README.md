@@ -994,7 +994,21 @@ go test -count=1 -run 'Integration|ReadOnly' ./internal/connectors/
 Further variables: `ORABBIT_IT_MYSQL_DSN`, `ORABBIT_IT_ORACLE_DSN`
 (`oracle://app:app@localhost:1521/FREEPDB1`), `ORABBIT_IT_TRINO_DSN`
 (`http://orabbit@localhost:8080?catalog=memory&schema=default`) and
-`ORABBIT_IT_CASSANDRA_DSN` (`cassandra://localhost:9042/orabbit_it`).
+`ORABBIT_IT_CASSANDRA_DSN` (`cassandra://localhost:9042/orabbit_it`),
+`ORABBIT_IT_MSSQL_DSN` (`sqlserver://sa:YourStrong!Passw0rd@localhost:1433?database=master`;
+on Apple Silicon use the `mcr.microsoft.com/azure-sql-edge` image, the x86 SQL
+Server image does not run under emulation).
+
+Planner and worker integration tests (ordered-cursor planning, full task
+execution with upload) also need an S3-compatible target, e.g. a local MinIO
+with a bucket:
+
+```sh
+ORABBIT_IT_POSTGRES_DSN=... ORABBIT_IT_MONGODB_DSN=... \
+ORABBIT_IT_S3_ENDPOINT=http://127.0.0.1:9010 ORABBIT_IT_S3_BUCKET=orabbit-it \
+ORABBIT_IT_S3_ACCESS_KEY_ID=... ORABBIT_IT_S3_SECRET_ACCESS_KEY=... \
+go test -count=1 -run Integration ./internal/planner ./cmd/worker
+```
 
 CI (`.github/workflows/orrabit-docker.yml`) runs on every push and pull
 request:
@@ -1242,11 +1256,6 @@ and a `canceled object delete scheduled` event. To enable deletion:
    ideally enable bucket versioning.
 3. Set `ORABBIT_CANCELED_OBJECT_CLEANUP_DRY_RUN=false` and restart the master.
    Candidates already marked `WOULD_DELETE` are deleted on their next retry.
-
-### Root Docker Compose fails on the PostgreSQL mount
-
-The committed compose file references the absent `docker/postgres/initdb`
-directory. Create the directory or remove the mount.
 
 ### Iceberg registration fails
 
