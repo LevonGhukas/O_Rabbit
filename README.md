@@ -906,6 +906,23 @@ Workers use the `orabbit.v1.ControlPlane` service on port 9102:
 every call. See
 [proto/controlplane.proto](proto/controlplane.proto) for the wire contract.
 
+## Deprecations
+
+These compatibility paths still work. When a run relies on one, the planner
+logs `job uses deprecated options` and records a `deprecated job options used`
+run event, so their use can be measured before they are removed.
+
+| Deprecated | Replacement |
+| --- | --- |
+| Unversioned and `/api/...` HTTP paths | `/api/v1/...` (responses carry `Deprecation` and `Link` headers) |
+| `frontend_submit_supported` in `/source-engines` | `oneshot_submit_supported` |
+| Job option `id_column` | `cursor_column` |
+| `partition_strategy: int_range` | `ordered_cursor` |
+| Job option `chunk_size` | `planned_tasks` or `target_rows_per_task` |
+| S3 sources without `format` (format guessed from the file extension; unknown extensions read as CSV) | Set `source.format` |
+
+Removal will be scheduled once these events stop appearing.
+
 ## Database and migrations
 
 The master uses one SQLite database. `internal/db/migrate.go` automatically
