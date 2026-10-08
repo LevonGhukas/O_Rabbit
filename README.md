@@ -977,13 +977,35 @@ go test ./internal/grpc -run TestName -v
 Tests are package-level unit and integration-style tests using temporary SQLite
 databases and test servers. There is no enforced coverage threshold.
 
+Run the connector integration suite locally against `docker-compose.ex-db.yml`
+(Oracle, Trino and Cassandra are optional; each engine runs only when its
+variable is set, and Cassandra needs the heap cap in that file to fit next to
+the others):
+
+```sh
+docker compose -f docker-compose.ex-db.yml up -d ex-postgres ex-mariadb ex-clickhouse ex-mongodb
+ORABBIT_IT_POSTGRES_DSN='postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable' \
+ORABBIT_IT_MARIADB_DSN='root:root@tcp(localhost:3307)/test' \
+ORABBIT_IT_CLICKHOUSE_DSN='clickhouse://default:clickhouse@localhost:9003/default' \
+ORABBIT_IT_MONGODB_DSN='mongodb://root:root@localhost:27017/orabbit_it?authSource=admin' \
+go test -count=1 -run 'Integration|ReadOnly' ./internal/connectors/
+```
+
+Further variables: `ORABBIT_IT_MYSQL_DSN`, `ORABBIT_IT_ORACLE_DSN`
+(`oracle://app:app@localhost:1521/FREEPDB1`), `ORABBIT_IT_TRINO_DSN`
+(`http://orabbit@localhost:8080?catalog=memory&schema=default`) and
+`ORABBIT_IT_CASSANDRA_DSN` (`cassandra://localhost:9042/orabbit_it`).
+
 CI (`.github/workflows/orrabit-docker.yml`) runs on every push and pull
 request:
 
 - `go test -race ./...` and `go vet ./...`
 - connector integration tests against PostgreSQL, MySQL, MariaDB and ClickHouse
-  service containers (`ORABBIT_IT_*_DSN`, see
-  `internal/connectors/readonly_integration_test.go`)
+  service containers (`ORABBIT_IT_*_DSN`): read-only sessions
+  (`readonly_integration_test.go`) and the shared connector conformance suite
+  (`conformance_integration_test.go`: describe, cursor validation, statistics,
+  cursor ranges with filters, query mode and column probes, identical for
+  every engine)
 - `golangci-lint` with `.golangci.yml`, `shellcheck` on the shell scripts, and
   `docker compose config` on every Compose file
 - `scripts/vulncheck.sh`: `govulncheck`, failing on any reachable
