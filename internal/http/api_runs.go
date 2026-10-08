@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -24,15 +25,15 @@ import (
 )
 
 const (
-	defaultFrontendTargetConnectionName = "s3"
-	defaultFrontendTargetNamespace      = "orders"
-	defaultFrontendTargetTable          = "Orders"
-	defaultFrontendWriteMode            = "append"
+	defaultOneShotTargetConnectionName = "s3"
+	defaultOneShotTargetNamespace      = "orders"
+	defaultOneShotTargetTable          = "Orders"
+	defaultOneShotWriteMode            = "append"
 )
 
 var openDocumentReader = connectors.OpenDocumentReader
 
-func resolveFrontendWriteMode(incremental bool) string {
+func resolveOneShotWriteMode(incremental bool) string {
 	if incremental {
 		return "append"
 	}
@@ -102,49 +103,49 @@ type existingJobRunRequest struct {
 }
 
 type validatedRunSubmitSpec struct {
-	WorkerPool              string
-	SourceEngine            string
-	SourceDSN               string
-	SourceMode              string
-	SourceTable             string
-	SourceQuery             string
-	QueryHash               string
-	WhereClause             string
-	SelectColumns           []string
-	ColumnTypes             map[string]string
-	RecordPath              string
-	FileFormat              string
-	SourceName              string
-	CursorColumn            string
-	Incremental             bool
-	TargetEndpoint          string
-	TargetRegion            string
-	TargetBucket            string
-	TargetPrefixOverride    string
-	TargetPrefix            string
-	TargetForcePathStyle    bool
-	TargetAccessKeyID       string
-	TargetSecretAccessKey   string
-	AutoTune                bool
-	MaxInFlightTasks        int
-	PlannedTasks            int
-	TargetRowsPerTask       int64
-	TargetFileBytes         int64
-	SourceConnectionName    string
-	TargetConnectionName    string
-	JobName                 string
-	TargetNamespace         string
-	TargetTable             string
-	WriteMode               string
-	IcebergEnabled          bool
-	IcebergEngine           string
-	IcebergTable            string
-	IcebergPartitionKeys    []string
-	IcebergRunConfig        icebergreg.RunConfig
-	ConsistencyMode         string
-	OrderedCursorSupported  bool
-	QuerySupported          bool
-	FrontendSubmitSupported bool
+	WorkerPool             string
+	SourceEngine           string
+	SourceDSN              string
+	SourceMode             string
+	SourceTable            string
+	SourceQuery            string
+	QueryHash              string
+	WhereClause            string
+	SelectColumns          []string
+	ColumnTypes            map[string]string
+	RecordPath             string
+	FileFormat             string
+	SourceName             string
+	CursorColumn           string
+	Incremental            bool
+	TargetEndpoint         string
+	TargetRegion           string
+	TargetBucket           string
+	TargetPrefixOverride   string
+	TargetPrefix           string
+	TargetForcePathStyle   bool
+	TargetAccessKeyID      string
+	TargetSecretAccessKey  string
+	AutoTune               bool
+	MaxInFlightTasks       int
+	PlannedTasks           int
+	TargetRowsPerTask      int64
+	TargetFileBytes        int64
+	SourceConnectionName   string
+	TargetConnectionName   string
+	JobName                string
+	TargetNamespace        string
+	TargetTable            string
+	WriteMode              string
+	IcebergEnabled         bool
+	IcebergEngine          string
+	IcebergTable           string
+	IcebergPartitionKeys   []string
+	IcebergRunConfig       icebergreg.RunConfig
+	ConsistencyMode        string
+	OrderedCursorSupported bool
+	QuerySupported         bool
+	OneShotSubmitSupported bool
 }
 
 type requestValidationError struct {
@@ -204,7 +205,7 @@ func (s *Server) applySourceIdentity(spec *validatedRunSubmitSpec) error {
 	return nil
 }
 
-func frontendDefaultJobName(engine, table string) string {
+func oneShotDefaultJobName(engine, table string) string {
 	t := strings.TrimSpace(table)
 	if t == "" {
 		return "export"
@@ -231,7 +232,7 @@ func normalizedTargetDestinationIdentity(endpoint, region, bucket, prefix string
 	return strings.Join([]string{endpoint, region, bucket, prefix, fmt.Sprint(forcePathStyle)}, "\x00")
 }
 
-func applyFrontendDestinationIdentity(spec *validatedRunSubmitSpec) {
+func applyOneShotDestinationIdentity(spec *validatedRunSubmitSpec) {
 	if spec == nil {
 		return
 	}
@@ -326,8 +327,8 @@ func (s *Server) handleAPIJobByID(w http.ResponseWriter, r *http.Request) {
 		"run_id":     run.ID,
 		"job_id":     job.ID,
 		"status":     run.Status,
-		"events_url": "/api/runs/" + run.ID + "/events",
-		"run_url":    "/api/runs/" + run.ID,
+		"events_url": apiV1Prefix + "/runs/" + run.ID + "/events",
+		"run_url":    apiV1Prefix + "/runs/" + run.ID,
 	})
 }
 
@@ -354,21 +355,25 @@ func (s *Server) handleSourceEngines(w http.ResponseWriter, r *http.Request) {
 		QueryLanguages                []connectors.QueryLanguage `json:"query_languages"`
 		QueryIncrementalSupported     bool                       `json:"query_incremental_supported"`
 		QuerySchemaInferenceSupported bool                       `json:"query_schema_inference_supported"`
-		FrontendSubmitSupported       bool                       `json:"frontend_submit_supported"`
+		OneShotSubmitSupported        bool                       `json:"oneshot_submit_supported"`
+		// Deprecated: same value as oneshot_submit_supported.
+		LegacyFrontendSubmitSupported bool `json:"frontend_submit_supported"`
 	}
 	out := make([]sourceEngineInfo, 0, len(engines))
 	for _, engine := range engines {
-		ordered := connectors.SupportsOrderedCursor(engine)
 		queryCapabilities := connectors.QueryCapabilitiesForEngine(engine)
 		out = append(out, sourceEngineInfo{
-			Engine:                        engine,
-			TableModeSupported:            ordered,
-			OrderedCursorSupported:        ordered,
+			Engine: engine,
+			// Every registered engine extracts a table (or file): engines
+			// without an ordered cursor run it as one single-partition task.
+			TableModeSupported:            true,
+			OrderedCursorSupported:        connectors.SupportsOrderedCursor(engine),
 			QuerySupported:                queryCapabilities.Supported,
 			QueryLanguages:                queryCapabilities.Languages,
 			QueryIncrementalSupported:     queryCapabilities.IncrementalSupported,
 			QuerySchemaInferenceSupported: queryCapabilities.SchemaInferenceSupported,
-			FrontendSubmitSupported:       ordered || queryCapabilities.Supported,
+			OneShotSubmitSupported:        true,
+			LegacyFrontendSubmitSupported: true,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -389,7 +394,7 @@ func (s *Server) handleRunValidate(w http.ResponseWriter, r *http.Request) {
 		s.writeRunSubmitError(w, err)
 		return
 	}
-	applyFrontendDestinationIdentity(&spec)
+	applyOneShotDestinationIdentity(&spec)
 	if err := s.applySourceIdentity(&spec); err != nil {
 		writeInternalError(w, "failed to derive source connection identity")
 		return
@@ -405,7 +410,8 @@ func (s *Server) handleRunValidate(w http.ResponseWriter, r *http.Request) {
 		"source_mode":               spec.SourceMode,
 		"ordered_cursor_supported":  spec.OrderedCursorSupported,
 		"query_supported":           spec.QuerySupported,
-		"frontend_submit_supported": spec.FrontendSubmitSupported,
+		"oneshot_submit_supported":  spec.OneShotSubmitSupported,
+		"frontend_submit_supported": spec.OneShotSubmitSupported, // deprecated alias
 		"available_workers":         s.activeWorkerCount(r.Context()),
 		"type_mappings":             mappings,
 		"type_warnings":             warnings,
@@ -511,46 +517,20 @@ func (s *Server) handleRunSubmit(w http.ResponseWriter, r *http.Request) {
 		s.writeRunSubmitError(w, err)
 		return
 	}
-	applyFrontendDestinationIdentity(&spec)
+	applyOneShotDestinationIdentity(&spec)
 	if err := s.applySourceIdentity(&spec); err != nil {
 		writeInternalError(w, "failed to derive source connection identity")
 		return
 	}
 
-	sourceReq, err := buildFrontendSourceConnectionRequest(spec)
-	if err != nil {
-		writeInternalError(w, "failed to prepare source connection")
-		return
-	}
-	sourceConn, err := s.upsertConnectionByName(r, sourceReq)
-	if err != nil {
-		writeInternalError(w, "failed to prepare source connection")
+	s.oneshotMu.Lock()
+	sourceConn, targetConn, job, ok := s.prepareOneShotResources(w, r, spec)
+	s.oneshotMu.Unlock()
+	if !ok {
 		return
 	}
 
-	targetReq, err := buildFrontendTargetConnectionRequest(spec)
-	if err != nil {
-		writeInternalError(w, "failed to prepare target connection")
-		return
-	}
-	targetConn, err := s.upsertConnectionByName(r, targetReq)
-	if err != nil {
-		writeInternalError(w, "failed to prepare target connection")
-		return
-	}
-
-	jobReq, err := buildFrontendJobRequest(spec, sourceConn.ID, targetConn.ID)
-	if err != nil {
-		s.writeRunSubmitError(w, err)
-		return
-	}
-	job, err := s.upsertJobByName(r, jobReq)
-	if err != nil {
-		writeInternalError(w, "failed to prepare job")
-		return
-	}
-
-	registrationConfig, err := buildFrontendRegistrationConfig(spec)
+	registrationConfig, err := buildOneShotRegistrationConfig(spec)
 	if err != nil {
 		s.writeRunSubmitError(w, err)
 		return
@@ -567,9 +547,43 @@ func (s *Server) handleRunSubmit(w http.ResponseWriter, r *http.Request) {
 		"source_connection_id": sourceConn.ID,
 		"target_connection_id": targetConn.ID,
 		"status":               run.Status,
-		"events_url":           "/api/runs/" + run.ID + "/events",
-		"run_url":              "/api/runs/" + run.ID,
+		"events_url":           apiV1Prefix + "/runs/" + run.ID + "/events",
+		"run_url":              apiV1Prefix + "/runs/" + run.ID,
 	})
+}
+
+// prepareOneShotResources finds or creates the source connection, target
+// connection and job of a one-shot submit. Callers hold oneshotMu. On failure
+// it writes the error response and returns ok=false.
+func (s *Server) prepareOneShotResources(w http.ResponseWriter, r *http.Request, spec validatedRunSubmitSpec) (sourceConn, targetConn db.Connection, job db.Job, ok bool) {
+	sourceReq, err := buildOneShotSourceConnectionRequest(spec)
+	if err != nil {
+		writeInternalError(w, "failed to prepare source connection")
+		return
+	}
+	if sourceConn, err = s.upsertConnectionByName(r, sourceReq); err != nil {
+		writeInternalError(w, "failed to prepare source connection")
+		return
+	}
+	targetReq, err := buildOneShotTargetConnectionRequest(spec)
+	if err != nil {
+		writeInternalError(w, "failed to prepare target connection")
+		return
+	}
+	if targetConn, err = s.upsertConnectionByName(r, targetReq); err != nil {
+		writeInternalError(w, "failed to prepare target connection")
+		return
+	}
+	jobReq, err := buildOneShotJobRequest(spec, sourceConn.ID, targetConn.ID)
+	if err != nil {
+		s.writeRunSubmitError(w, err)
+		return
+	}
+	if job, err = s.upsertJobByName(r, jobReq); err != nil {
+		writeInternalError(w, "failed to prepare job")
+		return
+	}
+	return sourceConn, targetConn, job, true
 }
 
 func (s *Server) createRunForJobRequest(r *http.Request, jobID string, req runCreateRequest) (db.Run, []db.TaskInsert, error) {
@@ -876,46 +890,46 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 	// Build the spec once so every submit path carries the same source
 	// options (e.g. column_types); Iceberg only adds its own fields below.
 	spec := validatedRunSubmitSpec{
-		WorkerPool:              workerPool,
-		SourceEngine:            engine,
-		SourceDSN:               sourceDSN,
-		SourceMode:              sourceMode,
-		SourceTable:             sourceTable,
-		SourceQuery:             sourceQuery,
-		QueryHash:               queryHash,
-		WhereClause:             strings.TrimSpace(req.Source.WhereClause),
-		SelectColumns:           req.Source.SelectColumns,
-		ColumnTypes:             req.Source.ColumnTypes,
-		RecordPath:              strings.TrimSpace(req.Source.RecordPath),
-		FileFormat:              strings.TrimSpace(req.Source.FileFormat),
-		SourceName:              sourceName,
-		CursorColumn:            cursorColumn,
-		Incremental:             req.Source.Incremental,
-		TargetEndpoint:          targetEndpoint,
-		TargetRegion:            targetRegion,
-		TargetBucket:            targetBucket,
-		TargetPrefixOverride:    strings.TrimSpace(req.Target.S3Prefix),
-		TargetPrefix:            dataset.Prefix(req.Target.S3Prefix, engine, sourceName),
-		TargetForcePathStyle:    targetForcePathStyle,
-		TargetAccessKeyID:       targetAccessKeyID,
-		TargetSecretAccessKey:   targetSecretAccessKey,
-		AutoTune:                autoTune,
-		MaxInFlightTasks:        req.Performance.MaxInFlightTasks,
-		PlannedTasks:            req.Performance.PlannedTasks,
-		TargetRowsPerTask:       req.Performance.TargetRowsPerTask,
-		TargetFileBytes:         req.Performance.TargetFileBytes,
-		TargetConnectionName:    defaultFrontendTargetConnectionName,
-		JobName:                 frontendDefaultJobName(engine, sourceName),
-		TargetNamespace:         defaultFrontendTargetNamespace,
-		TargetTable:             defaultFrontendTargetTable,
-		WriteMode:               resolveFrontendWriteMode(req.Source.Incremental),
-		ConsistencyMode:         consistencyMode,
-		IcebergEnabled:          false,
-		IcebergEngine:           icebergEngine,
-		IcebergTable:            icebergTable,
-		OrderedCursorSupported:  true,
-		QuerySupported:          connectors.SupportsQueryMode(engine),
-		FrontendSubmitSupported: true,
+		WorkerPool:             workerPool,
+		SourceEngine:           engine,
+		SourceDSN:              sourceDSN,
+		SourceMode:             sourceMode,
+		SourceTable:            sourceTable,
+		SourceQuery:            sourceQuery,
+		QueryHash:              queryHash,
+		WhereClause:            strings.TrimSpace(req.Source.WhereClause),
+		SelectColumns:          req.Source.SelectColumns,
+		ColumnTypes:            req.Source.ColumnTypes,
+		RecordPath:             strings.TrimSpace(req.Source.RecordPath),
+		FileFormat:             strings.TrimSpace(req.Source.FileFormat),
+		SourceName:             sourceName,
+		CursorColumn:           cursorColumn,
+		Incremental:            req.Source.Incremental,
+		TargetEndpoint:         targetEndpoint,
+		TargetRegion:           targetRegion,
+		TargetBucket:           targetBucket,
+		TargetPrefixOverride:   strings.TrimSpace(req.Target.S3Prefix),
+		TargetPrefix:           dataset.Prefix(req.Target.S3Prefix, engine, sourceName),
+		TargetForcePathStyle:   targetForcePathStyle,
+		TargetAccessKeyID:      targetAccessKeyID,
+		TargetSecretAccessKey:  targetSecretAccessKey,
+		AutoTune:               autoTune,
+		MaxInFlightTasks:       req.Performance.MaxInFlightTasks,
+		PlannedTasks:           req.Performance.PlannedTasks,
+		TargetRowsPerTask:      req.Performance.TargetRowsPerTask,
+		TargetFileBytes:        req.Performance.TargetFileBytes,
+		TargetConnectionName:   defaultOneShotTargetConnectionName,
+		JobName:                oneShotDefaultJobName(engine, sourceName),
+		TargetNamespace:        defaultOneShotTargetNamespace,
+		TargetTable:            defaultOneShotTargetTable,
+		WriteMode:              resolveOneShotWriteMode(req.Source.Incremental),
+		ConsistencyMode:        consistencyMode,
+		IcebergEnabled:         false,
+		IcebergEngine:          icebergEngine,
+		IcebergTable:           icebergTable,
+		OrderedCursorSupported: connectors.SupportsOrderedCursor(engine),
+		QuerySupported:         connectors.SupportsQueryMode(engine),
+		OneShotSubmitSupported: true,
 	}
 
 	if icebergEnabled {
@@ -964,7 +978,7 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 	return spec, nil
 }
 
-func buildFrontendSourceConnectionRequest(spec validatedRunSubmitSpec) (connectionCreateRequest, error) {
+func buildOneShotSourceConnectionRequest(spec validatedRunSubmitSpec) (connectionCreateRequest, error) {
 	secret, err := json.Marshal(map[string]any{"dsn": spec.SourceDSN})
 	if err != nil {
 		return connectionCreateRequest{}, err
@@ -978,7 +992,7 @@ func buildFrontendSourceConnectionRequest(spec validatedRunSubmitSpec) (connecti
 	}, nil
 }
 
-func buildFrontendTargetConnectionRequest(spec validatedRunSubmitSpec) (connectionCreateRequest, error) {
+func buildOneShotTargetConnectionRequest(spec validatedRunSubmitSpec) (connectionCreateRequest, error) {
 	metadata, err := json.Marshal(map[string]any{
 		"endpoint":         spec.TargetEndpoint,
 		"region":           spec.TargetRegion,
@@ -1005,7 +1019,7 @@ func buildFrontendTargetConnectionRequest(spec validatedRunSubmitSpec) (connecti
 	}, nil
 }
 
-func buildFrontendJobRequest(spec validatedRunSubmitSpec, sourceConnectionID, targetConnectionID string) (jobCreateRequest, error) {
+func buildOneShotJobRequest(spec validatedRunSubmitSpec, sourceConnectionID, targetConnectionID string) (jobCreateRequest, error) {
 
 	partitionStrategy := "ordered_cursor"
 	if connectors.SupportsDocumentReader(spec.SourceEngine) {
@@ -1071,7 +1085,7 @@ func buildFrontendJobRequest(spec validatedRunSubmitSpec, sourceConnectionID, ta
 	}, nil
 }
 
-func buildFrontendRegistrationConfig(spec validatedRunSubmitSpec) (json.RawMessage, error) {
+func buildOneShotRegistrationConfig(spec validatedRunSubmitSpec) (json.RawMessage, error) {
 	if !spec.IcebergEnabled {
 		return nil, nil
 	}
@@ -1203,14 +1217,12 @@ func anyStringValue(v any) string {
 }
 
 func (s *Server) upsertConnectionByName(r *http.Request, req connectionCreateRequest) (db.Connection, error) {
-	connections, err := s.st.ListConnections(r.Context())
-	if err != nil {
+	existing, err := s.st.FindConnectionByName(r.Context(), req.Name)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
 		return db.Connection{}, err
-	}
-	for _, existing := range connections {
-		if existing.Name != req.Name {
-			continue
-		}
+	default:
 		if req.Kind == "target" && req.Engine == "s3" && req.Metadata != nil {
 			var before, after map[string]any
 			if json.Unmarshal(existing.MetadataJSON, &before) != nil || json.Unmarshal(req.Metadata, &after) != nil ||
@@ -1274,14 +1286,12 @@ func boolValue(v any, fallback bool) bool {
 }
 
 func (s *Server) upsertJobByName(r *http.Request, req jobCreateRequest) (db.Job, error) {
-	jobs, err := s.st.ListJobs(r.Context())
-	if err != nil {
+	existing, err := s.st.FindJobByName(r.Context(), req.Name)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
 		return db.Job{}, err
-	}
-	for _, existing := range jobs {
-		if existing.Name != req.Name {
-			continue
-		}
+	default:
 		upd := db.Job{
 			ID:                 existing.ID,
 			Name:               req.Name,
