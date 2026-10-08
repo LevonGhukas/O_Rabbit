@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/db"
+	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 	"github.com/LevonGhukas/O_Rabbit/internal/httperr"
 	"github.com/LevonGhukas/O_Rabbit/internal/planner"
 )
@@ -97,14 +99,39 @@ func writePlannerFailure(w http.ResponseWriter, err error) {
 	case errors.Is(err, planner.ErrDatasetBusy):
 		writeConflict(w, httperr.CodeDatasetBusy, "dataset is busy", datasetBusyDetails(err))
 	case err != nil:
-		details := err.Error()
-		if cause := errors.Unwrap(err); cause != nil {
-			details = cause.Error()
-		}
-		writeAPIError(w, http.StatusInternalServerError, httperr.CodeInternalError, "run planning failed", details)
+		writeRunPlanningFailure(w, err)
 	default:
 		writeInternalError(w, "internal server error")
 	}
+}
+
+// writeRunPlanningFailure reports why a run could not be planned:
+//   - 422 run_planning_failed: a recognized source/configuration problem
+//     (credentials, missing table, unusable cursor); the request must change.
+//   - 503 run_planning_failed: a dependency was unreachable or timed out;
+//     retrying may succeed.
+//   - 500 internal_error: an unrecognized failure, possibly an O_Rabbit bug.
+func writeRunPlanningFailure(w http.ResponseWriter, err error) {
+	f := failure.Classify(err)
+	cause := err.Error()
+	if unwrapped := errors.Unwrap(err); unwrapped != nil {
+		cause = unwrapped.Error()
+	}
+	status, code := http.StatusUnprocessableEntity, httperr.CodeRunPlanningFailed
+	switch {
+	case f.Retryable:
+		status = http.StatusServiceUnavailable
+	case f.Class == failure.FailureUnknownPermanent || f.Class == failure.FailureUnknownAmbiguous:
+		status, code = http.StatusInternalServerError, httperr.CodeInternalError
+	}
+	retryable := f.Retryable
+	httperr.WriteAPIError(w, status, httperr.APIError{
+		Code:         code,
+		Message:      "run planning failed",
+		Details:      map[string]any{"error": db.RedactCredentials(cause)},
+		FailureClass: string(f.Class),
+		Retryable:    &retryable,
+	})
 }
 
 // datasetBusyDetails tells the caller which run holds the dataset, so it can
