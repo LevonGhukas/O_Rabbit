@@ -662,6 +662,15 @@ type cassandraTypeRows struct {
 func (d *cassandraTypeDriver) Open(_ string) (driver.Conn, error) {
 	return &cassandraTypeConn{cols: d.cols}, nil
 }
+
+// Connect lets sql.OpenDB use the driver directly, so each synthetic result
+// set stays private to its caller instead of living in database/sql's
+// process-global driver registry.
+func (d *cassandraTypeDriver) Connect(_ context.Context) (driver.Conn, error) {
+	return d.Open("")
+}
+
+func (d *cassandraTypeDriver) Driver() driver.Driver { return d }
 func (c *cassandraTypeConn) Prepare(query string) (driver.Stmt, error) {
 	return &cassandraTypeStmt{cols: c.cols}, nil
 }
@@ -701,19 +710,17 @@ func (r *cassandraTypeRows) ColumnTypeDatabaseTypeName(index int) string {
 }
 
 // cassandraColumnType synthesizes a *sql.ColumnType for a CQL column.
+//
+// It must not use sql.Register: names derived from a freed value's address
+// get reused after GC, and a duplicate registration panics the caller (the
+// master's validate/submit handler, surfacing as "internal server error").
 func cassandraColumnType(name, cqlType string, nullable bool) (*sql.ColumnType, error) {
 	def := cassandraColDef{
 		name:     name,
 		scanType: cqlType,
 		nullable: nullable,
 	}
-	driverName := fmt.Sprintf("cassandra-type-synth-%p", &def)
-	sql.Register(driverName, &cassandraTypeDriver{cols: []cassandraColDef{def}})
-
-	db, err := sql.Open(driverName, "")
-	if err != nil {
-		return nil, fmt.Errorf("cassandraColumnType: open synthetic db: %w", err)
-	}
+	db := sql.OpenDB(&cassandraTypeDriver{cols: []cassandraColDef{def}})
 	defer db.Close()
 
 	rows, err := db.QueryContext(context.Background(), "")

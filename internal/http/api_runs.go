@@ -220,6 +220,13 @@ func applyFrontendDestinationIdentity(spec *validatedRunSubmitSpec) {
 	suffix := fmt.Sprintf("%x", digest[:8])
 	spec.TargetConnectionName = "s3-" + suffix
 	spec.JobName += "-" + suffix
+	// Workers read source credentials from the live connection row, so a
+	// connection shared by every job of one engine let each new submit
+	// rewrite the DSN of runs still executing. Scope it to the job.
+	if spec.SourceConnectionName != "" {
+		jobDigest := sha256.Sum256([]byte(spec.JobName))
+		spec.SourceConnectionName += "-" + fmt.Sprintf("%x", jobDigest[:8])
+	}
 }
 
 func normalizedIcebergEngine(raw string) string {
@@ -665,6 +672,10 @@ func (s *Server) writeRunSubmitError(w http.ResponseWriter, err error) {
 	case AsValidationError(err, &validationErr):
 		writeInvalidInput(w, validationErr.message, validationErr.details)
 	default:
+		// The client only sees a generic message; keep the cause in the log.
+		if s.log != nil {
+			s.log.Error("run submit failed", slog.String("err", err.Error()))
+		}
 		writeInternalError(w, "internal server error")
 	}
 }
