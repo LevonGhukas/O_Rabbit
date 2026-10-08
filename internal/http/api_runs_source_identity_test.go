@@ -149,8 +149,8 @@ func TestRunPlanningFailureForUnreachableSourceIsRetryable503(t *testing.T) {
 }
 
 // Concurrent one-shot submits for the same source and table must reuse one
-// job and one source connection: names are not unique in the schema, so the
-// find-or-create step has to be atomic.
+// job and one source connection: job names are not unique in the schema, so
+// the find-or-create step has to be atomic.
 func TestConcurrentOneShotSubmitsShareOneJob(t *testing.T) {
 	srv := newSubmitTestServer(openTestStore(t))
 	body := `{
