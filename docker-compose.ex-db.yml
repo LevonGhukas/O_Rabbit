@@ -22,8 +22,8 @@ services:
       MYSQL_DATABASE: test
       MYSQL_USER: mysql
       MYSQL_PASSWORD: mysql
-    command:
-      - --default-authentication-plugin=caching_sha2_password
+    # MySQL 8.4 removed --default-authentication-plugin; caching_sha2_password
+    # is already the default.
     ports:
       - "3306:3306"
     volumes:
@@ -88,6 +88,10 @@ services:
     restart: unless-stopped
     environment:
       CASSANDRA_CLUSTER_NAME: ExternalCluster
+      # Without a cap the JVM sizes its heap from host memory and is
+      # OOM-killed next to the other test databases.
+      MAX_HEAP_SIZE: 512M
+      HEAP_NEWSIZE: 128M
     ports:
       - "9042:9042"
     volumes:
