@@ -123,7 +123,7 @@ func cmdStackStatus(ctx context.Context, args []string) int {
 			grpcHealthy := checkGRPCTCPHealth(ctx, status.GRPCAddr)
 
 			var workers []lsWorkerStatus
-			_ = httpJSON(ctx, http.MethodGet, base+"/workers", nil, &workers)
+			_ = httpJSON(ctx, http.MethodGet, base+apiV1+"/workers", nil, &workers)
 
 			if *jsonOut {
 				if err := printStackStatusJSON(os.Stdout, buildStackStatusJSONReportFromAPI(base, status, grpcHealthy, workers)); err != nil {

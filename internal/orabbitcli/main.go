@@ -716,7 +716,7 @@ func cmdRunWatch(ctx context.Context, args []string) int {
 	}
 
 	out.infof("watching run %s on %s", runID, base)
-	runStatus, _, streamErr := streamSSE(ctx, base+"/sse?run_id="+runID, out, false)
+	runStatus, _, streamErr := streamSSE(ctx, base+apiV1+"/sse?run_id="+runID, out, false)
 	if streamErr != nil {
 		if code := exitCode(streamErr); code == exitInterrupted {
 			return code
