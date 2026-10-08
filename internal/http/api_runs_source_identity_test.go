@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
@@ -144,5 +145,50 @@ func TestRunPlanningFailureForUnreachableSourceIsRetryable503(t *testing.T) {
 	}
 	if resp.Error.FailureClass != "NETWORK_CONNECTION_FAILED" || resp.Error.Retryable == nil || !*resp.Error.Retryable {
 		t.Fatalf("failure_class=%q retryable=%v", resp.Error.FailureClass, resp.Error.Retryable)
+	}
+}
+
+// Concurrent one-shot submits for the same source and table must reuse one
+// job and one source connection: names are not unique in the schema, so the
+// find-or-create step has to be atomic.
+func TestConcurrentOneShotSubmitsShareOneJob(t *testing.T) {
+	srv := newSubmitTestServer(openTestStore(t))
+	body := `{
+		"source": {"engine": "postgres", "dsn": "postgresql://u:p@db:5432/sales", "table": "public.orders", "cursor_column": "id", "incremental": false},
+		"target": {"s3_endpoint": "http://minio:9000", "s3_bucket": "b", "s3_access_key_id": "k", "s3_secret_access_key": "s"},
+		"iceberg": {"enabled": false}
+	}`
+	const submits = 8
+	var wg sync.WaitGroup
+	for i := 0; i < submits; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/runs/submit", strings.NewReader(body)))
+		}()
+	}
+	wg.Wait()
+
+	ctx := context.Background()
+	jobs, err := srv.st.ListJobs(ctx)
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("jobs=%d after %d concurrent submits, want 1", len(jobs), submits)
+	}
+	conns, err := srv.st.ListConnections(ctx)
+	if err != nil {
+		t.Fatalf("list connections: %v", err)
+	}
+	sources := 0
+	for _, c := range conns {
+		if c.Kind == "source" {
+			sources++
+		}
+	}
+	if sources != 1 {
+		t.Fatalf("source connections=%d, want 1", sources)
 	}
 }

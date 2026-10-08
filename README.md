@@ -47,7 +47,7 @@ The connector registry currently contains:
 | S3 | `file`, `minio` | No | No |
 
 The guided HTTP submission API supports table and query modes according to the
-capabilities returned by `GET /api/source-engines`. The file-based
+capabilities returned by `GET /api/v1/source-engines`. The file-based
 `orabbit-client run submit` path is narrower: ordered-cursor engines use table
 mode, while FlightSQL uses a full SQL query.
 
@@ -622,7 +622,18 @@ run.
 ## HTTP API
 
 The API listens on port 9100 by default and returns JSON except for health text
-and SSE streams. There is no generated OpenAPI document in this repository.
+and SSE streams. The API is documented in [`docs/openapi.yaml`](docs/openapi.yaml)
+(OpenAPI 3.1); a test fails if a served `/api/v1` route is missing from it.
+
+**Versioning.** Every API resource is served under `/api/v1` (for example
+`/api/v1/runs/{id}`). The older unversioned paths (`/runs`, `/jobs`,
+`/connections`, `/workers`, `/servers`, `/deployments`, `/executions`, `/sse`)
+and the earlier `/api/...` copies (`/api/runs`, `/api/jobs/{id}/runs`,
+`/api/workers`, `/api/source-engines`, `/api/maintenance/submit`) keep working
+but are deprecated: their responses carry `Deprecation: true` and a
+`Link: </api/v1/...>; rel="successor-version"` header. Operational endpoints
+(`/healthz`, `/ready`, `/metrics`, `/status`) are not versioned. The CLI uses
+`/api/v1`, so upgrade the master before the CLI.
 
 When `ORABBIT_HTTP_AUTH_TOKEN` is set, send:
 
@@ -696,7 +707,7 @@ Task assignments carry no secrets. After a worker leases a task it calls
 the authenticated worker holding that attempt's live lease.
 
 Jobs run in the worker pool named by `options_json.worker_pool` (or
-`worker_pool` on `/api/runs/submit`), default `default`. A worker only
+`worker_pool` on `/api/v1/runs/submit`), default `default`. A worker only
 receives tasks, and so credentials, of jobs in the pool of the enrollment
 token it enrolled with. Use separate pools to keep workers of one trust zone
 away from another zone's source databases and buckets.
@@ -764,7 +775,7 @@ source, target or catalog. Classes are defined in `internal/failure`
 `TIMEOUT`, `QUERY_SYNTAX_ERROR`, `TABLE_IDENTIFIER_INVALID`,
 `DATA_INTEGRITY_ERROR`, catalog classes, `UNKNOWN_PERMANENT`, ...).
 
-Run planning failures (`/api/runs/submit`, `/jobs/{id}/runs`) return:
+Run planning failures (`/api/v1/runs/submit`, `/api/v1/jobs/{id}/runs`) return:
 
 | Status | Code | Meaning |
 | --- | --- | --- |
@@ -772,7 +783,7 @@ Run planning failures (`/api/runs/submit`, `/jobs/{id}/runs`) return:
 | `503` | `run_planning_failed` | A dependency was unreachable or timed out; retrying may succeed. |
 | `500` | `internal_error` | An unrecognized failure. |
 
-A run that ends `FAILED` describes itself in `GET /api/runs/{id}`:
+A run that ends `FAILED` describes itself in `GET /api/v1/runs/{id}`:
 
 - `failure_phase`: `planning`, `extract` or `commit`.
 - `failure_class`: for task failures, the class of the first failed task's
@@ -780,18 +791,21 @@ A run that ends `FAILED` describes itself in `GET /api/runs/{id}`:
 - `error_summary`: for task failures, `"<n> of <total> task(s) failed: <first
   task error>"`. Passwords embedded in URLs are redacted.
 
-One-shot submits (`/api/runs/submit`) store the source DSN in a connection
+One-shot submits (`/api/v1/runs/submit`) store the source DSN in a connection
 named `<engine>_source-<tag>`, where the tag is a keyed hash of the engine and
 DSN. Different databases or credentials never share a connection, and the
 name does not reveal the DSN.
 
 ### Core routes
 
+Paths below are relative to `/api/v1` unless they start with `/healthz`,
+`/ready`, `/status` or `/metrics`.
+
 | Method | Route | Purpose |
 | --- | --- | --- |
-| `GET` | `/healthz`, `/ready`, `/status` | Liveness, durable-leader readiness, and master/leadership status |
-| `GET` | `/metrics` | Bounded-label Prometheus lifecycle metrics |
-| `GET` | `/workers` or `/api/workers` | Active workers; use `?all=true` for all |
+| `GET` | `/healthz`, `/ready`, `/status` | Liveness, durable-leader readiness, and master/leadership status (unversioned) |
+| `GET` | `/metrics` | Bounded-label Prometheus lifecycle metrics (unversioned) |
+| `GET` | `/workers` | Active workers; use `?all=1` for all |
 | `POST` | `/workers/enrollment-tokens` | Create a one-time worker enrollment token |
 | `GET` | `/workers/identities` | List master-issued worker identities |
 | `POST` | `/workers/identities/{id}/revoke` | Revoke a worker identity |
@@ -799,30 +813,32 @@ name does not reveal the DSN.
 | `GET`, `PUT`, `DELETE` | `/connections/{id}` | Read, replace, or delete a connection |
 | `GET`, `POST` | `/jobs` | List or create jobs |
 | `GET`, `PUT`, `DELETE` | `/jobs/{id}` | Read, replace, or delete a job |
-| `POST` | `/jobs/{id}/runs` | Start a stored job |
+| `POST` | `/jobs/{id}/runs` | Start a stored job (`{registration_config}` → `{run, tasks}`) |
 | `GET` | `/runs`, `/runs/{id}` | List runs or read one run |
 | `POST` | `/runs/{id}/cancel` | Cancel a run |
 | `GET` | `/runs/{id}/progress` | Aggregated run progress |
 | `GET` | `/runs/{id}/events` | Persisted run events |
 | `GET` | `/runs/{id}/events/stream` | Run-scoped SSE |
 | `GET` | `/runs/{id}/artifacts` | Committed artifact metadata |
-| `GET` | `/api/runs/{id}/diagnosis` | Redacted lifecycle diagnosis and suggested next action |
-| `POST` | `/api/runs/{id}/recover` | Narrow audited recovery request with `action` and `reason` |
+| `GET` | `/runs/{id}/diagnosis` | Redacted lifecycle diagnosis and suggested next action |
+| `POST` | `/runs/{id}/recover` | Narrow audited recovery request with `action` and `reason` |
+| `POST` | `/runs/{id}/registration/retry` | Retry Iceberg registration, optionally with a new config |
 | `POST` | `/runs/{id}/registration/cancel` | Cancel Iceberg registration |
 | `GET` | `/sse?run_id={id}` | General replay/live event stream |
-| `GET` | `/api/source-engines` | Connector capabilities |
-| `POST` | `/api/runs/validate` | Validate guided submission input |
-| `POST` | `/api/runs/submit` | Validate, upsert, and start a guided run |
-| `GET` | `/api/runs` | Alias for run listing |
-| `POST` | `/api/jobs/{id}/runs` | Start a job with optional mode/Iceberg overrides |
-| `POST` | `/api/maintenance/submit` | Submit a maintenance operation |
+| `GET` | `/source-engines` | Connector capabilities (`table_mode_supported` is true for every engine; engines without `ordered_cursor_supported` extract as one task; `frontend_submit_supported` is a deprecated alias of `oneshot_submit_supported`) |
+| `POST` | `/runs/validate` | Validate guided submission input |
+| `POST` | `/runs/submit` | Validate, upsert, and start a guided run |
+| `POST` | `/maintenance/submit` | Submit a maintenance operation |
+
+The deprecated `POST /api/jobs/{id}/runs` (body `{mode, iceberg}`, response
+with run URLs) has no exact `/api/v1` twin; use `/api/v1/jobs/{id}/runs`.
 
 Example:
 
 ```sh
 curl -sS \
   -H "Authorization: Bearer $ORABBIT_HTTP_AUTH_TOKEN" \
-  http://localhost:9100/runs
+  http://localhost:9100/api/v1/runs
 ```
 
 `/healthz` means only that the HTTP process is alive. `/ready` additionally
@@ -844,7 +860,8 @@ and run events. Registration replay is refused after a durable catalog receipt.
 
 ### Remote operations routes
 
-The master also exposes a control-panel API for registered SSH servers:
+The master also exposes a control-panel API for registered SSH servers
+(served under `/api/v1`; the unversioned paths below are deprecated aliases):
 
 - `GET|POST /servers`
 - `GET|PATCH|DELETE /servers/{id}`
