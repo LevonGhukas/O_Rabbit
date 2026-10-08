@@ -16,6 +16,7 @@ import (
 	"time"
 
 	secretcrypto "github.com/LevonGhukas/O_Rabbit/internal/crypto"
+	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 	_ "modernc.org/sqlite"
 )
@@ -318,7 +319,9 @@ func (s *Store) FailAbandonedPlanningRuns(ctx context.Context, now time.Time) ([
 		const reason = "run planning was interrupted before tasks were created"
 		ts := now.UTC().Format(TimestampLayout)
 		for _, id := range failed {
-			if _, err := tx.ExecContext(ctx, `UPDATE runs SET status='FAILED', finished_at=?, error_summary=? WHERE id=? AND status='PLANNING'`, ts, reason, id); err != nil {
+			// The master stopped mid-planning: whether planning would have
+			// succeeded is unknown, so the failure is classified as ambiguous.
+			if _, err := tx.ExecContext(ctx, `UPDATE runs SET status='FAILED', finished_at=?, error_summary=?, failure_class=?, failure_phase=? WHERE id=? AND status='PLANNING'`, ts, reason, string(failure.FailureUnknownAmbiguous), RunFailurePhasePlanning, id); err != nil {
 				return err
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO events(id,run_id,ts,level,message,fields_json) VALUES(?,?,?,'ERROR',?,?)`,
@@ -390,6 +393,7 @@ type Run struct {
 	FinishedAt                     *string                   `json:"finished_at"`
 	ErrorSummary                   *string                   `json:"error_summary"`
 	FailureClass                   string                    `json:"failure_class,omitempty"`
+	FailurePhase                   string                    `json:"failure_phase,omitempty"`
 	TypeWarnings                   []typesystem.TypeWarning  `json:"type_warnings"`
 	RegistrationConfigJSON         json.RawMessage           `json:"-"`
 	ConfigSnapshotJSON             json.RawMessage           `json:"-"`
@@ -630,13 +634,13 @@ func (s *Store) CountRunsForJob(ctx context.Context, jobID string) (total int, a
 
 func (s *Store) FindActiveRunByDatasetKey(ctx context.Context, datasetKey string) (Run, bool, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class
+		SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, failure_phase
 		FROM runs
 		WHERE dataset_key=? AND status IN ('PLANNING','RUNNING','COMMITTING')
 		ORDER BY started_at ASC
 		LIMIT 1;`, datasetKey)
 	var r Run
-	if err := row.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass); err != nil {
+	if err := row.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &r.FailurePhase); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Run{}, false, nil
 		}
@@ -661,8 +665,8 @@ func (s *Store) CreateRun(ctx context.Context, r Run) error {
 		return err
 	}
 	err = withBusyRetry(ctx, func() error {
-		_, err = s.db.ExecContext(ctx, `INSERT INTO runs(id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-			r.ID, r.JobID, r.DatasetKey, r.Status, r.CorrelationID, normalizeTimestamp(r.StartedAt), r.FinishedAt, r.ErrorSummary, r.FailureClass, registrationConfig, string(warnings))
+		_, err = s.db.ExecContext(ctx, `INSERT INTO runs(id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, failure_phase, registration_config_json, type_warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+			r.ID, r.JobID, r.DatasetKey, r.Status, r.CorrelationID, normalizeTimestamp(r.StartedAt), r.FinishedAt, r.ErrorSummary, r.FailureClass, r.FailurePhase, registrationConfig, string(warnings))
 		if err != nil {
 			msg := err.Error()
 			if strings.Contains(msg, "idx_runs_dataset_active") || strings.Contains(msg, "runs.dataset_key") {
@@ -690,7 +694,7 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 
 // ListRunsPage lists runs newest first, paged like ListConnectionsPage.
 func (s *Store) ListRunsPage(ctx context.Context, limit int, cursor string) ([]Run, string, error) {
-	query, args, err := keysetPage(`SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json, commit_id, commit_intent_json, commit_phase FROM runs`, "started_at", limit, cursor)
+	query, args, err := keysetPage(`SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, failure_phase, registration_config_json, type_warnings_json, commit_id, commit_intent_json, commit_phase FROM runs`, "started_at", limit, cursor)
 	if err != nil {
 		return nil, "", err
 	}
@@ -702,7 +706,7 @@ func (s *Store) ListRunsPage(ctx context.Context, limit int, cursor string) ([]R
 	for rows.Next() {
 		var r Run
 		var registrationConfig, warningJSON, commitIntent string
-		if err := rows.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &registrationConfig, &warningJSON, &r.CommitID, &commitIntent, &r.CommitPhase); err != nil {
+		if err := rows.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &r.FailurePhase, &registrationConfig, &warningJSON, &r.CommitID, &commitIntent, &r.CommitPhase); err != nil {
 			return nil, "", err
 		}
 		if strings.TrimSpace(registrationConfig) != "" {
@@ -766,8 +770,8 @@ func keysetPage(base, orderColumn string, limit int, cursor string) (string, []a
 func (s *Store) GetRun(ctx context.Context, id string) (Run, error) {
 	var r Run
 	var registrationConfig, warningJSON, commitIntent, configSnapshot string
-	row := s.db.QueryRowContext(ctx, `SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json, commit_id, commit_intent_json, commit_phase, config_snapshot_json FROM runs WHERE id=?;`, id)
-	if err := row.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &registrationConfig, &warningJSON, &r.CommitID, &commitIntent, &r.CommitPhase, &configSnapshot); err != nil {
+	row := s.db.QueryRowContext(ctx, `SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, failure_phase, registration_config_json, type_warnings_json, commit_id, commit_intent_json, commit_phase, config_snapshot_json FROM runs WHERE id=?;`, id)
+	if err := row.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &r.FailurePhase, &registrationConfig, &warningJSON, &r.CommitID, &commitIntent, &r.CommitPhase, &configSnapshot); err != nil {
 		return Run{}, wrapRunRegistrationConfigColumnErr(err)
 	}
 	if strings.TrimSpace(configSnapshot) != "" {
@@ -793,7 +797,7 @@ func (s *Store) GetRun(ctx context.Context, id string) (Run, error) {
 
 // ListSucceededRunsForJob returns succeeded runs oldest-first for retention.
 func (s *Store) ListSucceededRunsForJob(ctx context.Context, jobID string) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, registration_config_json, type_warnings_json FROM runs WHERE job_id = ? AND status = 'SUCCEEDED' ORDER BY started_at ASC;`, jobID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, failure_phase, registration_config_json, type_warnings_json FROM runs WHERE job_id = ? AND status = 'SUCCEEDED' ORDER BY started_at ASC;`, jobID)
 	if err != nil {
 		return nil, wrapRunRegistrationConfigColumnErr(err)
 	}
@@ -802,7 +806,7 @@ func (s *Store) ListSucceededRunsForJob(ctx context.Context, jobID string) ([]Ru
 	for rows.Next() {
 		var r Run
 		var registrationConfig, warningJSON string
-		if err := rows.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &registrationConfig, &warningJSON); err != nil {
+		if err := rows.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &r.FailurePhase, &registrationConfig, &warningJSON); err != nil {
 			return nil, err
 		}
 		if err := decodeRunWarnings(warningJSON, &r); err != nil {
@@ -1438,9 +1442,12 @@ func (s *Store) TryFinalizeRun(ctx context.Context, runID string) (bool, string,
 		}
 
 		if fail > 0 {
-			summary := fmt.Sprintf("%d task(s) failed", fail)
+			summary, class, err := taskFailureSummary(ctx, tx, runID, fail, total)
+			if err != nil {
+				return err
+			}
 			fin := nowUTC()
-			if _, err := tx.ExecContext(ctx, `UPDATE runs SET status='FAILED', finished_at=?, error_summary=? WHERE id=?;`, fin, summary, runID); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE runs SET status='FAILED', finished_at=?, error_summary=?, failure_class=?, failure_phase=? WHERE id=?;`, fin, summary, class, RunFailurePhaseExtract, runID); err != nil {
 				return err
 			}
 			_, _ = tx.ExecContext(ctx, `UPDATE tasks SET status='CANCELED', finished_at=?, error_message='canceled' WHERE run_id=? AND status='PENDING';`, fin, runID)

@@ -22,6 +22,7 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/dataset"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
+	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
 	"github.com/LevonGhukas/O_Rabbit/internal/sysinfo"
@@ -277,7 +278,7 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 		if err == nil || strings.TrimSpace(runIDForFailure) == "" {
 			return
 		}
-		msg := strings.TrimSpace(err.Error())
+		msg := strings.TrimSpace(db.RedactCredentials(err.Error()))
 		if msg == "" {
 			msg = "run planning failed"
 		}
@@ -285,6 +286,7 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 		defer cancel()
 
 		_ = st.UpdateRunStatus(failCtx, runIDForFailure, "FAILED", true, &msg)
+		_ = st.RecordRunFailure(failCtx, runIDForFailure, string(failure.ClassOf(err)), db.RunFailurePhasePlanning)
 		emitPlanEvent(failCtx, st, runIDForFailure, "ERROR", "planner failed", map[string]any{"error": msg})
 	}()
 	startTasks := func(tasks []db.TaskInsert) (bool, error) {
