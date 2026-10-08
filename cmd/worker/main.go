@@ -457,11 +457,9 @@ func main() {
 					artifactFailure,
 				)
 			}
-			failureClass := ""
-			var fErr *failure.Failure
-			if errors.As(err, &fErr) {
-				failureClass = string(fErr.Class)
-			}
+			// Always report a class: unrecognized errors classify as
+			// UNKNOWN_PERMANENT rather than leaving the failure unclassified.
+			failureClass := string(failure.ClassOf(err))
 			reportErr := reportResultWithRetry(
 				ctx,
 				log,

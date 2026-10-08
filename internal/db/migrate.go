@@ -42,6 +42,7 @@ var migrations = []migration{
 	{version: 26, sql: schemaV26},
 	{version: 27, sql: schemaV27},
 	{version: 28, apply: normalizeStoredTimestamps},
+	{version: 29, sql: schemaV29},
 }
 
 // normalizeStoredTimestamps rewrites every stored timestamp in
@@ -135,6 +136,12 @@ ALTER TABLE iceberg_registrations ADD COLUMN retry_override_config_json TEXT NOT
 
 const schemaV22 = `
 ALTER TABLE iceberg_registrations ADD COLUMN manual_retry_budget INTEGER NOT NULL DEFAULT 0;
+`
+
+// schemaV29 records where a run failed (planning, extract, commit), so
+// clients can explain a failure without parsing error_summary.
+const schemaV29 = `
+ALTER TABLE runs ADD COLUMN failure_phase TEXT NOT NULL DEFAULT '';
 `
 
 // schemaV27 stores the non-secret configuration each run was planned with,
