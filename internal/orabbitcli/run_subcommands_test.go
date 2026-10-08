@@ -17,10 +17,10 @@ import (
 func TestCmdRunWatchStreamsExistingRun(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/runs/run-1":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runs/run-1":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"run":{"id":"run-1","status":"RUNNING"},"tasks":[]}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/sse":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sse":
 			if got := strings.TrimSpace(r.URL.Query().Get("run_id")); got != "run-1" {
 				http.Error(w, "unexpected run_id", http.StatusBadRequest)
 				return
@@ -63,14 +63,14 @@ func TestCmdRunWatchInterruptStopsWatchingWithoutCancelingRun(t *testing.T) {
 	var cancelCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/runs/run-1":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runs/run-1":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"run":{"id":"run-1","status":"RUNNING"},"tasks":[]}`)
-		case r.Method == http.MethodPost && r.URL.Path == "/runs/run-1/cancel":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/runs/run-1/cancel":
 			cancelCalls.Add(1)
 			w.WriteHeader(http.StatusOK)
 			fmt.Fprint(w, `{"run":{"id":"run-1","status":"CANCELED"},"canceled":true,"pending_tasks_canceled":1}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/sse":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sse":
 			w.Header().Set("Content-Type", "text/event-stream")
 			fl, ok := w.(http.Flusher)
 			if !ok {
@@ -111,7 +111,7 @@ func TestCmdRunCancelSendsExplicitCancelRequest(t *testing.T) {
 	var cancelCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/runs/run-1/cancel":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/runs/run-1/cancel":
 			cancelCalls.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"run":{"id":"run-1","status":"CANCELED"},"canceled":true,"pending_tasks_canceled":2}`)
@@ -143,7 +143,7 @@ func TestCmdRunCancelSendsExplicitCancelRequest(t *testing.T) {
 
 func TestCmdRunDiagnosePrintsRedactedJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/api/runs/run-1/diagnosis" {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/runs/run-1/diagnosis" {
 			http.NotFound(w, r)
 			return
 		}
@@ -168,7 +168,7 @@ func TestCmdRunDiagnosePrintsRedactedJSON(t *testing.T) {
 func TestCmdRunRecoverSendsActionAndReason(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/runs/run-1/recover" {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/runs/run-1/recover" {
 			http.NotFound(w, r)
 			return
 		}
