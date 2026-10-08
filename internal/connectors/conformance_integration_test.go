@@ -11,6 +11,7 @@ package connectors
 //	ORABBIT_IT_ORACLE_DSN=oracle://app:app@localhost:1521/FREEPDB1
 //	ORABBIT_IT_TRINO_DSN=http://orabbit@localhost:8080?catalog=memory&schema=default
 //	ORABBIT_IT_CASSANDRA_DSN=cassandra://localhost:9042/orabbit_it
+//	ORABBIT_IT_MSSQL_DSN=sqlserver://sa:YourStrong!Passw0rd@localhost:1433?database=master
 //
 // Each SQL engine gets the same table (orabbit_it_orders, 100 rows, id 1..100,
 // amount = id) and the same checks, so engines cannot drift apart.
@@ -82,6 +83,11 @@ func sqlConformanceEngines() []sqlConformanceEngine {
 			timestamp: "TIMESTAMP '2026-01-01 00:00:00'",
 			seedDB:    func(dsn string) (*sql.DB, error) { return sql.Open("oracle", dsn) },
 			ddl:       `CREATE TABLE ORABBIT_IT_ORDERS (ID NUMBER(18) NOT NULL PRIMARY KEY, NAME VARCHAR2(50) NULL, AMOUNT NUMBER(10,2) NOT NULL, CREATED TIMESTAMP NOT NULL)`,
+		},
+		{
+			env: "ORABBIT_IT_MSSQL_DSN", engine: "mssql", nullableKnown: true, table: "dbo." + conformanceTable,
+			seedDB: func(dsn string) (*sql.DB, error) { return sql.Open("sqlserver", dsn) },
+			ddl:    `CREATE TABLE dbo.` + conformanceTable + ` (id BIGINT NOT NULL PRIMARY KEY, name NVARCHAR(50) NULL, amount DECIMAL(10,2) NOT NULL, created DATETIME2 NOT NULL)`,
 		},
 		{
 			env: "ORABBIT_IT_TRINO_DSN", engine: "trino", timestamp: "TIMESTAMP '2026-01-01 00:00:00'",
