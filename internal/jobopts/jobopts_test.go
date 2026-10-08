@@ -297,3 +297,17 @@ func TestParseNilEqualsEmptyJSON(t *testing.T) {
 		t.Fatalf("nil and empty JSON differ:\n%+v\n%+v", nilOpts, emptyOpts)
 	}
 }
+
+func TestDeprecatedUsages(t *testing.T) {
+	legacy := Options{IDColumn: "id", PartitionStrategy: "int_range", ChunkSize: 1000}
+	if got := legacy.DeprecatedUsages("postgres"); len(got) != 3 {
+		t.Fatalf("legacy usages=%v, want 3", got)
+	}
+	if got := (Options{}).DeprecatedUsages("s3"); len(got) != 1 {
+		t.Fatalf("s3 without format usages=%v, want 1", got)
+	}
+	current := Options{CursorColumn: "id", IDColumn: "id", PartitionStrategy: "ordered_cursor", FileFormat: "csv"}
+	if got := current.DeprecatedUsages("s3"); len(got) != 0 {
+		t.Fatalf("current options usages=%v, want none", got)
+	}
+}

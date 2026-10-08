@@ -39,9 +39,10 @@ import (
 // It holds references to the logger, database store, broadcaster, encryption key, and status information.
 type Server struct {
 	// oneshotMu makes a one-shot submit's find-or-create of its connections
-	// and job atomic: names are not unique in the schema, so two concurrent
-	// submits could otherwise both create a job. Only the leader master
-	// writes, so an in-process lock is enough.
+	// and job atomic. Job names are not unique in the schema, so two
+	// concurrent submits could both create a job; for connections (unique
+	// names) the loser would fail with a constraint error. Only the leader
+	// master writes, so an in-process lock is enough.
 	oneshotMu sync.Mutex
 
 	log              *slog.Logger

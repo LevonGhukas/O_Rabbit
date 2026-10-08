@@ -91,6 +91,26 @@ func (o Options) EffectiveCursorColumn() string {
 	return strings.TrimSpace(o.IDColumn)
 }
 
+// DeprecatedUsages lists legacy compatibility options this job still relies
+// on, so they can be measured before they are removed. srcEngine is the
+// normalized source engine.
+func (o Options) DeprecatedUsages(srcEngine string) []string {
+	var out []string
+	if strings.TrimSpace(o.CursorColumn) == "" && strings.TrimSpace(o.IDColumn) != "" {
+		out = append(out, "id_column (use cursor_column)")
+	}
+	if strings.EqualFold(strings.TrimSpace(o.PartitionStrategy), "int_range") {
+		out = append(out, "partition_strategy=int_range (use ordered_cursor)")
+	}
+	if o.ChunkSize > 0 {
+		out = append(out, "chunk_size (use planned_tasks or target_rows_per_task)")
+	}
+	if srcEngine == "s3" && strings.TrimSpace(o.FileFormat) == "" {
+		out = append(out, "S3 format inferred from the file extension (set format)")
+	}
+	return out
+}
+
 func (o Options) NormalizedPartitionStrategy() string {
 	s := strings.ToLower(strings.TrimSpace(o.PartitionStrategy))
 	switch s {
