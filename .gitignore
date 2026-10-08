@@ -51,3 +51,4 @@ Benchmarks/oracle/*.txt
 .env.backup
 
 configs.sql
+CLAUDE.md
