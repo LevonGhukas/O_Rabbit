@@ -35,8 +35,8 @@ func (s *Store) GetConnection(ctx context.Context, id string) (Connection, error
 	return c, nil
 }
 
-// FindConnectionByName returns the newest connection named name, or
-// sql.ErrNoRows. Names are not unique; the newest wins, as in listings.
+// FindConnectionByName returns the connection named name (names are unique,
+// idx_connections_name), or sql.ErrNoRows.
 func (s *Store) FindConnectionByName(ctx context.Context, name string) (Connection, error) {
 	var c Connection
 	var meta string
