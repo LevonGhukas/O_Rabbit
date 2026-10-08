@@ -93,11 +93,13 @@ func (s *Store) RecordCommitReconciliationFailure(ctx context.Context, runID, cl
 		ns := now.UTC().Format(TimestampLayout)
 		finished := any(nil)
 		commitPhase := "RETRY_REQUIRED"
+		failurePhase := ""
 		if runStatus == "FAILED" {
 			finished = ns
 			commitPhase = "FAILED"
+			failurePhase = RunFailurePhaseCommit
 		}
-		res, err := tx.ExecContext(ctx, `UPDATE runs SET status=?,finished_at=?,error_summary=?,failure_class=?,commit_reconciliation_status=?,commit_reconciliation_attempt_count=?,commit_reconciliation_next_eligible_at=?,operator_action_required=?,commit_phase=? WHERE id=? AND status='COMMITTING'`, runStatus, finished, message, class, reconciliationStatus, attempt, next, operatorAction, commitPhase, runID)
+		res, err := tx.ExecContext(ctx, `UPDATE runs SET status=?,finished_at=?,error_summary=?,failure_class=?,failure_phase=?,commit_reconciliation_status=?,commit_reconciliation_attempt_count=?,commit_reconciliation_next_eligible_at=?,operator_action_required=?,commit_phase=? WHERE id=? AND status='COMMITTING'`, runStatus, finished, message, class, failurePhase, reconciliationStatus, attempt, next, operatorAction, commitPhase, runID)
 		if err != nil {
 			return err
 		}
