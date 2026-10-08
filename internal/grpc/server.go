@@ -1327,6 +1327,16 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 			return fmt.Errorf("checkpoint fencing conflict: dataset state belongs to run %s", existingState.RunID)
 		}
 		if existingState.RunID == runID {
+			// The run was loaded before a concurrent pass persisted its
+			// intent and wrote this state; re-read before declaring a conflict.
+			if fresh, getErr := s.st.GetRun(ctx, runID); getErr == nil {
+				if fresh.Status == "SUCCEEDED" {
+					return nil
+				}
+				if len(fresh.CommitIntentJSON) > 0 {
+					return s.commitRun(ctx, runID)
+				}
+			}
 			return fmt.Errorf("checkpoint integrity conflict: state for run %s exists without durable intent", runID)
 		}
 	}
