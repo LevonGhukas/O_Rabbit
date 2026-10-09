@@ -1,0 +1,26 @@
+name: Release images
+
+# Every push to main runs the full CI and then publishes
+# levonghukas/orabbit:latest-master and :latest-worker.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel a release half way; queue the next one instead.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    name: CI and publish
+    uses: ./.github/workflows/ci.yml
+    with:
+      publish: true
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

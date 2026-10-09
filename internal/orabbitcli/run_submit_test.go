@@ -45,10 +45,10 @@ func TestCmdRunSubmitFromFile(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/connections":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `[]`)
-		case r.Method == http.MethodPost && r.URL.Path == "/connections":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/connections":
 			var req capturedConnection
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Fatalf("decode connection request: %v", err)
@@ -59,16 +59,16 @@ func TestCmdRunSubmitFromFile(t *testing.T) {
 			mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"id":"conn-%d"}`, idx)
-		case r.Method == http.MethodGet && r.URL.Path == "/jobs":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/jobs":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `[]`)
-		case r.Method == http.MethodPost && r.URL.Path == "/jobs":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/jobs":
 			if err := json.NewDecoder(r.Body).Decode(&jobReq); err != nil {
 				t.Fatalf("decode job request: %v", err)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"id":"job-1"}`)
-		case r.Method == http.MethodPost && r.URL.Path == "/jobs/job-1/runs":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/jobs/job-1/runs":
 			if err := json.NewDecoder(r.Body).Decode(&runReq); err != nil {
 				t.Fatalf("decode run request: %v", err)
 			}

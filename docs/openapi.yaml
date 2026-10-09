@@ -1,0 +1,314 @@
+openapi: 3.1.0
+info:
+  title: O_Rabbit master API
+  version: "1"
+  description: |
+    Versioned HTTP API of the O_Rabbit master. Every resource is served under
+    `/api/v1`. The older unversioned paths (`/runs`, `/jobs`, `/connections`,
+    `/workers`, `/servers`, `/deployments`, `/executions`, `/sse`, `/api/runs`,
+    `/api/jobs`, `/api/workers`, `/api/source-engines`, `/api/maintenance/submit`)
+    still work but are deprecated: their responses carry `Deprecation: true` and
+    a `Link: <...>; rel="successor-version"` header naming the `/api/v1` path.
+
+    Operational endpoints are not versioned: `/healthz`, `/ready`, `/metrics`,
+    `/status`.
+
+    Authentication: when `ORABBIT_HTTP_AUTH_TOKEN` is set, every request needs
+    `Authorization: Bearer <token>`. Remote operations (`/servers`,
+    `/deployments`, `/executions`) are disabled unless enabled, and then accept
+    only their own token, never the API token.
+
+    Bodies of the larger resources (jobs, connections, remote operations) are
+    described in README.md; this spec covers their paths and the run API in detail.
+servers:
+  - url: /api/v1
+security:
+  - bearer: []
+paths:
+  /source-engines:
+    get:
+      summary: Source engines and what each can do
+      responses:
+        "200":
+          description: One entry per registered engine
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SourceEngine" }
+  /runs/validate:
+    post:
+      summary: Validate a one-shot run without creating anything
+      requestBody: { $ref: "#/components/requestBodies/RunSubmit" }
+      responses:
+        "200": { description: Valid; includes type mappings and warnings }
+        "400": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /runs/submit:
+    post:
+      summary: Submit a one-shot run (connection, job and run in one call)
+      requestBody: { $ref: "#/components/requestBodies/RunSubmit" }
+      responses:
+        "201":
+          description: Run created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunSubmitted" }
+        "400": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /runs:
+    get:
+      summary: List runs (newest first)
+      parameters:
+        - { name: limit, in: query, schema: { type: integer } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: A page of runs; the next page cursor is in X-Next-Cursor
+          headers:
+            X-Next-Cursor: { schema: { type: string } }
+  /runs/{run_id}:
+    parameters: [{ $ref: "#/components/parameters/RunID" }]
+    get:
+      summary: A run and its tasks
+      responses:
+        "200":
+          description: Run detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run: { $ref: "#/components/schemas/Run" }
+                  tasks: { type: array, items: { type: object } }
+        "404": { $ref: "#/components/responses/Error" }
+  /runs/{run_id}/events:
+    parameters: [{ $ref: "#/components/parameters/RunID" }]
+    get:
+      summary: Run events, paged by cursor
+      parameters:
+        - { name: limit, in: query, schema: { type: integer } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        "200": { description: Events and the next cursor }
+  /runs/{run_id}/events/stream:
+    parameters: [{ $ref: "#/components/parameters/RunID" }]
+    get:
+      summary: Run events as Server-Sent Events
+      responses:
+        "200": { description: text/event-stream }
+  /runs/{run_id}/cancel:
+    parameters: [{ $ref: "#/components/parameters/RunID" }]
+    post:
+      summary: Cancel a run
+      responses:
+        "200": { description: Cancel accepted }
+  /runs/{run_id}/progress:
+    parameters: [{ $ref: "#/components/parameters/RunID" }]
+    get: { summary: Run progress, responses: { "200": { description: Progress } } }
+  /runs/{run_id}/artifacts:
+    parameters: [{ $ref: "#/components/parameters/RunID" }]
+    get: { summary: Files written by the run, responses: { "200": { description: Artifacts } } }
+  /runs/{run_id}/diagnosis:
+    parameters: [{ $ref: "#/components/parameters/RunID" }]
+    get: { summary: Diagnosis of a stuck or failed run, responses: { "200": { description: Diagnosis } } }
+  /runs/{run_id}/recover:
+    parameters: [{ $ref: "#/components/parameters/RunID" }]
+    post: { summary: Operator recovery action, responses: { "200": { description: Recovery result } } }
+  /runs/{run_id}/registration/retry:
+    parameters: [{ $ref: "#/components/parameters/RunID" }]
+    post:
+      summary: Retry Iceberg registration, optionally with a new config
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                override_config: { type: boolean }
+                config_yaml: { type: string }
+      responses:
+        "200": { description: Retry scheduled }
+  /runs/{run_id}/registration/cancel:
+    parameters: [{ $ref: "#/components/parameters/RunID" }]
+    post: { summary: Cancel Iceberg registration, responses: { "200": { description: Canceled } } }
+  /jobs:
+    get: { summary: List jobs, responses: { "200": { description: Jobs } } }
+    post: { summary: Create a job, responses: { "201": { description: Job } } }
+  /jobs/{job_id}:
+    parameters: [{ $ref: "#/components/parameters/JobID" }]
+    get: { summary: A job, responses: { "200": { description: Job } } }
+    put: { summary: Update a job, responses: { "200": { description: Job } } }
+    delete: { summary: Delete a job, responses: { "204": { description: Deleted } } }
+  /jobs/{job_id}/runs:
+    parameters: [{ $ref: "#/components/parameters/JobID" }]
+    post:
+      summary: Start a run of an existing job
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                registration_config: { type: object }
+      responses:
+        "201": { description: "{run, tasks}" }
+  /connections:
+    get: { summary: List connections (secrets redacted), responses: { "200": { description: Connections } } }
+    post: { summary: Create a connection, responses: { "201": { description: Connection } } }
+  /connections/{connection_id}:
+    parameters: [{ name: connection_id, in: path, required: true, schema: { type: string } }]
+    get: { summary: A connection, responses: { "200": { description: Connection } } }
+    put: { summary: Update a connection, responses: { "200": { description: Connection } } }
+    delete: { summary: Delete a connection, responses: { "204": { description: Deleted } } }
+  /workers:
+    get:
+      summary: Workers (active only unless all=1)
+      parameters: [{ name: all, in: query, schema: { type: string, enum: ["1"] } }]
+      responses: { "200": { description: Workers } }
+  /workers/{worker_id}:
+    parameters: [{ name: worker_id, in: path, required: true, schema: { type: string } }]
+    get: { summary: Worker identity and enrollment routes (see README), responses: { "200": { description: Worker } } }
+  /maintenance/submit:
+    post: { summary: Submit Iceberg maintenance, responses: { "201": { description: Maintenance run } } }
+  /sse:
+    get:
+      summary: Run events as Server-Sent Events (by run_id)
+      parameters: [{ name: run_id, in: query, required: true, schema: { type: string } }]
+      responses: { "200": { description: text/event-stream } }
+  /servers:
+    get: { summary: "Remote operations: servers", security: [{ remoteOps: [] }], responses: { "200": { description: Servers } } }
+  /servers/{server_id}:
+    parameters: [{ name: server_id, in: path, required: true, schema: { type: string } }]
+    get: { summary: "Remote operations: a server", security: [{ remoteOps: [] }], responses: { "200": { description: Server } } }
+  /deployments:
+    get: { summary: "Remote operations: deployments", security: [{ remoteOps: [] }], responses: { "200": { description: Deployments } } }
+  /deployments/{deployment_id}:
+    parameters: [{ name: deployment_id, in: path, required: true, schema: { type: string } }]
+    get: { summary: "Remote operations: a deployment", security: [{ remoteOps: [] }], responses: { "200": { description: Deployment } } }
+  /executions/{execution_id}:
+    parameters: [{ name: execution_id, in: path, required: true, schema: { type: string } }]
+    get: { summary: "Remote operations: an execution", security: [{ remoteOps: [] }], responses: { "200": { description: Execution } } }
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer, description: ORABBIT_HTTP_AUTH_TOKEN }
+    remoteOps: { type: http, scheme: bearer, description: The separate remote-operations token }
+  parameters:
+    RunID: { name: run_id, in: path, required: true, schema: { type: string } }
+    JobID: { name: job_id, in: path, required: true, schema: { type: string } }
+  requestBodies:
+    RunSubmit:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/RunSubmitRequest" }
+  responses:
+    Error:
+      description: Error envelope
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  schemas:
+    SourceEngine:
+      type: object
+      required: [engine, table_mode_supported, ordered_cursor_supported, query_supported]
+      properties:
+        engine: { type: string }
+        table_mode_supported:
+          type: boolean
+          description: Tables can be extracted (as one task when there is no ordered cursor).
+        ordered_cursor_supported:
+          type: boolean
+          description: Tables can be split and read incrementally by an ordered cursor column.
+        query_supported: { type: boolean }
+        query_languages: { type: array, items: { type: string } }
+        query_incremental_supported: { type: boolean }
+        query_schema_inference_supported: { type: boolean }
+        oneshot_submit_supported: { type: boolean, description: Accepted by /runs/submit. }
+        frontend_submit_supported: { type: boolean, deprecated: true, description: Old name of oneshot_submit_supported. }
+    RunSubmitRequest:
+      type: object
+      required: [source, target]
+      properties:
+        source:
+          type: object
+          required: [engine, dsn]
+          properties:
+            engine: { type: string }
+            dsn: { type: string, description: Source connection string or s3:// URI. Never logged. }
+            mode: { type: string, enum: [table, query] }
+            table: { type: string }
+            query: { type: string }
+            cursor_column: { type: string }
+            incremental: { type: boolean }
+            where_clause: { type: string }
+            select_columns: { type: array, items: { type: string } }
+            column_types: { type: object, additionalProperties: { type: string } }
+            record_path: { type: string }
+            format: { type: string }
+        target:
+          type: object
+          properties:
+            s3_endpoint: { type: string }
+            s3_region: { type: string }
+            s3_bucket: { type: string }
+            s3_prefix: { type: string }
+            s3_force_path_style: { type: boolean }
+            s3_access_key_id: { type: string }
+            s3_secret_access_key: { type: string }
+        performance:
+          type: object
+          properties:
+            auto_tune: { type: boolean }
+            max_in_flight_tasks: { type: integer }
+            planned_tasks: { type: integer }
+            target_rows_per_task: { type: integer }
+            target_file_bytes: { type: integer }
+        iceberg:
+          type: object
+          properties:
+            enabled: { type: boolean }
+            engine: { type: string, enum: [rest-go, ice] }
+            table: { type: string }
+            config_yaml: { type: string }
+            options: { type: object }
+            partition_keys: { type: array, items: { type: string } }
+        consistency:
+          type: object
+          properties:
+            mode: { type: string }
+        worker_pool: { type: string }
+    RunSubmitted:
+      type: object
+      properties:
+        run_id: { type: string }
+        job_id: { type: string }
+        status: { type: string }
+        events_url: { type: string, example: /api/v1/runs/RUN_ID/events }
+        run_url: { type: string, example: /api/v1/runs/RUN_ID }
+    Run:
+      type: object
+      description: See README "Errors and run failures" for the failure fields.
+      properties:
+        id: { type: string }
+        job_id: { type: string }
+        status: { type: string }
+        error_summary: { type: [string, "null"] }
+        failure_class: { type: string }
+        failure_phase: { type: string, enum: ["", planning, extract, commit] }
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: run_planning_failed }
+            message: { type: string }
+            details: { type: object }
+            failure_class: { type: string }
+            retryable: { type: boolean }
+            request_id: { type: string }

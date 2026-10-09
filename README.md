@@ -47,7 +47,7 @@ The connector registry currently contains:
 | S3 | `file`, `minio` | No | No |
 
 The guided HTTP submission API supports table and query modes according to the
-capabilities returned by `GET /api/source-engines`. The file-based
+capabilities returned by `GET /api/v1/source-engines`. The file-based
 `orabbit-client run submit` path is narrower: ordered-cursor engines use table
 mode, while FlightSQL uses a full SQL query.
 
@@ -622,7 +622,18 @@ run.
 ## HTTP API
 
 The API listens on port 9100 by default and returns JSON except for health text
-and SSE streams. There is no generated OpenAPI document in this repository.
+and SSE streams. The API is documented in [`docs/openapi.yaml`](docs/openapi.yaml)
+(OpenAPI 3.1); a test fails if a served `/api/v1` route is missing from it.
+
+**Versioning.** Every API resource is served under `/api/v1` (for example
+`/api/v1/runs/{id}`). The older unversioned paths (`/runs`, `/jobs`,
+`/connections`, `/workers`, `/servers`, `/deployments`, `/executions`, `/sse`)
+and the earlier `/api/...` copies (`/api/runs`, `/api/jobs/{id}/runs`,
+`/api/workers`, `/api/source-engines`, `/api/maintenance/submit`) keep working
+but are deprecated: their responses carry `Deprecation: true` and a
+`Link: </api/v1/...>; rel="successor-version"` header. Operational endpoints
+(`/healthz`, `/ready`, `/metrics`, `/status`) are not versioned. The CLI uses
+`/api/v1`, so upgrade the master before the CLI.
 
 When `ORABBIT_HTTP_AUTH_TOKEN` is set, send:
 
@@ -696,7 +707,7 @@ Task assignments carry no secrets. After a worker leases a task it calls
 the authenticated worker holding that attempt's live lease.
 
 Jobs run in the worker pool named by `options_json.worker_pool` (or
-`worker_pool` on `/api/runs/submit`), default `default`. A worker only
+`worker_pool` on `/api/v1/runs/submit`), default `default`. A worker only
 receives tasks, and so credentials, of jobs in the pool of the enrollment
 token it enrolled with. Use separate pools to keep workers of one trust zone
 away from another zone's source databases and buckets.
@@ -741,13 +752,60 @@ accept `limit` (1-1000) and `cursor`; the next page's cursor is returned in
 the `X-Next-Cursor` response header, and the body stays a JSON array. Without
 `limit` the full list is returned.
 
+### Errors and run failures
+
+Every HTTP error uses one JSON envelope:
+
+```json
+{
+  "error": {
+    "code": "run_planning_failed",
+    "message": "run planning failed",
+    "details": {"error": "cursor column \"AGE\" is nullable; ..."},
+    "failure_class": "DATA_INTEGRITY_ERROR",
+    "retryable": false,
+    "request_id": "..."
+  }
+}
+```
+
+`failure_class` and `retryable` are present when the error was caused by a
+source, target or catalog. Classes are defined in `internal/failure`
+(`AUTHENTICATION_FAILED`, `AUTHORIZATION_FAILED`, `NETWORK_CONNECTION_FAILED`,
+`TIMEOUT`, `QUERY_SYNTAX_ERROR`, `TABLE_IDENTIFIER_INVALID`,
+`DATA_INTEGRITY_ERROR`, catalog classes, `UNKNOWN_PERMANENT`, ...).
+
+Run planning failures (`/api/v1/runs/submit`, `/api/v1/jobs/{id}/runs`) return:
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| `422` | `run_planning_failed` | A recognized source or configuration problem; change the request. |
+| `503` | `run_planning_failed` | A dependency was unreachable or timed out; retrying may succeed. |
+| `500` | `internal_error` | An unrecognized failure. |
+
+A run that ends `FAILED` describes itself in `GET /api/v1/runs/{id}`:
+
+- `failure_phase`: `planning`, `extract` or `commit`.
+- `failure_class`: for task failures, the class of the first failed task's
+  last attempt.
+- `error_summary`: for task failures, `"<n> of <total> task(s) failed: <first
+  task error>"`. Passwords embedded in URLs are redacted.
+
+One-shot submits (`/api/v1/runs/submit`) store the source DSN in a connection
+named `<engine>_source-<tag>`, where the tag is a keyed hash of the engine and
+DSN. Different databases or credentials never share a connection, and the
+name does not reveal the DSN.
+
 ### Core routes
+
+Paths below are relative to `/api/v1` unless they start with `/healthz`,
+`/ready`, `/status` or `/metrics`.
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| `GET` | `/healthz`, `/ready`, `/status` | Liveness, durable-leader readiness, and master/leadership status |
-| `GET` | `/metrics` | Bounded-label Prometheus lifecycle metrics |
-| `GET` | `/workers` or `/api/workers` | Active workers; use `?all=true` for all |
+| `GET` | `/healthz`, `/ready`, `/status` | Liveness, durable-leader readiness, and master/leadership status (unversioned) |
+| `GET` | `/metrics` | Bounded-label Prometheus lifecycle metrics (unversioned) |
+| `GET` | `/workers` | Active workers; use `?all=1` for all |
 | `POST` | `/workers/enrollment-tokens` | Create a one-time worker enrollment token |
 | `GET` | `/workers/identities` | List master-issued worker identities |
 | `POST` | `/workers/identities/{id}/revoke` | Revoke a worker identity |
@@ -755,30 +813,32 @@ the `X-Next-Cursor` response header, and the body stays a JSON array. Without
 | `GET`, `PUT`, `DELETE` | `/connections/{id}` | Read, replace, or delete a connection |
 | `GET`, `POST` | `/jobs` | List or create jobs |
 | `GET`, `PUT`, `DELETE` | `/jobs/{id}` | Read, replace, or delete a job |
-| `POST` | `/jobs/{id}/runs` | Start a stored job |
+| `POST` | `/jobs/{id}/runs` | Start a stored job (`{registration_config}` → `{run, tasks}`) |
 | `GET` | `/runs`, `/runs/{id}` | List runs or read one run |
 | `POST` | `/runs/{id}/cancel` | Cancel a run |
 | `GET` | `/runs/{id}/progress` | Aggregated run progress |
 | `GET` | `/runs/{id}/events` | Persisted run events |
 | `GET` | `/runs/{id}/events/stream` | Run-scoped SSE |
 | `GET` | `/runs/{id}/artifacts` | Committed artifact metadata |
-| `GET` | `/api/runs/{id}/diagnosis` | Redacted lifecycle diagnosis and suggested next action |
-| `POST` | `/api/runs/{id}/recover` | Narrow audited recovery request with `action` and `reason` |
+| `GET` | `/runs/{id}/diagnosis` | Redacted lifecycle diagnosis and suggested next action |
+| `POST` | `/runs/{id}/recover` | Narrow audited recovery request with `action` and `reason` |
+| `POST` | `/runs/{id}/registration/retry` | Retry Iceberg registration, optionally with a new config |
 | `POST` | `/runs/{id}/registration/cancel` | Cancel Iceberg registration |
 | `GET` | `/sse?run_id={id}` | General replay/live event stream |
-| `GET` | `/api/source-engines` | Connector capabilities |
-| `POST` | `/api/runs/validate` | Validate guided submission input |
-| `POST` | `/api/runs/submit` | Validate, upsert, and start a guided run |
-| `GET` | `/api/runs` | Alias for run listing |
-| `POST` | `/api/jobs/{id}/runs` | Start a job with optional mode/Iceberg overrides |
-| `POST` | `/api/maintenance/submit` | Submit a maintenance operation |
+| `GET` | `/source-engines` | Connector capabilities (`table_mode_supported` is true for every engine; engines without `ordered_cursor_supported` extract as one task; `frontend_submit_supported` is a deprecated alias of `oneshot_submit_supported`) |
+| `POST` | `/runs/validate` | Validate guided submission input |
+| `POST` | `/runs/submit` | Validate, upsert, and start a guided run |
+| `POST` | `/maintenance/submit` | Submit a maintenance operation |
+
+The deprecated `POST /api/jobs/{id}/runs` (body `{mode, iceberg}`, response
+with run URLs) has no exact `/api/v1` twin; use `/api/v1/jobs/{id}/runs`.
 
 Example:
 
 ```sh
 curl -sS \
   -H "Authorization: Bearer $ORABBIT_HTTP_AUTH_TOKEN" \
-  http://localhost:9100/runs
+  http://localhost:9100/api/v1/runs
 ```
 
 `/healthz` means only that the HTTP process is alive. `/ready` additionally
@@ -800,7 +860,8 @@ and run events. Registration replay is refused after a durable catalog receipt.
 
 ### Remote operations routes
 
-The master also exposes a control-panel API for registered SSH servers:
+The master also exposes a control-panel API for registered SSH servers
+(served under `/api/v1`; the unversioned paths below are deprecated aliases):
 
 - `GET|POST /servers`
 - `GET|PATCH|DELETE /servers/{id}`
@@ -844,6 +905,23 @@ Workers use the `orabbit.v1.ControlPlane` service on port 9102:
 `ORABBIT_WORKER_AUTH_TOKEN` as gRPC `authorization: Bearer ...` metadata on
 every call. See
 [proto/controlplane.proto](proto/controlplane.proto) for the wire contract.
+
+## Deprecations
+
+These compatibility paths still work. When a run relies on one, the planner
+logs `job uses deprecated options` and records a `deprecated job options used`
+run event, so their use can be measured before they are removed.
+
+| Deprecated | Replacement |
+| --- | --- |
+| Unversioned and `/api/...` HTTP paths | `/api/v1/...` (responses carry `Deprecation` and `Link` headers) |
+| `frontend_submit_supported` in `/source-engines` | `oneshot_submit_supported` |
+| Job option `id_column` | `cursor_column` |
+| `partition_strategy: int_range` | `ordered_cursor` |
+| Job option `chunk_size` | `planned_tasks` or `target_rows_per_task` |
+| S3 sources without `format` (format guessed from the file extension; unknown extensions read as CSV) | Set `source.format` |
+
+Removal will be scheduled once these events stop appearing.
 
 ## Database and migrations
 
@@ -899,13 +977,49 @@ go test ./internal/grpc -run TestName -v
 Tests are package-level unit and integration-style tests using temporary SQLite
 databases and test servers. There is no enforced coverage threshold.
 
+Run the connector integration suite locally against `docker-compose.ex-db.yml`
+(Oracle, Trino and Cassandra are optional; each engine runs only when its
+variable is set, and Cassandra needs the heap cap in that file to fit next to
+the others):
+
+```sh
+docker compose -f docker-compose.ex-db.yml up -d ex-postgres ex-mariadb ex-clickhouse ex-mongodb
+ORABBIT_IT_POSTGRES_DSN='postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable' \
+ORABBIT_IT_MARIADB_DSN='root:root@tcp(localhost:3307)/test' \
+ORABBIT_IT_CLICKHOUSE_DSN='clickhouse://default:clickhouse@localhost:9003/default' \
+ORABBIT_IT_MONGODB_DSN='mongodb://root:root@localhost:27017/orabbit_it?authSource=admin' \
+go test -count=1 -run 'Integration|ReadOnly' ./internal/connectors/
+```
+
+Further variables: `ORABBIT_IT_MYSQL_DSN`, `ORABBIT_IT_ORACLE_DSN`
+(`oracle://app:app@localhost:1521/FREEPDB1`), `ORABBIT_IT_TRINO_DSN`
+(`http://orabbit@localhost:8080?catalog=memory&schema=default`) and
+`ORABBIT_IT_CASSANDRA_DSN` (`cassandra://localhost:9042/orabbit_it`),
+`ORABBIT_IT_MSSQL_DSN` (`sqlserver://sa:YourStrong!Passw0rd@localhost:1433?database=master`;
+on Apple Silicon use the `mcr.microsoft.com/azure-sql-edge` image, the x86 SQL
+Server image does not run under emulation).
+
+Planner and worker integration tests (ordered-cursor planning, full task
+execution with upload) also need an S3-compatible target, e.g. a local MinIO
+with a bucket:
+
+```sh
+ORABBIT_IT_POSTGRES_DSN=... ORABBIT_IT_MONGODB_DSN=... \
+ORABBIT_IT_S3_ENDPOINT=http://127.0.0.1:9010 ORABBIT_IT_S3_BUCKET=orabbit-it \
+ORABBIT_IT_S3_ACCESS_KEY_ID=... ORABBIT_IT_S3_SECRET_ACCESS_KEY=... \
+go test -count=1 -run Integration ./internal/planner ./cmd/worker
+```
+
 CI (`.github/workflows/orrabit-docker.yml`) runs on every push and pull
 request:
 
 - `go test -race ./...` and `go vet ./...`
 - connector integration tests against PostgreSQL, MySQL, MariaDB and ClickHouse
-  service containers (`ORABBIT_IT_*_DSN`, see
-  `internal/connectors/readonly_integration_test.go`)
+  service containers (`ORABBIT_IT_*_DSN`): read-only sessions
+  (`readonly_integration_test.go`) and the shared connector conformance suite
+  (`conformance_integration_test.go`: describe, cursor validation, statistics,
+  cursor ranges with filters, query mode and column probes, identical for
+  every engine)
 - `golangci-lint` with `.golangci.yml`, `shellcheck` on the shell scripts, and
   `docker compose config` on every Compose file
 - `scripts/vulncheck.sh`: `govulncheck`, failing on any reachable
@@ -1142,11 +1256,6 @@ and a `canceled object delete scheduled` event. To enable deletion:
    ideally enable bucket versioning.
 3. Set `ORABBIT_CANCELED_OBJECT_CLEANUP_DRY_RUN=false` and restart the master.
    Candidates already marked `WOULD_DELETE` are deleted on their next retry.
-
-### Root Docker Compose fails on the PostgreSQL mount
-
-The committed compose file references the absent `docker/postgres/initdb`
-directory. Create the directory or remove the mount.
 
 ### Iceberg registration fails
 

@@ -700,7 +700,7 @@ Important worker-side error behaviors:
 - if extraction fails, the worker reports task failure
 - if a task is canceled, the worker reports `CANCELED`
 
-There is no general task retry mechanism for failed task execution in the current code.
+Failed task execution reported by a worker is not retried. Tasks are retried only when an attempt is lost: an expired lease or a failed assignment puts the task back to `PENDING` with backoff (`internal/db/attempts.go`), and after the attempt limit the task is `QUARANTINED` and the run fails with `task retry limit exhausted`.
 
 ## 10. Parquet File Rolling
 
@@ -1171,7 +1171,7 @@ Implemented behavior:
 
 Not implemented:
 
-- general automatic retry of failed extraction tasks
+- automatic retry of extraction failures reported by a worker (only lost attempts are retried)
 - worker-side checkpoint resume inside a partially completed task
 
 ### Partial runs and cancellation
@@ -1223,7 +1223,7 @@ The following limitations are directly supported by code inspection:
 - no full CDC implementation
 - no generalized update/delete reconciliation
 - no source-consistent snapshot orchestration across multiple worker tasks
-- no automatic retry policy for failed extraction tasks
+- no automatic retry of extraction failures reported by a worker (lost attempts are retried with backoff)
 - non-range-capable cursor columns fall back to single-task ordered scans
 - FlightSQL has no incremental mode and no auto-tuned partitioned planning path
 - auto-tune is heuristic only and does not use historical run feedback
