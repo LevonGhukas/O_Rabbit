@@ -1,0 +1,25 @@
+name: Vulnerability check
+
+# New Go vulnerabilities are published without any change in this repo, so
+# besides running inside CI this also runs weekly and reports them early.
+on:
+  workflow_call:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      # Fails on reachable vulnerabilities not reviewed in .govulncheck-allow.
+      - name: govulncheck
+        run: ./scripts/vulncheck.sh
