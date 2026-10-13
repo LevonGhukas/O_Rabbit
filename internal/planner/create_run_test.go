@@ -10,6 +10,8 @@ import (
 
 	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
+	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
 
 func openPlannerStore(t *testing.T) (*db.Store, crypto.Key) {
@@ -29,10 +31,14 @@ func openPlannerStore(t *testing.T) (*db.Store, crypto.Key) {
 }
 
 // fileJob stores an S3 file source, an S3 target and a job reading one file.
-// S3 file sources are planned as one task without contacting the source; the
-// target endpoint is unroutable so any unexpected network call fails fast.
+// The file column type check is stubbed to return the job's own types, so
+// planning never contacts the source; the target endpoint is unroutable so any
+// unexpected network call fails fast.
 func fileJob(t *testing.T, st *db.Store, k crypto.Key, name string, options map[string]any) db.Job {
 	t.Helper()
+	stubFileColumnTypes(t, func(o jobopts.Options) (map[string]string, []typesystem.TypeWarning, error) {
+		return o.ColumnTypes, nil, nil
+	})
 	ctx := context.Background()
 	secret, err := crypto.Encrypt(k, []byte("s3://uploads/"+name+".csv"), []byte("src-"+name))
 	if err != nil {
@@ -54,6 +60,16 @@ func fileJob(t *testing.T, st *db.Store, k crypto.Key, name string, options map[
 		t.Fatalf("create job: %v", err)
 	}
 	return job
+}
+
+// stubFileColumnTypes replaces the file column type check for one test.
+func stubFileColumnTypes(t *testing.T, resolve func(o jobopts.Options) (map[string]string, []typesystem.TypeWarning, error)) {
+	t.Helper()
+	previous := fileColumnTypeResolver
+	fileColumnTypeResolver = func(_ context.Context, _ *db.Store, _ crypto.Key, _ db.Job, _ string, o jobopts.Options, _ string) (map[string]string, []typesystem.TypeWarning, error) {
+		return resolve(o)
+	}
+	t.Cleanup(func() { fileColumnTypeResolver = previous })
 }
 
 func TestFileSourceIsPlannedAsOneSingleTask(t *testing.T) {
