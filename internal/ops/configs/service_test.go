@@ -18,7 +18,7 @@ func TestValidateConfigRejectsMalformedEnvLine(t *testing.T) {
 func TestValidateConfigAcceptsWellFormedWorkerEnv(t *testing.T) {
 	result := ValidateConfig("worker-env", strings.Join([]string{
 		"ORABBIT_MASTER_GRPC_ADDR=1.2.3.4:9102",
-		"ORABBIT_GRPC_INSECURE=true",
+		"ORABBIT_GRPC_INSECURE=false",
 		"ORABBIT_WORKER_AUTH_TOKEN=worker-secret",
 		"ORABBIT_WORKER_ID=worker-1",
 		"ORABBIT_WORKER_ADVERTISE_ADDR=1.2.3.5",

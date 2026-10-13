@@ -3,6 +3,7 @@ package connectors
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -36,7 +37,7 @@ var (
 )
 
 func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
-	db, err := sql.Open("pgx", dsn)
+	db, err := openReadOnlyPostgres(dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +61,7 @@ func (p *Postgres) ExportSnapshot(ctx context.Context) (string, error) {
 	// To share a snapshot across workers, the transaction exporting it must remain open.
 	// Since planner closes its db pool, we create a dedicated detached connection that
 	// sleeps in the background for 24 hours (or until the database kills it).
-	detachedDB, err := sql.Open("pgx", p.dsn)
+	detachedDB, err := openReadOnlyPostgres(p.dsn)
 	if err != nil {
 		return "", fmt.Errorf("failed to open detached snapshot connection: %w", err)
 	}
@@ -367,6 +368,25 @@ func (p *Postgres) ValidateCursorColumn(ctx context.Context, table, cursorColumn
 	}
 	if !out.Found {
 		return out, nil
+	}
+	if !out.NullableKnown {
+		// pgx does not report nullability in result metadata, so read the
+		// NOT NULL flag from the catalog. Without it, the planner's guard
+		// against nullable incremental cursors (which skip rows) never fires.
+		var notNull bool
+		err := p.db.QueryRowContext(vctx, `
+			SELECT a.attnotnull
+			FROM pg_attribute a
+			WHERE a.attrelid = to_regclass($1) AND a.attname = $2 AND NOT a.attisdropped`,
+			table, out.ResolvedName).Scan(&notNull)
+		switch {
+		case err == nil:
+			out.NullableKnown = true
+			out.Nullable = !notNull
+		case errors.Is(err, sql.ErrNoRows):
+		default:
+			return out, fmt.Errorf("read nullability of %s.%s: %w", table, out.ResolvedName, err)
+		}
 	}
 
 	schemaName, tableName := splitPostgresTableIdent(table)

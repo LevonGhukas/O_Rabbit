@@ -143,6 +143,11 @@ func dial(ctx context.Context, target SSHTarget) (*gossh.Client, TestResult, err
 	hostKeyCallback := func(hostname string, remote net.Addr, key gossh.PublicKey) error {
 		sha256fp := gossh.FingerprintSHA256(key)
 		meta.HostKeyFingerprint = sha256fp
+		// Never trust an unpinned host key: that would hand the SSH password
+		// or key to whoever answers on the address (man in the middle).
+		if strings.TrimSpace(target.HostKeyFingerprint) == "" {
+			return fmt.Errorf("SSH host key is not pinned; the server presented %s. Verify it out of band (ssh-keyscan %s | ssh-keygen -lf -) and set host_key_fingerprint", sha256fp, target.Host)
+		}
 		if !matchesFingerprint(target.HostKeyFingerprint, key) {
 			return fmt.Errorf("SSH host key fingerprint mismatch: expected %s, got %s", target.HostKeyFingerprint, sha256fp)
 		}
@@ -236,7 +241,7 @@ func parseSigner(privateKey string, passphrase string) (gossh.Signer, error) {
 func matchesFingerprint(expected string, key gossh.PublicKey) bool {
 	expected = strings.TrimSpace(expected)
 	if expected == "" {
-		return true
+		return false
 	}
 	sha256fp := gossh.FingerprintSHA256(key)
 	if expected == sha256fp {

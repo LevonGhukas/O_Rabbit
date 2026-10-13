@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/db"
+	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 	"github.com/LevonGhukas/O_Rabbit/internal/httperr"
 	"github.com/LevonGhukas/O_Rabbit/internal/planner"
 )
@@ -95,14 +97,56 @@ func writeUnknownRoute(w http.ResponseWriter, path string) {
 func writePlannerFailure(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, planner.ErrDatasetBusy):
-		writeConflict(w, httperr.CodeDatasetBusy, "dataset is busy", nil)
+		writeConflict(w, httperr.CodeDatasetBusy, "dataset is busy", datasetBusyDetails(err))
 	case err != nil:
-		details := err.Error()
-		if cause := errors.Unwrap(err); cause != nil {
-			details = cause.Error()
-		}
-		writeAPIError(w, http.StatusInternalServerError, httperr.CodeInternalError, "run planning failed", details)
+		writeRunPlanningFailure(w, err)
 	default:
 		writeInternalError(w, "internal server error")
 	}
+}
+
+// writeRunPlanningFailure reports why a run could not be planned:
+//   - 422 run_planning_failed: a recognized source/configuration problem
+//     (credentials, missing table, unusable cursor); the request must change.
+//   - 503 run_planning_failed: a dependency was unreachable or timed out;
+//     retrying may succeed.
+//   - 500 internal_error: an unrecognized failure, possibly an O_Rabbit bug.
+func writeRunPlanningFailure(w http.ResponseWriter, err error) {
+	f := failure.Classify(err)
+	cause := err.Error()
+	if unwrapped := errors.Unwrap(err); unwrapped != nil {
+		cause = unwrapped.Error()
+	}
+	status, code := http.StatusUnprocessableEntity, httperr.CodeRunPlanningFailed
+	switch {
+	case f.Retryable:
+		status = http.StatusServiceUnavailable
+	case f.Class == failure.FailureUnknownPermanent || f.Class == failure.FailureUnknownAmbiguous:
+		status, code = http.StatusInternalServerError, httperr.CodeInternalError
+	}
+	retryable := f.Retryable
+	httperr.WriteAPIError(w, status, httperr.APIError{
+		Code:         code,
+		Message:      "run planning failed",
+		Details:      map[string]any{"error": db.RedactCredentials(cause)},
+		FailureClass: string(f.Class),
+		Retryable:    &retryable,
+	})
+}
+
+// datasetBusyDetails tells the caller which run holds the dataset, so it can
+// wait for that run or cancel it explicitly before retrying.
+func datasetBusyDetails(err error) map[string]any {
+	var busy *planner.DatasetBusyError
+	if !errors.As(err, &busy) {
+		return nil
+	}
+	details := map[string]any{"dataset_prefix": busy.BasePrefix}
+	if busy.ActiveRunID != "" {
+		details["active_run_id"] = busy.ActiveRunID
+		details["active_job_id"] = busy.ActiveJobID
+		details["active_run_status"] = busy.ActiveStatus
+		details["hint"] = "wait for the active run to finish or cancel it with POST /runs/" + busy.ActiveRunID + "/cancel, then retry"
+	}
+	return details
 }

@@ -34,7 +34,16 @@ var (
 )
 
 func OpenMySQL(ctx context.Context, dsn string) (*MySQL, error) {
-	db, err := sql.Open("mysql", dsn)
+	return openMySQL(ctx, dsn, "transaction_read_only")
+}
+
+// openMySQL opens a pool whose sessions are read-only through readOnlyVar.
+func openMySQL(ctx context.Context, dsn, readOnlyVar string) (*MySQL, error) {
+	roDSN, err := readOnlyMySQLDSN(dsn, readOnlyVar)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("mysql", roDSN)
 	if err != nil {
 		return nil, err
 	}
@@ -222,14 +231,15 @@ func (m *MySQL) DiscoverCursorStats(ctx context.Context, table, cursorColumn str
 	}
 
 	dbName, tableName := splitMySQLTableIdent(table)
-	if dbName != "" && tableName != "" {
+	if tableName != "" {
+		// An unqualified table lives in the connection's current database.
 		var rc, sz sql.NullInt64
 		err := m.db.QueryRowContext(qctx, `
 			SELECT
 				COALESCE(table_rows, 0),
 				COALESCE(data_length + index_length, 0)
 			FROM information_schema.tables
-			WHERE table_schema = ? AND table_name = ?;`,
+			WHERE table_schema = COALESCE(NULLIF(?, ''), DATABASE()) AND table_name = ?;`,
 			dbName, tableName,
 		).Scan(&rc, &sz)
 		if err == nil {

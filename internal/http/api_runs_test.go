@@ -48,28 +48,32 @@ func TestAPIRunSubmitPlannerFailureIncludesDetails(t *testing.T) {
 
 	srv.Handler().ServeHTTP(rec, req)
 
+	// A nullable cursor is a problem with the request, not with O_Rabbit.
 	resp := decodeErrorResponse(t, rec)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status=%d want=%d body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d want=%d body=%s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
 	}
-	if resp.Error.Code != httperr.CodeInternalError {
-		t.Fatalf("error code=%q want=%q", resp.Error.Code, httperr.CodeInternalError)
+	if resp.Error.Code != httperr.CodeRunPlanningFailed {
+		t.Fatalf("error code=%q want=%q", resp.Error.Code, httperr.CodeRunPlanningFailed)
 	}
 	if resp.Error.Message != "run planning failed" {
 		t.Fatalf("error message=%q want=%q", resp.Error.Message, "run planning failed")
 	}
-	if resp.Error.Details != details {
-		t.Fatalf("error details=%q want=%q", resp.Error.Details, details)
+	if got, _ := resp.Error.Details.(map[string]any)["error"].(string); got != details {
+		t.Fatalf("error details=%#v want error=%q", resp.Error.Details, details)
+	}
+	if resp.Error.FailureClass != "DATA_INTEGRITY_ERROR" || resp.Error.Retryable == nil || *resp.Error.Retryable {
+		t.Fatalf("failure_class=%q retryable=%v, want DATA_INTEGRITY_ERROR, false", resp.Error.FailureClass, resp.Error.Retryable)
 	}
 }
 
 func TestTargetConnectionsReuseOnlyMatchingDestinationIdentity(t *testing.T) {
 	st := openTestStore(t)
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/runs/submit", nil)
 	makeRequest := func(prefix, accessKey string) connectionCreateRequest {
 		spec := validatedRunSubmitSpec{TargetEndpoint: "HTTP://MINIO:9000/", TargetRegion: "us-east-1", TargetBucket: "bucket1", TargetPrefixOverride: prefix, TargetForcePathStyle: true}
-		applyFrontendDestinationIdentity(&spec)
+		applyOneShotDestinationIdentity(&spec)
 		return connectionCreateRequest{
 			Name:     spec.TargetConnectionName,
 			Kind:     "target",
@@ -144,10 +148,10 @@ func TestAPIRunSubmitPostgresBuildsExpectedJobOptions(t *testing.T) {
 	if resp.Status != "RUNNING" {
 		t.Fatalf("status=%q want RUNNING", resp.Status)
 	}
-	if resp.EventsURL != "/api/runs/run-submit-test/events" {
+	if resp.EventsURL != "/api/v1/runs/run-submit-test/events" {
 		t.Fatalf("events_url=%q", resp.EventsURL)
 	}
-	if resp.RunURL != "/api/runs/run-submit-test" {
+	if resp.RunURL != "/api/v1/runs/run-submit-test" {
 		t.Fatalf("run_url=%q", resp.RunURL)
 	}
 	if strings.Contains(rec.Body.String(), "postgresql://user:pass@db:5432/app?sslmode=disable") {
@@ -164,7 +168,7 @@ func TestAPIRunSubmitPostgresBuildsExpectedJobOptions(t *testing.T) {
 	if !strings.HasPrefix(job.Name, "postgres_public_orders-") || len(strings.TrimPrefix(job.Name, "postgres_public_orders-")) != 16 {
 		t.Fatalf("job name=%q want destination-scoped postgres_public_orders-<hash>", job.Name)
 	}
-	if job.TargetNamespace != defaultFrontendTargetNamespace || job.TargetTable != defaultFrontendTargetTable || job.WriteMode != "overwrite" {
+	if job.TargetNamespace != defaultOneShotTargetNamespace || job.TargetTable != defaultOneShotTargetTable || job.WriteMode != "overwrite" {
 		t.Fatalf("unexpected target defaults: namespace=%q table=%q write_mode=%q", job.TargetNamespace, job.TargetTable, job.WriteMode)
 	}
 	if job.HWMColumn == nil || *job.HWMColumn != "id" {
@@ -1131,7 +1135,7 @@ func (it *validationDocumentIterator) Err() error           { return nil }
 func (it *validationDocumentIterator) FieldOrder() []string { return it.fieldOrder }
 
 func TestAPISourceEnginesListsCapabilities(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/source-engines", nil)
@@ -1143,12 +1147,13 @@ func TestAPISourceEnginesListsCapabilities(t *testing.T) {
 	}
 	var items []struct {
 		Engine                        string                     `json:"engine"`
+		TableModeSupported            bool                       `json:"table_mode_supported"`
 		OrderedCursorSupported        bool                       `json:"ordered_cursor_supported"`
 		QuerySupported                bool                       `json:"query_supported"`
 		QueryLanguages                []connectors.QueryLanguage `json:"query_languages"`
 		QueryIncrementalSupported     bool                       `json:"query_incremental_supported"`
 		QuerySchemaInferenceSupported bool                       `json:"query_schema_inference_supported"`
-		FrontendSubmitSupported       bool                       `json:"frontend_submit_supported"`
+		OneShotSubmitSupported        bool                       `json:"frontend_submit_supported"`
 	}
 	decodeJSONBody(t, rec, &items)
 	if len(items) == 0 {
@@ -1161,7 +1166,7 @@ func TestAPISourceEnginesListsCapabilities(t *testing.T) {
 	for _, item := range items {
 		if item.Engine == "oracle" {
 			foundOracle = true
-			if !item.OrderedCursorSupported || !item.QuerySupported || !item.QueryIncrementalSupported || !item.QuerySchemaInferenceSupported || !item.FrontendSubmitSupported {
+			if !item.OrderedCursorSupported || !item.QuerySupported || !item.QueryIncrementalSupported || !item.QuerySchemaInferenceSupported || !item.OneShotSubmitSupported {
 				t.Fatalf("oracle capabilities=%+v want complete query and submit support", item)
 			}
 			if len(item.QueryLanguages) != 1 || item.QueryLanguages[0] != connectors.QueryLanguageOracleSQL {
@@ -1185,6 +1190,12 @@ func TestAPISourceEnginesListsCapabilities(t *testing.T) {
 			foundFlightSQL = true
 			assertQueryCapabilitiesDisabled(t, item.Engine, item.QuerySupported, item.QueryLanguages, item.QueryIncrementalSupported, item.QuerySchemaInferenceSupported)
 		}
+		// Engines without an ordered cursor still extract tables, as one task.
+		if item.Engine == "flightsql" || item.Engine == "s3" {
+			if !item.TableModeSupported || !item.OneShotSubmitSupported || item.OrderedCursorSupported {
+				t.Fatalf("%s capabilities=%+v want table mode and submit without ordered cursor", item.Engine, item)
+			}
+		}
 	}
 	if !foundOracle {
 		t.Fatal("expected oracle in source engine list")
@@ -1207,7 +1218,7 @@ func assertQueryCapabilitiesDisabled(t *testing.T, engine string, supported bool
 }
 
 func TestAuthMiddlewareProtectsAPISourceEngines(t *testing.T) {
-	srv := NewServer(nil, openTestStore(t), nil, crypto.Key{}, StatusInfo{}, "topsecret")
+	srv := NewServer(nil, openTestStore(t), nil, testCryptoKey, StatusInfo{}, "topsecret")
 
 	unauthRec := httptest.NewRecorder()
 	unauthReq := httptest.NewRequest(http.MethodGet, "/api/source-engines", nil)
@@ -1263,10 +1274,10 @@ func TestAPIJobRunsStartExistingIncrementalRunWithRegistration(t *testing.T) {
 	if resp.Status != "RUNNING" {
 		t.Fatalf("status=%q want RUNNING", resp.Status)
 	}
-	if resp.EventsURL != "/api/runs/run-submit-test/events" {
+	if resp.EventsURL != "/api/v1/runs/run-submit-test/events" {
 		t.Fatalf("events_url=%q", resp.EventsURL)
 	}
-	if resp.RunURL != "/api/runs/run-submit-test" {
+	if resp.RunURL != "/api/v1/runs/run-submit-test" {
 		t.Fatalf("run_url=%q", resp.RunURL)
 	}
 	if strings.Contains(rec.Body.String(), "bearerToken") {
@@ -1522,7 +1533,7 @@ func TestAPIRunAliasesExposeExistingRunEndpoints(t *testing.T) {
 		t.Fatalf("insert event: %v", err)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	cases := []struct {
 		name   string
 		method string
@@ -1578,24 +1589,26 @@ type submitTestServer struct {
 }
 
 func newSubmitTestServer(st *db.Store) *submitTestServer {
-	srv := NewServer(nil, st, nil, crypto.Key{}, StatusInfo{}, "")
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	ts := &submitTestServer{Server: srv}
 	srv.runPlanner = func(ctx context.Context, st *db.Store, k crypto.Key, job db.Job, registrationConfig json.RawMessage, audit *db.AuditRecord) (db.Run, []db.TaskInsert, error) {
 		ts.registrationConfig = append(json.RawMessage(nil), registrationConfig...)
 		ts.plannedJob = job
-		return db.Run{
-				ID:            "run-submit-test",
-				JobID:         job.ID,
-				Status:        "RUNNING",
-				CorrelationID: "corr-submit-test",
-				StartedAt:     "2026-01-01T00:00:00Z",
-			}, []db.TaskInsert{{
-				ID:            "task-submit-test",
-				RunID:         "run-submit-test",
-				TaskIndex:     1,
-				PartitionSpec: []byte(`{"type":"sql_cursor_single"}`),
-				Status:        "PENDING",
-			}}, nil
+		run := db.Run{
+			ID:            "run-submit-test",
+			JobID:         job.ID,
+			Status:        "RUNNING",
+			CorrelationID: "corr-submit-test",
+			StartedAt:     "2026-01-01T00:00:00Z",
+		}
+		tasks := []db.TaskInsert{{
+			ID:            "task-submit-test",
+			RunID:         "run-submit-test",
+			TaskIndex:     1,
+			PartitionSpec: []byte(`{"type":"sql_cursor_single"}`),
+			Status:        "PENDING",
+		}}
+		return run, tasks, nil
 	}
 	return ts
 }
@@ -1617,11 +1630,11 @@ func (s *submitTestServer) lastPlannedJob() db.Job {
 func seedExistingJobRunFixture(t *testing.T, st *db.Store, jobID string, incremental bool, withJobRegistration bool) {
 	t.Helper()
 
-	srcSecret, err := crypto.Encrypt(crypto.Key{}, []byte(`{"dsn":"postgresql://user:pass@db:5432/app?sslmode=disable"}`), []byte("src-"+jobID))
+	srcSecret, err := crypto.Encrypt(testCryptoKey, []byte(`{"dsn":"postgresql://user:pass@db:5432/app?sslmode=disable"}`), []byte("src-"+jobID))
 	if err != nil {
 		t.Fatalf("encrypt source secret: %v", err)
 	}
-	tgtSecret, err := crypto.Encrypt(crypto.Key{}, []byte(`{"access_key_id":"minioadmin","secret_access_key":"miniosecret"}`), []byte("tgt-"+jobID))
+	tgtSecret, err := crypto.Encrypt(testCryptoKey, []byte(`{"access_key_id":"minioadmin","secret_access_key":"miniosecret"}`), []byte("tgt-"+jobID))
 	if err != nil {
 		t.Fatalf("encrypt target secret: %v", err)
 	}
