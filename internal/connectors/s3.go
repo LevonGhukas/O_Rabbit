@@ -11,7 +11,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -141,7 +140,10 @@ func (r *S3Reader) StreamDocuments(ctx context.Context, collection string, filte
 			decoder: decoder,
 		}, nil
 	case "excel":
-		f, err := excelize.OpenReader(out.Body)
+		// Cells come back as displayed text. Render Excel's built-in date
+		// formats as ISO so date cells are detected as dates; custom
+		// non-ISO date formats stay text, like any other ambiguous date.
+		f, err := excelize.OpenReader(out.Body, excelize.Options{ShortDatePattern: "yyyy-mm-dd", LongTimePattern: "hh:mm:ss"})
 		if err != nil {
 			return nil, fmt.Errorf("failed to open excel file: %w", err)
 		}
@@ -285,15 +287,7 @@ func (it *s3CSVIterator) Decode() (map[string]any, error) {
 		if i < len(it.nextRecord) {
 			val = it.nextRecord[i]
 		}
-		if val == "" {
-			doc[header] = nil
-		} else if iVal, err := strconv.ParseInt(val, 10, 64); err == nil {
-			doc[header] = iVal
-		} else if fVal, err := strconv.ParseFloat(val, 64); err == nil {
-			doc[header] = fVal
-		} else {
-			doc[header] = val
-		}
+		doc[header] = textCell(val)
 	}
 	return doc, nil
 }
@@ -485,19 +479,26 @@ func (it *s3JSONIterator) Close() error {
 	return nil
 }
 
+// parseScalar keeps XML text as written (trimmed); value types are detected
+// when the column types are resolved (arrowio.DetectTextType).
 func parseScalar(val string) any {
-	val = strings.TrimSpace(val)
+	return textCell(strings.TrimSpace(val))
+}
+
+// textCell maps one text cell to a document value: empty is NULL, anything
+// else stays the exact text.
+func textCell(val string) any {
 	if val == "" {
 		return nil
 	}
-	if iVal, err := strconv.ParseInt(val, 10, 64); err == nil {
-		return iVal
-	}
-	if fVal, err := strconv.ParseFloat(val, 64); err == nil {
-		return fVal
-	}
 	return val
 }
+
+// TextCells marks CSV, XML and Excel iterators: their values are untyped text
+// cells, so consumers detect each column's type themselves.
+func (it *s3CSVIterator) TextCells() bool   { return true }
+func (it *s3XMLIterator) TextCells() bool   { return true }
+func (it *s3ExcelIterator) TextCells() bool { return true }
 
 type s3XMLIterator struct {
 	decoder *xml.Decoder
@@ -615,15 +616,7 @@ func (it *s3ExcelIterator) Decode() (map[string]any, error) {
 		if i < len(it.nextRecord) {
 			val = it.nextRecord[i]
 		}
-		if val == "" {
-			doc[header] = nil
-		} else if iVal, err := strconv.ParseInt(val, 10, 64); err == nil {
-			doc[header] = iVal
-		} else if fVal, err := strconv.ParseFloat(val, 64); err == nil {
-			doc[header] = fVal
-		} else {
-			doc[header] = val
-		}
+		doc[header] = textCell(val)
 	}
 	return doc, nil
 }
