@@ -1,0 +1,63 @@
+name: Bug report
+description: Something does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. **Remove every password, token, access key
+        and private DSN** from what you paste below. Security problems must be
+        reported privately, see SECURITY.md.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: A run spec, API request or CLI command that shows the problem.
+      render: yaml
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Master
+        - Worker
+        - CLI (orabbit-client)
+        - HTTP API
+        - Source connector
+        - Iceberg registration
+        - Docker images / Compose
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Source engine
+      placeholder: postgres, mysql, s3 (csv) ...
+  - type: textarea
+    id: run-failure
+    attributes:
+      label: Run failure details
+      description: "`failure_phase`, `failure_class` and `error_summary` from `GET /api/v1/runs/{id}`, or `orabbit-client run diagnose <run-id>`."
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Image digest or git commit.
+    validations:
+      required: true
