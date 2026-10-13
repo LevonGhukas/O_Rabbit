@@ -88,9 +88,10 @@ func rejectTemporalSpecialValue(text string, target LogicalType, value any) erro
 	return nil
 }
 
-// parseTimestamp accepts RFC3339Nano and the database timestamp forms already
-// recognized by the legacy Arrow path. Offset-free forms use time.Parse and
-// therefore have UTC as their explicitly defined location.
+// parseTimestamp accepts RFC3339Nano, the database timestamp forms already
+// recognized by the legacy Arrow path, and the ISO 8601 forms found in files
+// ("T" without an offset, minute precision). Offset-free forms use time.Parse
+// and therefore have UTC as their explicitly defined location.
 func parseTimestamp(text string) (time.Time, bool) {
 	if text == "" {
 		return time.Time{}, false
@@ -102,6 +103,11 @@ func parseTimestamp(text string) (time.Time, bool) {
 		"2006-01-02 15:04:05.999999999Z07:00",
 		"2006-01-02 15:04:05.999999999",
 		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05.999999999",
+		"2006-01-02T15:04Z07:00",
+		"2006-01-02 15:04Z07:00",
+		"2006-01-02T15:04",
+		"2006-01-02 15:04",
 		"2006-01-02",
 	} {
 		if parsed, err := time.Parse(layout, text); err == nil {
