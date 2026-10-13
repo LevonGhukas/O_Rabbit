@@ -208,4 +208,3 @@ func TestKindUInt32PromotesToInt64ExactValues(t *testing.T) {
 		}
 	}
 }
-

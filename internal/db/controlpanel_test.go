@@ -317,7 +317,7 @@ func TestDeploymentAndConfigVersionPersistence(t *testing.T) {
 		t.Fatalf("deployment count=%d want 1", len(deps))
 	}
 
-	content1, err := EncryptConfigVersionContent(k, "server:"+server.ID+":config:master-env:v1", []byte("MASTER_HTTP_ADDR=:9100"))
+	content1, err := EncryptConfigVersionContent(k, "server:"+server.ID+":config:master-env", []byte("MASTER_HTTP_ADDR=:9100"))
 	if err != nil {
 		t.Fatalf("encrypt config v1: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestDeploymentAndConfigVersionPersistence(t *testing.T) {
 		t.Fatalf("config version=%d want 1", cfg1.Version)
 	}
 
-	content2, err := EncryptConfigVersionContent(k, "server:"+server.ID+":config:master-env:v2", []byte("MASTER_HTTP_ADDR=:9200"))
+	content2, err := EncryptConfigVersionContent(k, "server:"+server.ID+":config:master-env", []byte("MASTER_HTTP_ADDR=:9200"))
 	if err != nil {
 		t.Fatalf("encrypt config v2: %v", err)
 	}

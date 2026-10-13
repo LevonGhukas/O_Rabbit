@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,8 @@ type workerConfig struct {
 	InsecureGRPC         bool
 	TLSCAFile            string
 	TLSServerName        string
+	IdentityDir          string
+	EnrollmentToken      string
 	WorkerAuthToken      string
 	Poll                 time.Duration
 	LogLevel             string
@@ -34,6 +37,9 @@ type workerConfig struct {
 	TempMinFreeBytes     uint64
 	TempMaxManagedBytes  int64
 	TempDryRun           bool
+	// SourceQueryTimeout bounds one partition's source query; 0 means no
+	// limit beyond the task lease and shutdown.
+	SourceQueryTimeout time.Duration
 }
 
 func loadWorkerConfigFromEnv() workerConfig {
@@ -41,9 +47,11 @@ func loadWorkerConfigFromEnv() workerConfig {
 		MasterAddr:           "localhost:9102",
 		WorkerID:             "",
 		WorkerAddr:           "",
-		InsecureGRPC:         true,
+		InsecureGRPC:         false,
 		TLSCAFile:            "",
 		TLSServerName:        "",
+		IdentityDir:          envutil.EnvOrDefault("ORABBIT_WORKER_IDENTITY_DIR", defaultIdentityDir()),
+		EnrollmentToken:      strings.TrimSpace(os.Getenv("ORABBIT_WORKER_ENROLLMENT_TOKEN")),
 		WorkerAuthToken:      strings.TrimSpace(os.Getenv("ORABBIT_WORKER_AUTH_TOKEN")),
 		Poll:                 2 * time.Second,
 		LogLevel:             envutil.EnvOrDefault("ORABBIT_LOG_LEVEL", "INFO"),
@@ -57,17 +65,20 @@ func loadWorkerConfigFromEnv() workerConfig {
 		TempMinFreeBytes:     workerEnvUint("ORABBIT_TEMP_MIN_FREE_BYTES", 1<<30),
 		TempMaxManagedBytes:  int64(workerEnvUint("ORABBIT_TEMP_MAX_MANAGED_BYTES", 100<<30)),
 		TempDryRun:           workerEnvBool("ORABBIT_TEMP_DRY_RUN", false),
+		SourceQueryTimeout:   workerEnvTimeout("ORABBIT_SOURCE_QUERY_TIMEOUT", 2*time.Hour),
 	}
 }
 
 func newWorkerFlagSet(cfg *workerConfig) *flag.FlagSet {
 	fs := flag.NewFlagSet("worker", flag.ExitOnError)
 	fs.StringVar(&cfg.MasterAddr, "master", cfg.MasterAddr, "Master gRPC address")
-	fs.StringVar(&cfg.WorkerID, "worker-id", cfg.WorkerID, "Worker ID (optional; master can assign)")
+	fs.StringVar(&cfg.WorkerID, "worker-id", cfg.WorkerID, "Worker name (with TLS, a label recorded at enrollment; the master issues the worker ID)")
 	fs.StringVar(&cfg.WorkerAddr, "worker-addr", cfg.WorkerAddr, "Address advertised to master (for observability)")
 	fs.BoolVar(&cfg.InsecureGRPC, "insecure", cfg.InsecureGRPC, "Disable gRPC TLS (dev)")
 	fs.StringVar(&cfg.TLSCAFile, "tls-ca", cfg.TLSCAFile, "CA certificate file for master gRPC TLS")
 	fs.StringVar(&cfg.TLSServerName, "tls-server-name", cfg.TLSServerName, "Expected TLS server name (optional)")
+	fs.StringVar(&cfg.IdentityDir, "identity-dir", cfg.IdentityDir, "Directory holding the master-issued worker identity (or ORABBIT_WORKER_IDENTITY_DIR); keep it on persistent storage")
+	fs.StringVar(&cfg.EnrollmentToken, "enrollment-token", cfg.EnrollmentToken, "One-time enrollment token for the first start (prefer ORABBIT_WORKER_ENROLLMENT_TOKEN)")
 	fs.StringVar(&cfg.WorkerAuthToken, "worker-auth-token", cfg.WorkerAuthToken, "Bearer token for worker gRPC calls (or ORABBIT_WORKER_AUTH_TOKEN)")
 	fs.DurationVar(&cfg.Poll, "poll", cfg.Poll, "Poll interval when no tasks")
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level: DEBUG, INFO, WARN, ERROR (or ORABBIT_LOG_LEVEL)")
@@ -80,6 +91,7 @@ func newWorkerFlagSet(cfg *workerConfig) *flag.FlagSet {
 	fs.Int64Var(&cfg.TempMaxBytesPerScan, "temp-max-bytes-per-scan", cfg.TempMaxBytesPerScan, "Maximum managed bytes reclaimed per scan")
 	fs.Uint64Var(&cfg.TempMinFreeBytes, "temp-min-free-bytes", cfg.TempMinFreeBytes, "Minimum disk bytes required to start local-file work")
 	fs.Int64Var(&cfg.TempMaxManagedBytes, "temp-max-managed-bytes", cfg.TempMaxManagedBytes, "Maximum managed-root bytes before new work pauses")
+	fs.DurationVar(&cfg.SourceQueryTimeout, "source-query-timeout", cfg.SourceQueryTimeout, "Maximum duration of one partition's source query (0 = no limit)")
 	fs.BoolVar(&cfg.TempDryRun, "temp-dry-run", cfg.TempDryRun, "Classify stale workspaces without deleting them")
 	return fs
 }
@@ -90,6 +102,14 @@ func workerEnvDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return value
+}
+
+// workerEnvTimeout is workerEnvDuration that also accepts "0" for no limit.
+func workerEnvTimeout(key string, fallback time.Duration) time.Duration {
+	if strings.TrimSpace(os.Getenv(key)) == "0" {
+		return 0
+	}
+	return workerEnvDuration(key, fallback)
 }
 
 func workerEnvUint(key string, fallback uint64) uint64 {
@@ -161,4 +181,13 @@ func parseWorkerLogFormat(raw string) (string, error) {
 	default:
 		return "", fmt.Errorf("invalid worker log format %q: use json or text", strings.TrimSpace(raw))
 	}
+}
+
+// defaultIdentityDir keeps the identity in the user's config directory so it
+// survives restarts and is not removed by workspace scavenging.
+func defaultIdentityDir() string {
+	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+		return filepath.Join(dir, "orabbit-worker")
+	}
+	return "worker-identity"
 }
