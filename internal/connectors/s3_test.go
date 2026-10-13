@@ -311,28 +311,30 @@ func TestS3XMLIterator(t *testing.T) {
 		t.Fatalf("expected 2 docs, got %d: %+v", len(docs), docs)
 	}
 
+	// XML values stay text exactly as written; column types are detected
+	// when the run is planned (arrowio.DetectTextType).
 	doc1 := docs[0]
-	if doc1["id"] != int64(101) {
+	if doc1["id"] != "101" {
 		t.Errorf("expected id 101, got %v", doc1["id"])
 	}
 	if doc1["author"] != "Alice Smith" {
 		t.Errorf("expected author Alice Smith, got %v", doc1["author"])
 	}
-	if doc1["price"] != float64(29.95) {
+	if doc1["price"] != "29.95" {
 		t.Errorf("expected price 29.95, got %v", doc1["price"])
 	}
-	if doc1["qty"] != int64(5) {
+	if doc1["qty"] != "5" {
 		t.Errorf("expected qty 5, got %v", doc1["qty"])
 	}
 
 	doc2 := docs[1]
-	if doc2["id"] != int64(102) {
+	if doc2["id"] != "102" {
 		t.Errorf("expected id 102, got %v", doc2["id"])
 	}
 	if doc2["author"] != "Bob Jones" {
 		t.Errorf("expected author Bob Jones, got %v", doc2["author"])
 	}
-	if doc2["price"] != float64(19.50) {
+	if doc2["price"] != "19.50" {
 		t.Errorf("expected price 19.50, got %v", doc2["price"])
 	}
 }

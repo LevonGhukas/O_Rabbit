@@ -512,6 +512,40 @@ least one of `planned_tasks` or `chunk_size`. FlightSQL requires `source.sql`,
 `incremental: false`, `auto_tune: false`, no `id_column`, and no manual planning
 fields.
 
+### File sources: column types
+
+S3 file sources (`engine: s3`; CSV, XML, Excel, JSON, Parquet) have no schema,
+so the planner reads the whole file once before any task starts and fixes every
+column's type. Workers and Iceberg registration use those same types.
+
+CSV, XML and Excel cells are text, and each value is detected as:
+
+| Value | Type |
+|---|---|
+| `42`, `-7`, `0` | `int64` |
+| `3.14`, `-0.5` | `float64` |
+| `true`, `FALSE` | `bool` |
+| `2024-01-15` | `date` |
+| `2024-01-15 10:30`, `2024-01-15T10:30:00.5` | `timestamp` |
+| `2024-01-15T10:30:00Z`, `2024-01-15 10:30:00+04:00` | `timestamp_tz[UTC]` |
+| anything else, including `007`, `+5`, `1e5`, `15/01/2024`, integers beyond int64 | `string` |
+
+Only ISO dates are detected, because `01/02/2024` could be either day or month.
+Excel's built-in date formats are read as ISO; custom non-ISO date formats stay
+text. JSON and Parquet keep the types their values already have. Empty cells
+are NULL, and detected columns are always nullable.
+
+A column whose values need different types (`2024-01-15` and `N/A`, or
+integers beyond 2^53 mixed with decimals) is stored as `string` with a
+`semantic_fallback` type warning on the run.
+
+`source.column_types` overrides work as for SQL sources: a type such as
+`date` or `nullable<int64>`, or `source` / `nullable<source>` to change only
+nullability. The planner checks every value against the override. If a value
+does not fit, the column is stored as `string`; if a NOT NULL column has empty
+values, it is stored as nullable. Both produce a `user_override_fallback`
+warning that names an example value or the number of empty rows.
+
 ### Incremental cursors and late-arriving rows
 
 An incremental run resumes strictly after the dataset's high-water mark, the
