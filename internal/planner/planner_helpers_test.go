@@ -294,3 +294,20 @@ func TestOrderedCursorRangeLowerBound(t *testing.T) {
 		t.Fatalf("lookback spec=%v", spec)
 	}
 }
+
+func TestPartitionSpecCDCStream(t *testing.T) {
+	var spec map[string]any
+	if err := json.Unmarshal(PartitionSpecCDCStream("orders", "table", " h1 "), &spec); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if spec["type"] != "cdc_stream" || spec["table"] != "orders" || spec["query_hash"] != "h1" {
+		t.Fatalf("spec=%v", spec)
+	}
+	var noHash map[string]any
+	if err := json.Unmarshal(PartitionSpecCDCStream("orders", "table", ""), &noHash); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := noHash["query_hash"]; ok {
+		t.Fatalf("empty query hash must be omitted: %v", noHash)
+	}
+}

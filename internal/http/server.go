@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
@@ -37,6 +38,13 @@ import (
 // Server represents the HTTP API server for the control plane.
 // It holds references to the logger, database store, broadcaster, encryption key, and status information.
 type Server struct {
+	// oneshotMu makes a one-shot submit's find-or-create of its connections
+	// and job atomic. Job names are not unique in the schema, so two
+	// concurrent submits could both create a job; for connections (unique
+	// names) the loser would fail with a constraint error. Only the leader
+	// master writes, so an in-process lock is enough.
+	oneshotMu sync.Mutex
+
 	log              *slog.Logger
 	st               *db.Store
 	bc               *Broadcaster
@@ -143,33 +151,8 @@ func (s *Server) Handler() http.Handler {
 		}{s.status, s.leadership.Status()})
 	})
 
-	mux.HandleFunc("/workers", s.handleWorkers)
-	mux.HandleFunc("/workers/", s.handleWorkerRoutes)
-	mux.HandleFunc("/api/workers", s.handleWorkers)
+	s.registerAPIRoutes(mux)
 
-	mux.HandleFunc("/servers", s.handleServers)
-	mux.HandleFunc("/servers/", s.handleServerByID)
-	mux.HandleFunc("/deployments", s.handleDeployments)
-	mux.HandleFunc("/deployments/", s.handleDeploymentByID)
-	mux.HandleFunc("/executions/", s.handleExecutionByID)
-
-	mux.HandleFunc("/connections", s.handleConnections)
-	mux.HandleFunc("/connections/", s.handleConnectionByID)
-
-	mux.HandleFunc("/jobs", s.handleJobs)
-	mux.HandleFunc("/jobs/", s.handleJobByID)
-	mux.HandleFunc("/api/jobs/", s.handleAPIJobByID)
-
-	mux.HandleFunc("/runs", s.handleRuns)
-	mux.HandleFunc("/runs/", s.handleRunByID)
-	mux.HandleFunc("/api/source-engines", s.handleSourceEngines)
-	mux.HandleFunc("/api/runs/submit", s.handleRunSubmit)
-	mux.HandleFunc("/api/runs/validate", s.handleRunValidate)
-	mux.HandleFunc("/api/maintenance/submit", s.handleMaintenanceSubmit)
-	mux.HandleFunc("/api/runs", s.handleAPIRuns)
-	mux.HandleFunc("/api/runs/", s.handleAPIRunByID)
-
-	mux.HandleFunc("/sse", SSEHandler(s.log, s.st, s.bc))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeUnknownRoute(w, r.URL.Path)
 	})
@@ -301,6 +284,9 @@ func (s *Server) SetRemoteOpsToken(token string) {
 // isRemoteOpsPath reports whether path belongs to the remote operations API,
 // which runs commands on other hosts over SSH.
 func isRemoteOpsPath(path string) bool {
+	// The versioned paths (/api/v1/servers, ...) are the same remote
+	// operations and must get the same guard.
+	path = unversionedPath(path)
 	for _, prefix := range []string{"/servers", "/deployments", "/executions"} {
 		if path == prefix || strings.HasPrefix(path, prefix+"/") {
 			return true

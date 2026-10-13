@@ -1,52 +1,51 @@
-name: Orabbit - CI, Build & Push
+name: CI
 
+# Checks every pull request. release.yml reuses this workflow with
+# publish: true, so the checks are defined once and images are pushed only
+# after everything here passes.
 on:
-  push:
-    branches:
-      - main
-    tags:
-      - "v*.*.*"
   pull_request:
+  workflow_call:
+    inputs:
+      publish:
+        description: Push the master and worker images to Docker Hub.
+        type: boolean
+        default: false
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: false
+      DOCKERHUB_TOKEN:
+        required: false
 
 permissions:
   contents: read
 
+# A new push to a pull request cancels its older, now outdated run.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
-env:
-  IMAGE: levonghukas/orabbit
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   test:
-    name: Unit tests (race) and vet
+    name: Unit tests
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-
       - name: Build
         run: go build ./...
-
       - name: Vet
         run: go vet ./...
-
-      - name: Run tests (race detector)
+      - name: Test (race detector)
         run: go test -race -count=1 ./...
 
   integration:
-    name: Integration tests (source databases)
+    name: Integration tests
     runs-on: ubuntu-latest
-
     # Real databases for the connector tests that are skipped without
-    # ORABBIT_IT_*_DSN (internal/connectors/readonly_integration_test.go).
+    # ORABBIT_IT_*_DSN (internal/connectors/*_integration_test.go).
     services:
       postgres:
         image: postgres:17
@@ -76,54 +75,40 @@ jobs:
         ports: ["9000:9000"]
         options: >-
           --health-cmd "clickhouse-client --password pw --query 'SELECT 1'" --health-interval 5s --health-timeout 5s --health-retries 30
-
     env:
       ORABBIT_IT_POSTGRES_DSN: postgres://postgres:pw@localhost:5432/postgres?sslmode=disable
       ORABBIT_IT_POSTGRES_SNAPSHOT_TABLE: orabbit_it_snapshot
       ORABBIT_IT_MYSQL_DSN: root:pw@tcp(localhost:3306)/mysql
       ORABBIT_IT_MARIADB_DSN: root:pw@tcp(localhost:3307)/mysql
       ORABBIT_IT_CLICKHOUSE_DSN: clickhouse://default:pw@localhost:9000/default
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-
       - name: Seed snapshot table
         run: |
           docker exec "${{ job.services.postgres.id }}" psql -U postgres -v ON_ERROR_STOP=1 -c \
             "CREATE TABLE orabbit_it_snapshot (id bigint PRIMARY KEY); INSERT INTO orabbit_it_snapshot SELECT generate_series(1, 10);"
-
-      - name: Run integration tests
+      - name: Test
         run: go test -race -count=1 -v -run 'Integration|ReadOnly' ./internal/connectors/
 
   lint:
     name: Lint
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-
-      # Needs a release built with Go >= the go.mod version (v2.4 was built
-      # with Go 1.25 and refuses Go 1.26 modules). Bump with the Go toolchain.
+      # Needs a release built with Go >= the go.mod version. Bump it together
+      # with the Go toolchain.
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.14.0
-
       - name: shellcheck
         run: shellcheck deploy-*.sh healthcheck.sh scripts/*.sh
-
       - name: Validate Compose files
         env:
           ORABBIT_HTTP_AUTH_TOKEN: ci
@@ -139,55 +124,21 @@ jobs:
           docker compose -f docker-compose.master.yml -f docker-compose.master.backup.yml config -q
 
   vulncheck:
-    name: Go vulnerability check
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-
-      # Fails on reachable vulnerabilities not reviewed in .govulncheck-allow.
-      - name: govulncheck
-        run: ./scripts/vulncheck.sh
+    name: Vulnerability check
+    uses: ./.github/workflows/vulncheck.yml
 
   images:
-    name: Build, scan & push images
+    name: Image (${{ matrix.target }})
     needs: [test, integration, lint, vulncheck]
     runs-on: ubuntu-latest
-
     strategy:
       matrix:
         target: [master, worker]
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      # Tags: sha-<short> on every push, <version>/<major>.<minor> on v*.*.*
-      # tags, and latest on main. All carry the target as a suffix.
-      - name: Image metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE }}
-          flavor: |
-            latest=false
-            suffix=-${{ matrix.target }},onlatest=true
-          tags: |
-            type=sha,prefix=sha-
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build image
+      - name: Build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -195,7 +146,7 @@ jobs:
           target: ${{ matrix.target }}
           platforms: linux/amd64
           load: true
-          tags: orabbit-ci:${{ matrix.target }}
+          tags: levonghukas/orabbit:latest-${{ matrix.target }}
           # Fresh base images and OS packages every run, so security fixes
           # are never hidden by the layer cache; Go build stages stay cached.
           pull: true
@@ -203,39 +154,31 @@ jobs:
           cache-from: type=gha,scope=orabbit-${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=orabbit-${{ matrix.target }}
 
-      - name: Smoke test image
+      - name: Smoke test
         run: |
-          test "$(docker run --rm --entrypoint id orabbit-ci:${{ matrix.target }} -u)" = 10001
+          image=levonghukas/orabbit:latest-${{ matrix.target }}
+          test "$(docker run --rm --entrypoint id "$image" -u)" = 10001
           # -h prints the flag set and exits 2; the binary must start at all.
-          out="$(docker run --rm orabbit-ci:${{ matrix.target }} -h 2>&1 || true)"
+          out="$(docker run --rm "$image" -h 2>&1 || true)"
           grep -q -- '-insecure' <<<"$out" || { echo "$out"; exit 1; }
 
-      - name: Scan image
+      - name: Scan (Trivy)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: orabbit-ci:${{ matrix.target }}
+          image-ref: levonghukas/orabbit:latest-${{ matrix.target }}
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: "1"
 
-      - name: Login to Docker Hub
-        if: github.event_name == 'push'
+      # Publishing only happens when release.yml calls this workflow. The
+      # image that was just smoke-tested and scanned is the one pushed.
+      - name: Log in to Docker Hub
+        if: inputs.publish
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Push image
-        if: github.event_name == 'push'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile.orabbit
-          target: ${{ matrix.target }}
-          platforms: linux/amd64
-          push: true
-          pull: true
-          no-cache-filters: runtime-base,master-runtime-base
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=orabbit-${{ matrix.target }}
+      - name: Push
+        if: inputs.publish
+        run: docker push levonghukas/orabbit:latest-${{ matrix.target }}
