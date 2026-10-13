@@ -94,7 +94,7 @@ FROM altinity/ice:${ICE_VERSION} AS ice-bin
 # Master runtime base
 # ------------------------------------------------------------
 
-FROM eclipse-temurin:21-jre-jammy AS master-runtime-base
+FROM eclipse-temurin:25-jre-jammy AS master-runtime-base
 
 # Apply OS security updates the base image does not include yet.
 RUN apt-get update \
