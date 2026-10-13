@@ -21,9 +21,12 @@ const (
 type MappingResult struct {
 	LogicalType LogicalType
 	Destination string
-	Class       MappingClass
-	Fallback    bool
-	Reason      string
+	// Target is the ORabbit-native type values are stored as (the same
+	// vocabulary as column_types overrides), e.g. "string" for Arrow utf8.
+	Target   string
+	Class    MappingClass
+	Fallback bool
+	Reason   string
 }
 
 func MappingFor(t LogicalType, destination string, class MappingClass, reason string) MappingResult {

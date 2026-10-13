@@ -20,6 +20,11 @@ require (
 	github.com/sijms/go-ora/v2 v2.9.0
 	github.com/stretchr/testify v1.12.1
 	github.com/trinodb/trino-go-client v0.333.0
+	github.com/xuri/excelize/v2 v2.11.0
+	go.mongodb.org/mongo-driver v1.11.4
+	golang.org/x/term v0.44.0
+	google.golang.org/grpc v1.79.1
+	gopkg.in/inf.v0 v0.9.1
 	github.com/xuri/excelize/v2 v2.11.1-0.20261011032807-402e3bdd9eae
 	go.mongodb.org/mongo-driver v1.17.10
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.71.0

@@ -345,3 +345,711 @@ func (m *Manager) executeRegistrationEngine(ctx context.Context, req RunRequest,
 		return fmt.Errorf("iceberg engine %q is not supported by master", reg.Engine)
 	}
 }
+
+func collectCommittedKeys(ctx context.Context, u *s3io.Uploader, basePrefix string, ds datasetState, objStats map[string]struct{ rows, bytes int64 }) ([]string, error) {
+	keys := []string{}
+	if commitKeys, err := u.ListKeys(ctx, basePrefix+"/_commits/"); err == nil && len(commitKeys) != 0 {
+		type commitManifest struct {
+			Objects   []string         `json:"objects"`
+			ObjectsV2 []map[string]any `json:"objects_v2"`
+		}
+		for _, ck := range commitKeys {
+			b, ok, err := u.GetObjectBytes(ctx, ck)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
+			var cm commitManifest
+			if err := json.Unmarshal(b, &cm); err != nil {
+				continue
+			}
+			keys = append(keys, cm.Objects...)
+			for _, ov := range cm.ObjectsV2 {
+				key, _ := ov["key"].(string)
+				key = strings.TrimSpace(key)
+				if key == "" {
+					continue
+				}
+				var rows int64
+				var bytes int64
+				if v, ok := ov["rows"].(float64); ok {
+					rows = int64(v)
+				}
+				if v, ok := ov["bytes"].(float64); ok {
+					bytes = int64(v)
+				}
+				if rows != 0 || bytes != 0 {
+					objStats[key] = struct{ rows, bytes int64 }{rows: rows, bytes: bytes}
+				}
+			}
+		}
+	}
+	if len(keys) == 0 {
+		keys = ds.LastRunObjects
+		if len(keys) == 0 {
+			keys = ds.LastRunObjectsV2
+		}
+		if len(keys) == 0 {
+			keys = ds.LastCommittedKeys
+		}
+	}
+	if len(keys) != 0 {
+		return keys, nil
+	}
+
+	listed, err := u.ListKeys(ctx, basePrefix+"/part-")
+	if err != nil {
+		return nil, fmt.Errorf("list parquet keys: %w", err)
+	}
+	return listed, nil
+}
+
+func waitForObject(ctx context.Context, u *s3io.Uploader, bucket, key, stateKey string) error {
+	deadline := time.Now().Add(1 * time.Second)
+	for {
+		if _, err := u.Head(ctx, key); err == nil {
+			return nil
+		} else if !isNotFoundErr(err) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("dataset state references missing object: s3://%s/%s (state %s)", bucket, key, stateKey)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func (s datasetState) commitCheckpoint() commitCheckpoint {
+	return commitCheckpoint{
+		RunID:       strings.TrimSpace(s.LastCommittedRun),
+		CommittedAt: strings.TrimSpace(s.CommittedAt),
+	}
+}
+
+func nextIceState(prev iceState, cp commitCheckpoint, fallbackRunID string, lastInsertedPart int) iceState {
+	runID := strings.TrimSpace(cp.RunID)
+	if runID == "" {
+		runID = strings.TrimSpace(fallbackRunID)
+	}
+	updatedAt := strings.TrimSpace(cp.CommittedAt)
+	if updatedAt == "" {
+		updatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	prev.LastInsertedPart = lastInsertedPart
+	prev.LastRunID = runID
+	prev.UpdatedAt = updatedAt
+	return prev
+}
+
+func parsePartNum(key string) (int, bool) {
+	i := strings.LastIndex(key, "/part-")
+	if i < 0 {
+		return 0, false
+	}
+	s := key[i+len("/part-"):]
+	if !strings.HasSuffix(s, ".parquet") {
+		return 0, false
+	}
+	s = strings.TrimSuffix(s, ".parquet")
+	if s == "" {
+		return 0, false
+	}
+	if dash := strings.IndexByte(s, '-'); dash >= 0 {
+		suffix := s[dash+1:]
+		if suffix == "" {
+			return 0, false
+		}
+		for _, r := range suffix {
+			if r < '0' || r > '9' {
+				return 0, false
+			}
+		}
+		s = s[:dash]
+		if s == "" {
+			return 0, false
+		}
+	}
+	n := 0
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n, true
+}
+
+func parsePartFileIndex(key string) (int, bool) {
+	i := strings.LastIndex(key, "/part-")
+	if i < 0 {
+		return 0, false
+	}
+	s := key[i+len("/part-"):]
+	if !strings.HasSuffix(s, ".parquet") {
+		return 0, false
+	}
+	s = strings.TrimSuffix(s, ".parquet")
+	if s == "" {
+		return 0, false
+	}
+	if dash := strings.IndexByte(s, '-'); dash >= 0 {
+		s = s[dash+1:]
+		if s == "" {
+			return 0, false
+		}
+		n := 0
+		for _, r := range s {
+			if r < '0' || r > '9' {
+				return 0, false
+			}
+			n = n*10 + int(r-'0')
+		}
+		return n, true
+	}
+	return 0, true
+}
+
+func isNotFoundErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	le := strings.ToLower(err.Error())
+	return strings.Contains(le, "notfound") ||
+		strings.Contains(le, "no such key") ||
+		strings.Contains(le, "nosuchkey") ||
+		strings.Contains(le, "not found") ||
+		strings.Contains(le, "status code: 404")
+}
+
+func loadDatasetState(ctx context.Context, u *s3io.Uploader, stateKey string, wantRunID string) (datasetState, error) {
+	deadline := time.Now().Add(2 * time.Second)
+	backoff := 25 * time.Millisecond
+	var lastErr error
+
+	for {
+		b, ok, err := u.GetObjectBytes(ctx, stateKey)
+		if err != nil {
+			return datasetState{}, err
+		}
+		if ok {
+			var ds datasetState
+			if err := json.Unmarshal(b, &ds); err != nil {
+				return datasetState{}, fmt.Errorf("parse dataset state: %w", err)
+			}
+			if strings.TrimSpace(ds.LastCommittedRun) == "" || strings.EqualFold(ds.LastCommittedRun, wantRunID) {
+				return ds, nil
+			}
+			lastErr = fmt.Errorf("dataset state last_committed_run_id=%s (want %s)", ds.LastCommittedRun, wantRunID)
+		} else {
+			lastErr = fmt.Errorf("missing dataset state: %s", stateKey)
+		}
+
+		if time.Now().After(deadline) {
+			return datasetState{}, lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return datasetState{}, ctx.Err()
+		case <-time.After(backoff):
+		}
+		if backoff < 300*time.Millisecond {
+			backoff *= 2
+			if backoff > 300*time.Millisecond {
+				backoff = 300 * time.Millisecond
+			}
+		}
+	}
+}
+
+func normalizeLocalhost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	if strings.EqualFold(parsed.Hostname(), "localhost") {
+		parsed.Host = strings.Replace(parsed.Host, "localhost", "127.0.0.1", 1)
+		return parsed.String()
+	}
+	return raw
+}
+
+func icebergRegistrationS3Props(regS3 s3io.Config, credentialVending bool) iceberg.Properties {
+	props := iceberg.Properties{}
+	if ep := strings.TrimSuffix(strings.TrimSpace(regS3.Endpoint), "/"); ep != "" {
+		props["s3.endpoint"] = normalizeLocalhost(ep)
+	}
+	if region := strings.TrimSpace(regS3.Region); region != "" {
+		props["s3.region"] = region
+	}
+	if !credentialVending {
+		if accessKey := strings.TrimSpace(regS3.AccessKeyID); accessKey != "" {
+			props["s3.access-key-id"] = accessKey
+		}
+		if secretKey := strings.TrimSpace(regS3.SecretAccessKey); secretKey != "" {
+			props["s3.secret-access-key"] = secretKey
+		}
+	}
+	if regS3.ForcePathStyle {
+		props["s3.force-virtual-addressing"] = "false"
+	} else {
+		props["s3.force-virtual-addressing"] = "true"
+	}
+	return props
+}
+
+func prepareRESTGoTable(ctx context.Context, log *slog.Logger, req RunRequest, reg RunConfig, table string, regS3 s3io.Config, basePrefix string) (*icetable.Table, error) {
+	if strings.TrimSpace(os.Getenv("AWS_EC2_METADATA_DISABLED")) == "" {
+		_ = os.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	}
+	cat, ident, err := openRESTCatalog(ctx, req, reg, regS3, table)
+	if err != nil {
+		return nil, err
+	}
+	return loadOrCreateRESTGoTable(ctx, log, cat, ident, req, reg, table, basePrefix)
+}
+
+// dropAndRecreateCatalogTable drops the Iceberg table via the REST catalog and
+// immediately recreates it empty. Used during Full Refresh for the ice engine
+// so that the subsequent ice insert appends into a clean snapshot.
+func dropAndRecreateCatalogTable(ctx context.Context, log *slog.Logger, req RunRequest, reg RunConfig, table string, regS3 s3io.Config, basePrefix string) error {
+	cat, ident, err := openRESTCatalog(ctx, req, reg, regS3, table)
+	if err != nil {
+		return err
+	}
+	if dropErr := cat.DropTable(ctx, ident); dropErr != nil && !errors.Is(dropErr, icecatalog.ErrNoSuchTable) {
+		return fmt.Errorf("drop iceberg table %s: %w", table, dropErr)
+	}
+	log.Info("iceberg full refresh: table dropped, recreating",
+		slog.String("run_id", req.RunID),
+		slog.String("table", table),
+	)
+	_, err = createRESTGoTable(ctx, cat, ident, req, reg, basePrefix)
+	return err
+}
+
+func runRESTGoRegister(ctx context.Context, log *slog.Logger, req RunRequest, reg RunConfig, table string, regS3 s3io.Config, basePrefix string, objs []icebergObj) error {
+	tbl, err := prepareRESTGoTable(ctx, log, req, reg, table, regS3, basePrefix)
+	if err != nil {
+		return err
+	}
+
+	newFiles := make([]string, 0, len(objs))
+	for _, obj := range objs {
+		newFiles = append(newFiles, fmt.Sprintf("s3://%s/%s", req.DatasetS3.Bucket, obj.key))
+	}
+
+	isFullRefresh := !req.Incremental || strings.EqualFold(req.WriteMode, "overwrite")
+
+	log.Info("iceberg registration files",
+		slog.String("run_id", req.RunID),
+		slog.String("table", table),
+		slog.Int("new_objects", len(newFiles)),
+		slog.Bool("full_refresh", isFullRefresh),
+	)
+
+	tx := tbl.NewTransaction()
+	currentSpec := tbl.Spec()
+	if err := applyPartitionSpec(tx, &currentSpec, reg.PartitionSpec, tbl.Schema()); err != nil {
+		return err
+	}
+	if err := tx.SetProperties(tableOptionProperties(reg)); err != nil {
+		return err
+	}
+	if err := applyMetadataRetention(tx, reg.MetadataRetention); err != nil {
+		return err
+	}
+	identity := OperationIdentity{RegistrationID: req.RegistrationID, RunID: req.RunID, CommitID: req.CommitID, ArtifactSetDigest: req.ArtifactSetDigest, ManifestKey: req.ManifestKey}
+	snapshotProperties := iceberg.Properties(identity.Properties())
+	if reg.Upsert.Enabled && !isFullRefresh && tbl.CurrentSnapshot() != nil {
+		filter, err := buildUpsertDeleteFilter(ctx, tbl, newFiles, reg.Upsert.Keys)
+		if err != nil {
+			return err
+		}
+		if !filter.Equals(iceberg.AlwaysFalse{}) {
+			if err := tx.Delete(ctx, filter, snapshotProperties); err != nil {
+				return fmt.Errorf("iceberg upsert delete existing rows: %w", err)
+			}
+		}
+	}
+	var existingFiles []string
+	if isFullRefresh {
+		// Collect all existing data files from the current snapshot so we can
+		// atomically replace them with the new files (true snapshot overwrite).
+		if snap := tbl.CurrentSnapshot(); snap != nil {
+			fs, fsErr := tbl.FS(ctx)
+			if fsErr != nil {
+				return fmt.Errorf("iceberg full refresh: open table fs: %w", fsErr)
+			}
+			manifests, mErr := snap.Manifests(fs)
+			if mErr != nil {
+				return fmt.Errorf("iceberg full refresh: list manifests: %w", mErr)
+			}
+			for _, mf := range manifests {
+				entries, eErr := mf.FetchEntries(fs, true)
+				if eErr != nil {
+					return fmt.Errorf("iceberg full refresh: fetch manifest entries: %w", eErr)
+				}
+				for _, e := range entries {
+					existingFiles = append(existingFiles, e.DataFile().FilePath())
+				}
+			}
+		}
+
+		log.Info("iceberg registration full refresh",
+			slog.String("run_id", req.RunID),
+			slog.String("table", table),
+			slog.Int("files_to_delete", len(existingFiles)),
+			slog.Int("files_to_add", len(newFiles)),
+		)
+	}
+	partitionedTable := !currentSpec.IsUnpartitioned() || len(reg.PartitionSpec) > 0
+	if partitionedTable {
+		fs, err := tbl.FS(ctx)
+		if err != nil {
+			return err
+		}
+		reader, err := newParquetRecordReader(ctx, fs, newFiles)
+		if err != nil {
+			return err
+		}
+		defer reader.Release()
+		if isFullRefresh {
+			if err := tx.Overwrite(ctx, reader, snapshotProperties); err != nil {
+				return fmt.Errorf("iceberg partitioned full refresh: %w", err)
+			}
+		} else if err := tx.Append(ctx, reader, snapshotProperties); err != nil {
+			return fmt.Errorf("iceberg partitioned append: %w", err)
+		}
+	} else if err := applyRESTGoFileMutation(ctx, tx, isFullRefresh, existingFiles, newFiles, snapshotProperties); err != nil {
+		return err
+	}
+	_, err = tx.Commit(ctx)
+	return err
+}
+
+type restGoFileMutation interface {
+	AddFiles(context.Context, []string, iceberg.Properties, bool) error
+	ReplaceDataFiles(context.Context, []string, []string, iceberg.Properties) error
+}
+
+func applyRESTGoFileMutation(ctx context.Context, tx restGoFileMutation, fullRefresh bool, existingFiles, newFiles []string, properties iceberg.Properties) error {
+	if fullRefresh {
+		if err := tx.ReplaceDataFiles(ctx, existingFiles, newFiles, properties); err != nil {
+			return fmt.Errorf("iceberg full refresh replace: %w", err)
+		}
+		return nil
+	}
+	if err := tx.AddFiles(ctx, newFiles, properties, false); err != nil {
+		return fmt.Errorf("iceberg incremental append: %w", err)
+	}
+	return nil
+}
+
+func loadOrCreateRESTGoTable(ctx context.Context, log *slog.Logger, cat *restcatalog.Catalog, ident icetable.Identifier, req RunRequest, reg RunConfig, table, basePrefix string) (*icetable.Table, error) {
+	tbl, err := cat.LoadTable(ctx, ident)
+	if err == nil {
+		if reg.Upsert.Enabled && tbl.Metadata().Version() < 2 {
+			return nil, fmt.Errorf("upsert requires Iceberg format version 2 or newer")
+		}
+		var sourceSchema *iceberg.Schema
+		if reg.SchemaEvolution == "additive" {
+			sourceSchema, err = inferRunIcebergSchema(ctx, req, table)
+			if err != nil {
+				return nil, err
+			}
+		}
+		schemaTx := tbl.NewTransaction()
+		if err := applySchemaOptions(schemaTx, tbl.Schema(), sourceSchema, reg); err != nil {
+			return nil, err
+		}
+		tbl, err = schemaTx.Commit(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return applySortOrder(ctx, cat, ident, tbl, reg.SortOrder)
+	}
+	if errors.Is(err, icecatalog.ErrNoSuchTable) {
+		return createRESTGoTable(ctx, cat, ident, req, reg, basePrefix)
+	}
+
+	tableLoc := restGoTableLocation(req.DatasetS3.Bucket, basePrefix)
+	if !isBrokenRESTMetadataErr(err, tableLoc) {
+		return nil, err
+	}
+
+	log.Warn("iceberg registration found broken table metadata; recreating table",
+		slog.String("run_id", req.RunID),
+		slog.String("table", table),
+		slog.String("location", tableLoc),
+	)
+	if dropErr := cat.DropTable(ctx, ident); dropErr != nil && !errors.Is(dropErr, icecatalog.ErrNoSuchTable) {
+		return nil, fmt.Errorf("drop broken iceberg table %s: %w", table, dropErr)
+	}
+	return createRESTGoTable(ctx, cat, ident, req, reg, basePrefix)
+}
+
+func createRESTGoTable(ctx context.Context, cat *restcatalog.Catalog, ident icetable.Identifier, req RunRequest, reg RunConfig, basePrefix string) (*icetable.Table, error) {
+	iceSchema, err := inferRunIcebergSchema(ctx, req, strings.Join(ident, "."))
+	if err != nil {
+		return nil, err
+	}
+
+	if reg.Upsert.Enabled {
+		iceSchema, err = schemaWithIdentifierFields(iceSchema, reg.Upsert.Keys)
+		if err != nil {
+			return nil, err
+		}
+	}
+	spec, err := buildPartitionSpec(iceSchema, reg.PartitionSpec)
+	if err != nil {
+		return nil, err
+	}
+	order, err := buildSortOrder(iceSchema, reg.SortOrder, icetable.InitialSortOrderID)
+	if err != nil {
+		return nil, err
+	}
+	props := tableOptionProperties(reg)
+	props["format-version"] = "2"
+	loc := restGoTableLocation(req.DatasetS3.Bucket, basePrefix)
+	return cat.CreateTable(ctx, ident, iceSchema,
+		icecatalog.WithLocation(loc),
+		icecatalog.WithPartitionSpec(&spec),
+		icecatalog.WithSortOrder(order),
+		icecatalog.WithProperties(props),
+	)
+}
+
+func inferRunIcebergSchema(ctx context.Context, req RunRequest, tableName string) (*iceberg.Schema, error) {
+	mode := normalizedRunRequestSourceMode(req.SourceMode)
+	if mode == "query" {
+		if !connectors.SupportsQueryMode(req.SourceEngine) {
+			engine := connectors.NormalizeSourceEngine(req.SourceEngine)
+			if engine == "" {
+				engine = strings.TrimSpace(req.SourceEngine)
+			}
+			return nil, fmt.Errorf("cannot infer Iceberg schema for query-mode run: query mode is not supported for %s", engine)
+		}
+	} else if !connectors.SupportsOrderedCursor(req.SourceEngine) && !connectors.SupportsDocumentReader(req.SourceEngine) {
+		return nil, fmt.Errorf("auto-create Iceberg table is only implemented for SQL ordered-cursor and document sources; create %s before running registration", tableName)
+	}
+
+	var iceSchema *iceberg.Schema
+	if len(req.DurableIcebergSchema) > 0 {
+		var persisted iceberg.Schema
+		if err := json.Unmarshal(req.DurableIcebergSchema, &persisted); err != nil {
+			return nil, failure.NewFailure(failure.FailureConfigurationUnavailable, false, true, fmt.Errorf("invalid durable source schema: %w", err))
+		}
+		if len(persisted.Fields()) == 0 {
+			return nil, failure.NewFailure(failure.FailureConfigurationUnavailable, false, true, fmt.Errorf("durable source schema has no fields"))
+		}
+		iceSchema = &persisted
+	}
+
+	var arrSchema *arrow.Schema
+
+	if iceSchema == nil && connectors.SupportsDocumentReader(req.SourceEngine) {
+		db, err := connectors.OpenDocumentReader(ctx, req.SourceEngine, req.SourceDSN)
+		if err != nil {
+			return nil, fmt.Errorf("open document source for iceberg auto-create: %w", err)
+		}
+		defer db.Close()
+
+		it, err := db.StreamDocuments(ctx, req.SourceTable, documentFilter(req.SourceEngine, req.RecordPath, req.FileFormat), 1000)
+		if err != nil {
+			return nil, fmt.Errorf("stream documents for iceberg auto-create: %w", err)
+		}
+		defer it.Close()
+		var fieldOrder []string
+		if ordered, ok := it.(connectors.OrderedDocumentIterator); ok {
+			fieldOrder = ordered.FieldOrder()
+		}
+
+		var docBuf []map[string]any
+		for it.Next(ctx) {
+			doc, err := it.Decode()
+			if err != nil {
+				return nil, fmt.Errorf("decode document for iceberg auto-create: %w", err)
+			}
+			docBuf = append(docBuf, doc)
+			if len(docBuf) >= 1000 {
+				break
+			}
+		}
+
+		arrSchema, err = arrowio.InferMongoSchemaWithFieldOrder(docBuf, fieldOrder)
+		if err != nil {
+			return nil, fmt.Errorf("infer document schema for iceberg auto-create: %w", err)
+		}
+	} else if iceSchema == nil {
+		db, err := connectors.OpenIntRangeReader(ctx, req.SourceEngine, req.SourceDSN)
+		if err != nil {
+			return nil, fmt.Errorf("open source for iceberg auto-create: %w", err)
+		}
+		defer db.Close()
+
+		cols, colTypes, err := describeSourceSchemaForAutoCreate(ctx, db, req)
+		if err != nil {
+			return nil, err
+		}
+		_, arrSchema, err = arrowio.PlansFromSQLEngineWithOverrides(req.SourceEngine, cols, colTypes, req.ColumnTypes)
+		if err != nil {
+			return nil, fmt.Errorf("sql->arrow schema: %w", err)
+		}
+	}
+
+	if iceSchema == nil {
+		var err error
+		iceSchema, err = icetable.ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
+		if err != nil {
+			return nil, fmt.Errorf("arrow->iceberg schema: %w", err)
+		}
+	}
+
+	return iceSchema, nil
+}
+
+// InferDurableIcebergSchema snapshots the source/query schema in Iceberg's
+// stable JSON representation before a zero-artifact run enters its durable
+// commit boundary.
+func InferDurableIcebergSchema(ctx context.Context, engine, dsn, mode, table, query, recordPath, fileFormat string) (json.RawMessage, error) {
+	schema, _, err := InferDurableIcebergSchemaWithWarnings(ctx, engine, dsn, mode, table, query, recordPath, fileFormat, nil, nil)
+	return schema, err
+}
+
+// InferDurableIcebergSchemaWithWarnings snapshots the durable source schema and
+// returns the document inference warnings produced by that same sample.
+func InferDurableIcebergSchemaWithWarnings(ctx context.Context, engine, dsn, mode, table, query, recordPath, fileFormat string, columnTypes map[string]string, selectColumns []string) (json.RawMessage, []typesystem.TypeWarning, error) {
+	if connectors.SupportsDocumentReader(engine) {
+		reader, err := connectors.OpenDocumentReader(ctx, engine, dsn)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open document source for durable schema: %w", err)
+		}
+		defer reader.Close()
+		inference, err := arrowio.InferMongoSchemaFromReader(ctx, reader, table, documentFilter(engine, recordPath, fileFormat))
+		if err != nil {
+			return nil, nil, fmt.Errorf("infer document durable schema: %w", err)
+		}
+		iceSchema, err := icetable.ArrowSchemaToIcebergWithFreshIDs(inference.Schema, false)
+		if err != nil {
+			return nil, nil, fmt.Errorf("arrow->iceberg durable schema: %w", err)
+		}
+		schema, err := json.Marshal(iceSchema)
+		if err != nil {
+			return nil, nil, err
+		}
+		return schema, arrowio.MongoTypeWarnings(inference), nil
+	}
+	reader, err := connectors.OpenIntRangeReader(ctx, engine, dsn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open source for durable schema: %w", err)
+	}
+	defer reader.Close()
+	req := RunRequest{SourceEngine: engine, SourceMode: mode, SourceTable: table, SourceQuery: query, SelectColumns: selectColumns}
+	cols, sqlTypes, err := describeSourceSchemaForAutoCreate(ctx, reader, req)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(cols) == 0 {
+		return nil, nil, fmt.Errorf("durable source schema has no columns")
+	}
+	_, arrSchema, err := arrowio.PlansFromSQLEngineWithOverrides(engine, cols, sqlTypes, columnTypes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("sql->arrow durable schema: %w", err)
+	}
+	iceSchema, err := icetable.ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
+	if err != nil {
+		return nil, nil, fmt.Errorf("arrow->iceberg durable schema: %w", err)
+	}
+	schema, err := json.Marshal(iceSchema)
+	return schema, nil, err
+}
+
+func normalizedRunRequestSourceMode(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "table":
+		return "table"
+	case "query", "sql":
+		return "query"
+	default:
+		return strings.ToLower(strings.TrimSpace(raw))
+	}
+}
+
+func describeSourceSchemaForAutoCreate(ctx context.Context, reader connectors.TableReader, req RunRequest) ([]string, []*sql.ColumnType, error) {
+	mode := normalizedRunRequestSourceMode(req.SourceMode)
+	if mode == "query" {
+		query := strings.TrimSpace(req.SourceQuery)
+		if query == "" {
+			return nil, nil, fmt.Errorf("cannot infer Iceberg schema for query-mode run: source query is empty")
+		}
+		queryReader, ok := reader.(connectors.SourceQueryReader)
+		if !ok {
+			engine := connectors.NormalizeSourceEngine(req.SourceEngine)
+			if engine == "" {
+				engine = strings.TrimSpace(req.SourceEngine)
+			}
+			return nil, nil, fmt.Errorf("cannot infer Iceberg schema for query-mode run: query mode is not supported for %s", engine)
+		}
+		cols, colTypes, err := queryReader.DescribeQuery(ctx, query)
+		if err != nil {
+			return nil, nil, fmt.Errorf("cannot infer Iceberg schema for query-mode run: describe query result: %w", err)
+		}
+		if len(cols) == 0 {
+			return nil, nil, fmt.Errorf("cannot infer Iceberg schema for query-mode run: query returned no columns")
+		}
+		return cols, colTypes, nil
+	}
+
+	cols, colTypes, err := reader.DescribeTable(ctx, req.SourceTable)
+	if err != nil {
+		return nil, nil, fmt.Errorf("describe table for iceberg auto-create: %w", err)
+	}
+	if len(req.SelectColumns) > 0 {
+		selMap := make(map[string]int)
+		for idx, c := range cols {
+			selMap[strings.ToLower(c)] = idx
+		}
+		filteredCols := make([]string, 0, len(req.SelectColumns))
+		filteredColTypes := make([]*sql.ColumnType, 0, len(req.SelectColumns))
+		for _, sc := range req.SelectColumns {
+			scClean := strings.TrimSpace(sc)
+			if idx, ok := selMap[strings.ToLower(scClean)]; ok {
+				filteredCols = append(filteredCols, cols[idx])
+				filteredColTypes = append(filteredColTypes, colTypes[idx])
+			}
+		}
+		if len(filteredCols) > 0 {
+			return filteredCols, filteredColTypes, nil
+		}
+	}
+	return cols, colTypes, nil
+}
+
+func restGoTableLocation(bucket, basePrefix string) string {
+	return fmt.Sprintf("s3://%s/%s", strings.TrimSpace(bucket), strings.Trim(strings.TrimSpace(basePrefix), "/"))
+}
+
+func isBrokenRESTMetadataErr(err error, tableLoc string) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	if !strings.Contains(msg, "location does not exist:") || !strings.Contains(msg, "/metadata/") {
+		return false
+	}
+	tableLoc = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(tableLoc), "/"))
+	if tableLoc == "" {
+		return false
+	}
+	return strings.Contains(msg, tableLoc+"/metadata/")
+}
