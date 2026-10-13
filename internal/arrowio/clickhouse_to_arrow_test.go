@@ -214,4 +214,3 @@ func TestClickHouseUInt32ParquetRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(len(values)), meta.RowCount)
 }
-

@@ -30,8 +30,8 @@ func TestReconcileCommittingRunsConcurrency(t *testing.T) {
 		datasetKey := dataset.StorageKey("http://minio:9000", "bucket1", prefix)
 
 		srcID, tgtID := "src-"+suffix, "tgt-"+suffix
-		srcSecret, _ := crypto.Encrypt(crypto.Key{}, []byte(`{"dsn":"sqlserver://example"}`), []byte(srcID))
-		tgtSecret, _ := crypto.Encrypt(crypto.Key{}, []byte(`{"access_key_id":"a","secret_access_key":"b"}`), []byte(tgtID))
+		srcSecret, _ := crypto.Encrypt(testCryptoKey, []byte(`{"dsn":"sqlserver://example"}`), []byte(srcID))
+		tgtSecret, _ := crypto.Encrypt(testCryptoKey, []byte(`{"access_key_id":"a","secret_access_key":"b"}`), []byte(tgtID))
 
 		_ = st.CreateConnection(ctx, db.Connection{ID: srcID, Name: srcID, Kind: "source", Engine: "mssql", MetadataJSON: []byte(`{}`), SecretEncBlob: srcSecret})
 		_ = st.CreateConnection(ctx, db.Connection{ID: tgtID, Name: tgtID, Kind: "target", Engine: "s3", MetadataJSON: []byte(`{"endpoint": "http://minio:9000", "region": "us-east-1", "bucket": "bucket1", "prefix": "` + prefix + `", "force_path_style": true}`), SecretEncBlob: tgtSecret})
@@ -61,7 +61,7 @@ func TestReconcileCommittingRunsConcurrency(t *testing.T) {
 		runIDs = append(runIDs, runID)
 	}
 
-	srv := NewServer(nil, st, nil, crypto.Key{}, time.Second, nil)
+	srv := NewServer(nil, st, nil, testCryptoKey, time.Second, nil)
 	srv.runIcebergRegistrationFn = nil
 	srv.newCommitObjectStoreFn = func(context.Context, s3io.Config) (commitObjectStore, error) { return objects, nil }
 	srv.upsertHWMFn = func(ctx context.Context, jobID, value string) error {

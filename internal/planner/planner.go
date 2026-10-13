@@ -6,15 +6,12 @@ package planner
 import (
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"net/url"
-	"runtime"
 	"strings"
 	"time"
 
@@ -22,9 +19,9 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/dataset"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
+	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
-	"github.com/LevonGhukas/O_Rabbit/internal/sysinfo"
 )
 
 const activeWorkerHeartbeatWindow = 30 * time.Second
@@ -42,7 +39,7 @@ func emitPlanEvent(ctx context.Context, st *db.Store, runID, level, message stri
 	_ = st.InsertEvent(ctx, db.Event{
 		ID:         newID(),
 		RunID:      runID,
-		TS:         time.Now().UTC().Format(time.RFC3339Nano),
+		TS:         db.FormatTimestamp(time.Now()),
 		Level:      level,
 		Message:    message,
 		FieldsJSON: payload,
@@ -84,49 +81,32 @@ func loadDatasetState(ctx context.Context, st *db.Store, k crypto.Key, job db.Jo
 		return datasetState{}, false, "", false, err
 	}
 
-	var tgtMeta map[string]any
-	_ = json.Unmarshal(tgtConn.MetadataJSON, &tgtMeta)
-
-	endpoint, _ := tgtMeta["endpoint"].(string)
-	region, _ := tgtMeta["region"].(string)
-	bucket, _ := tgtMeta["bucket"].(string)
-	forcePathStyle := true
-	if v, ok := tgtMeta["force_path_style"].(bool); ok {
-		forcePathStyle = v
+	target, err := dataset.ParseTarget(tgtConn.MetadataJSON)
+	if err != nil {
+		return datasetState{}, false, "", false, err
 	}
-	prefix, _ := tgtMeta["prefix"].(string)
-
-	localTarget := isLocalEndpoint(endpoint)
+	localTarget := isLocalEndpoint(target.Endpoint)
 
 	// Compute dataset prefix (derived if metadata.prefix empty).
-	basePrefix := dataset.Prefix(prefix, srcEngine, sourceDatasetName(job, opts))
-
-	if strings.TrimSpace(bucket) == "" {
-		// Can't read state without a bucket.
-		return datasetState{}, false, basePrefix, localTarget, nil
-	}
-	if endpoint == "" {
-		endpoint = "http://localhost:9000"
-	}
-	if region == "" {
-		region = "us-east-1"
-	}
+	basePrefix := dataset.Prefix(target.Prefix, srcEngine, sourceDatasetName(job, opts))
 
 	sec, err := crypto.Decrypt(k, tgtConn.SecretEncBlob, []byte(tgtConn.ID))
 	if err != nil {
 		return datasetState{}, false, basePrefix, localTarget, err
 	}
 	var tgtSecret map[string]any
-	_ = json.Unmarshal(sec, &tgtSecret)
+	if err := json.Unmarshal(sec, &tgtSecret); err != nil {
+		return datasetState{}, false, basePrefix, localTarget, fmt.Errorf("target connection secret is not a JSON object: %w", err)
+	}
 	accessKey, _ := tgtSecret["access_key_id"].(string)
 	secretKey, _ := tgtSecret["secret_access_key"].(string)
 	sessionToken, _ := tgtSecret["session_token"].(string)
 
 	u, err := s3io.New(ctx, s3io.Config{
-		Endpoint:        endpoint,
-		Region:          region,
-		Bucket:          bucket,
-		ForcePathStyle:  forcePathStyle,
+		Endpoint:        target.Endpoint,
+		Region:          target.Region,
+		Bucket:          target.Bucket,
+		ForcePathStyle:  target.ForcePathStyle,
 		AccessKeyID:     accessKey,
 		SecretAccessKey: secretKey,
 		SessionToken:    sessionToken,
@@ -195,7 +175,7 @@ func activeWorkerCountBestEffort(ctx context.Context, st *db.Store) int {
 	if st == nil {
 		return 0
 	}
-	cutoff := time.Now().UTC().Add(-activeWorkerHeartbeatWindow).Format(time.RFC3339Nano)
+	cutoff := db.FormatTimestamp(time.Now().UTC().Add(-activeWorkerHeartbeatWindow))
 	workers, err := st.ListWorkersActive(ctx, cutoff)
 	if err != nil {
 		return 0
@@ -228,6 +208,11 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 		srcEngine = "db"
 	}
 	o.SourceMode = o.NormalizedSourceMode()
+	if strings.TrimSpace(o.WhereClause) != "" {
+		if err := connectors.ValidateWhereClause(o.WhereClause); err != nil {
+			return db.Run{}, nil, fmt.Errorf("options_json.where_clause is invalid: %w", err)
+		}
+	}
 	if o.SourceMode == "query" {
 		sourceQuery, err := connectors.NormalizeReadOnlySQLQuery(sourceQueryForJob(job, o))
 		if err != nil {
@@ -246,26 +231,24 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 	if err != nil {
 		return db.Run{}, nil, err
 	}
-	var tgtMeta map[string]any
-	_ = json.Unmarshal(tgtConn.MetadataJSON, &tgtMeta)
-	targetPrefix, _ := tgtMeta["prefix"].(string)
-	endpoint, _ := tgtMeta["endpoint"].(string)
-	bucket, _ := tgtMeta["bucket"].(string)
+	target, err := dataset.ParseTarget(tgtConn.MetadataJSON)
+	if err != nil {
+		return db.Run{}, nil, err
+	}
 	sourceName := sourceDatasetName(job, o)
-	basePrefix := dataset.Prefix(targetPrefix, srcEngine, sourceName)
-	datasetKey := dataset.StorageKey(endpoint, bucket, basePrefix)
+	basePrefix := dataset.Prefix(target.Prefix, srcEngine, sourceName)
+	datasetKey := dataset.StorageKey(target.Endpoint, target.Bucket, basePrefix)
 
-	// Ensure a single active RUNNING run per job.
-	// If a previous CLI run was interrupted, its run/tasks may still be RUNNING and can steal worker capacity.
-	_, _ = st.FailRunningRunsForJob(ctx, job.ID, "superseded by new run")
-
+	// A dataset has at most one active run. A new run for a busy dataset is
+	// rejected with DatasetBusyError below; an unwanted active run must be
+	// canceled explicitly (POST /runs/{id}/cancel), never superseded silently.
 	run = db.Run{
 		ID:                     newID(),
 		JobID:                  job.ID,
 		DatasetKey:             datasetKey,
 		Status:                 "PLANNING",
 		CorrelationID:          newID(),
-		StartedAt:              time.Now().UTC().Format(time.RFC3339Nano),
+		StartedAt:              db.FormatTimestamp(time.Now()),
 		RegistrationConfigJSON: append(json.RawMessage(nil), registrationConfig...),
 	}
 	if err := st.CreateRun(ctx, run); err != nil {
@@ -291,7 +274,7 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 		if err == nil || strings.TrimSpace(runIDForFailure) == "" {
 			return
 		}
-		msg := strings.TrimSpace(err.Error())
+		msg := strings.TrimSpace(db.RedactCredentials(err.Error()))
 		if msg == "" {
 			msg = "run planning failed"
 		}
@@ -299,6 +282,7 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 		defer cancel()
 
 		_ = st.UpdateRunStatus(failCtx, runIDForFailure, "FAILED", true, &msg)
+		_ = st.RecordRunFailure(failCtx, runIDForFailure, string(failure.ClassOf(err)), db.RunFailurePhasePlanning)
 		emitPlanEvent(failCtx, st, runIDForFailure, "ERROR", "planner failed", map[string]any{"error": msg})
 	}()
 	startTasks := func(tasks []db.TaskInsert) (bool, error) {
@@ -335,6 +319,10 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 			slog.Warn("type mapping fallback", "run_id", run.ID, "source_engine", srcEngine, "column", warning.Column, "logical_type", warning.LogicalType, "storage_type", warning.StorageType, "mapping_class", warning.Class, "reason", warning.Reason)
 		}
 		emitPlanEvent(ctx, st, run.ID, "WARN", "column type fallbacks applied", map[string]any{"warnings": typeWarnings})
+	}
+	if usages := o.DeprecatedUsages(srcEngine); len(usages) > 0 {
+		slog.Warn("job uses deprecated options", "run_id", run.ID, "job_id", job.ID, "usages", usages)
+		emitPlanEvent(ctx, st, run.ID, "WARN", "deprecated job options used", map[string]any{"usages": usages})
 	}
 
 	switch o.NormalizedPartitionStrategy() {
@@ -686,19 +674,31 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 			}
 		}
 
+		// Resume after the high-water mark, or, with cursor_lookback, at an
+		// inclusive bound below it so late-committed rows are re-read.
+		lowerBound, lowerExclusive := fromHWM, strings.TrimSpace(fromHWM) != ""
+		if lowerExclusive && strings.TrimSpace(o.CursorLookback) != "" {
+			start, err := connectors.CursorLookbackStart(cv.Domain, fromHWM, o.CursorLookback)
+			if err != nil {
+				return db.Run{}, nil, err
+			}
+			lowerBound, lowerExclusive = start, false
+			emitPlanEvent(ctx, st, run.ID, "INFO", "cursor lookback applied", map[string]any{"from_hwm": fromHWM, "cursor_lookback": o.CursorLookback, "lower_bound_inclusive": start})
+		}
+
 		idx := basePart + 1
 		var tasks []db.TaskInsert
 		if cv.RangeCapable {
-			tasks, err = buildOrderedCursorRangeTasks(run.ID, idx, o.Table, cursorColumn, cv.Domain, fromHWM, stats, o, snapshotCtx)
+			tasks, err = buildOrderedCursorRangeTasks(run.ID, idx, o.Table, cursorColumn, cv.Domain, lowerBound, lowerExclusive, stats, o, snapshotCtx)
 			if err != nil {
 				return db.Run{}, nil, err
 			}
 		} else {
-			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, cursorColumn, cv.Domain, fromHWM, strings.TrimSpace(fromHWM) != "", snapshotCtx)
+			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, cursorColumn, cv.Domain, lowerBound, lowerExclusive, snapshotCtx)
 			tasks = []db.TaskInsert{{ID: newID(), RunID: run.ID, TaskIndex: idx, PartitionSpec: part, Status: "PENDING"}}
 		}
 		if len(tasks) == 0 {
-			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, cursorColumn, cv.Domain, fromHWM, strings.TrimSpace(fromHWM) != "", snapshotCtx)
+			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, cursorColumn, cv.Domain, lowerBound, lowerExclusive, snapshotCtx)
 			tasks = []db.TaskInsert{{ID: newID(), RunID: run.ID, TaskIndex: idx, PartitionSpec: part, Status: "PENDING"}}
 		}
 
@@ -747,644 +747,4 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 	default:
 		return db.Run{}, nil, fmt.Errorf("unknown partition_strategy %q", o.PartitionStrategy)
 	}
-}
-
-// PartitionSpecSingle constructs a partition specification payload.
-// It exists to keep worker partition contracts explicit and stable.
-func PartitionSpecSingle(table, sourceMode, queryHash string) json.RawMessage {
-	return PartitionSpecSingleWithRecordPath(table, sourceMode, queryHash, "")
-}
-
-// PartitionSpecSingleWithRecordPath constructs a single-task partition
-// specification with optional JSON record selection metadata.
-func PartitionSpecSingleWithRecordPath(table, sourceMode, queryHash, recordPath string) json.RawMessage {
-	return PartitionSpecSingleWithFileOptions(table, sourceMode, queryHash, recordPath, "")
-}
-
-// PartitionSpecSingleWithFileOptions constructs a single-task partition
-// specification with optional file-source metadata.
-func PartitionSpecSingleWithFileOptions(table, sourceMode, queryHash, recordPath, fileFormat string) json.RawMessage {
-	part := map[string]any{
-		"type":        "single",
-		"source_mode": sourceMode,
-		"table":       table,
-	}
-	if strings.TrimSpace(queryHash) != "" {
-		part["query_hash"] = strings.TrimSpace(queryHash)
-	}
-	if strings.TrimSpace(recordPath) != "" {
-		part["record_path"] = strings.TrimSpace(recordPath)
-	}
-	if strings.TrimSpace(fileFormat) != "" {
-		part["format"] = strings.TrimSpace(fileFormat)
-	}
-	b, _ := json.Marshal(part)
-	return json.RawMessage(b)
-}
-
-func PartitionSpecCDCStream(table, sourceMode, queryHash string) json.RawMessage {
-	part := map[string]any{
-		"type":        "cdc_stream",
-		"source_mode": sourceMode,
-		"table":       table,
-	}
-	if strings.TrimSpace(queryHash) != "" {
-		part["query_hash"] = strings.TrimSpace(queryHash)
-	}
-	b, _ := json.Marshal(part)
-	return b
-}
-
-// PartitionSpecSQLCursorRange constructs a partition specification payload for a bounded ordered-cursor task.
-func PartitionSpecSQLCursorRange(table, column string, domain connectors.CursorDomain, lower string, lowerExclusive bool, upper string, upperInclusive bool, outputPart int, snapshotCtx string) json.RawMessage {
-	return partitionSpecSQLCursorRange(table, "table", "", "", nil, nil, column, domain, lower, lowerExclusive, upper, upperInclusive, outputPart, snapshotCtx)
-}
-
-func partitionSpecSQLCursorRange(table, sourceMode, queryHash, whereClause string, selectColumns []string, columnTypes map[string]string, column string, domain connectors.CursorDomain, lower string, lowerExclusive bool, upper string, upperInclusive bool, outputPart int, snapshotCtx string) json.RawMessage {
-	part := map[string]any{
-		"type":            "sql_cursor_range",
-		"source_mode":     sourceMode,
-		"table":           table,
-		"cursor_column":   column,
-		"cursor_domain":   domain,
-		"output_part":     outputPart,
-		"lower":           strings.TrimSpace(lower),
-		"lower_exclusive": lowerExclusive,
-		"upper":           strings.TrimSpace(upper),
-		"upper_inclusive": upperInclusive,
-	}
-	if strings.TrimSpace(whereClause) != "" {
-		part["where_clause"] = strings.TrimSpace(whereClause)
-	}
-	if len(selectColumns) > 0 {
-		part["select_columns"] = selectColumns
-	}
-	if len(columnTypes) > 0 {
-		part["column_types"] = columnTypes
-	}
-	if len(selectColumns) > 0 {
-		part["select_columns"] = selectColumns
-	}
-	if len(columnTypes) > 0 {
-		part["column_types"] = columnTypes
-	}
-	if strings.TrimSpace(queryHash) != "" {
-		part["query_hash"] = strings.TrimSpace(queryHash)
-	}
-	if strings.TrimSpace(snapshotCtx) != "" {
-		part["snapshot_context"] = strings.TrimSpace(snapshotCtx)
-	}
-	b, _ := json.Marshal(part)
-	return b
-}
-
-// PartitionSpecSQLCursorSingle constructs a partition specification payload for a single ordered-cursor task.
-func PartitionSpecSQLCursorSingle(table, column string, domain connectors.CursorDomain, lower string, lowerExclusive bool, snapshotCtx string) json.RawMessage {
-	return partitionSpecSQLCursorSingle(table, "table", "", "", nil, nil, column, domain, lower, lowerExclusive, snapshotCtx)
-}
-
-func partitionSpecSQLCursorSingle(table, sourceMode, queryHash, whereClause string, selectColumns []string, columnTypes map[string]string, column string, domain connectors.CursorDomain, lower string, lowerExclusive bool, snapshotCtx string) json.RawMessage {
-	part := map[string]any{
-		"type":            "sql_cursor_single",
-		"source_mode":     sourceMode,
-		"table":           table,
-		"cursor_column":   column,
-		"cursor_domain":   domain,
-		"lower":           strings.TrimSpace(lower),
-		"lower_exclusive": lowerExclusive,
-	}
-	if strings.TrimSpace(whereClause) != "" {
-		part["where_clause"] = strings.TrimSpace(whereClause)
-	}
-	if len(selectColumns) > 0 {
-		part["select_columns"] = selectColumns
-	}
-	if len(columnTypes) > 0 {
-		part["column_types"] = columnTypes
-	}
-	if strings.TrimSpace(queryHash) != "" {
-		part["query_hash"] = strings.TrimSpace(queryHash)
-	}
-	if strings.TrimSpace(snapshotCtx) != "" {
-		part["snapshot_context"] = strings.TrimSpace(snapshotCtx)
-	}
-	b, _ := json.Marshal(part)
-	return b
-}
-
-const (
-	defaultTargetRowsPerTask  int64 = 200_000
-	mediumFallbackRowsPerTask int64 = 500_000
-	largeFallbackRowsPerTask  int64 = 1_000_000
-	smallTableRowsThreshold   int64 = 1_000_000
-	mediumTableRowsThreshold  int64 = 10_000_000
-	defaultTargetFileBytes    int64 = 256 * 1024 * 1024
-	filesPerPlannedTask             = 4
-)
-
-type autoTuneDecision struct {
-	EstimatedRows               int64
-	ActiveWorkers               int
-	TableBytes                  int64
-	TargetFileBytes             int64
-	TaskTargetBytes             int64
-	FilesPerTask                int
-	TargetRowsPerTask           int64
-	SelectedFallbackRowsPerTask int64
-	PlannedTasksByBytes         int
-	PlannedTasksByRows          int
-	FinalPlannedTasks           int
-	PlanningMaxInFlightTasks    int
-	EffectiveMinTaskConcurrency int
-	MaxInFlightTasks            int
-	MinimumTasks                int64
-	SelectedMaxInFlightReason   string
-	SelectedReason              string
-}
-
-func autoTuneCursorPlanWithDecision(o jobopts.Options, domain connectors.CursorDomain, st connectors.CursorStats, localTarget bool, activeWorkers int) (jobopts.Options, autoTuneDecision) {
-	return autoTuneCursorPlanWithDecisionUsingHeuristic(o, domain, st, localTarget, activeWorkers, heuristicMaxInFlightTasks)
-}
-
-// autoTuneCursorPlanWithDecisionUsingHeuristic keeps the host heuristic injectable
-// for deterministic planner tests. Production always uses heuristicMaxInFlightTasks.
-func autoTuneCursorPlanWithDecisionUsingHeuristic(o jobopts.Options, domain connectors.CursorDomain, st connectors.CursorStats, localTarget bool, activeWorkers int, inferredMaxInFlight func(connectors.CursorStats, bool) int) (jobopts.Options, autoTuneDecision) {
-	// Resolved values remain in job options for current-run scheduling, but are
-	// marked so a later run recalculates them from current source statistics and
-	// target-file policy instead of mistaking them for caller overrides.
-	if o.PlannedTasksWasInferred() {
-		o.PlannedTasks = 0
-	}
-	if o.MaxInFlightTasksWasInferred() {
-		o.MaxInFlightTasks = 0
-	}
-	explicitMaxInFlight := o.MaxInFlightTasks > 0
-	explicitPlannedTasks := o.PlannedTasks > 0
-	decision := autoTuneDecision{
-		EstimatedRows:     st.RowCount,
-		ActiveWorkers:     activeWorkers,
-		TableBytes:        st.TableBytes,
-		TargetFileBytes:   o.TargetFileBytes,
-		TargetRowsPerTask: o.TargetRowsPerTask,
-		MaxInFlightTasks:  o.MaxInFlightTasks,
-	}
-	// Concurrency cap (deterministic).
-	// NOTE: MaxInFlightTasks controls *end-to-end* task concurrency (DB read + convert + upload).
-	// On local laptop stacks (SQL source + MinIO in Docker/Colima), high concurrency is often slower and less stable.
-	if o.MaxInFlightTasks <= 0 {
-		o.MaxInFlightTasks = inferredMaxInFlight(st, localTarget)
-		decision.SelectedMaxInFlightReason = "host_heuristic"
-	} else {
-		decision.SelectedMaxInFlightReason = "user_override"
-	}
-	decision.PlanningMaxInFlightTasks = o.MaxInFlightTasks
-	decision.MaxInFlightTasks = o.MaxInFlightTasks
-
-	// Only inferred concurrency is constrained by the workers presently available.
-	// Keep the host-derived value for target-file policy and the max-task cap, but
-	// use the effective scheduler concurrency for the minimum task lower bound.
-	// An explicit user concurrency value remains authoritative.
-	effectiveMinTaskConcurrency := o.MaxInFlightTasks
-	if !explicitMaxInFlight && activeWorkers > 0 {
-		effectiveMinTaskConcurrency = minInt(effectiveMinTaskConcurrency, activeWorkers)
-	}
-	decision.EffectiveMinTaskConcurrency = effectiveMinTaskConcurrency
-
-	// PlannedTasks controls independent leased source ranges. It is a distinct
-	// advanced override from MaxInFlightTasks (scheduler concurrency) and from
-	// TargetFileBytes (physical Parquet file goal).
-	if explicitPlannedTasks {
-		decision.SelectedReason = "user_override"
-		decision.FinalPlannedTasks = o.PlannedTasks
-		decision.TargetFileBytes = o.TargetFileBytes
-		o.PlannedTasksSource = jobopts.PerformanceValueSourceExplicit
-		if explicitMaxInFlight {
-			o.MaxInFlightTasksSource = jobopts.PerformanceValueSourceExplicit
-		} else {
-			o.MaxInFlightTasksSource = jobopts.PerformanceValueSourceInferred
-		}
-		return o, decision
-	}
-
-	// ---- NEW: estimate bytes per row and total bytes to export ----
-	var bytesPerRow int64 = 0
-	if st.TableBytes > 0 && st.RowCount > 0 {
-		// allocated bytes / rows is crude but good enough for tuning
-		bpr := st.TableBytes / st.RowCount
-		if bpr > 0 {
-			bytesPerRow = bpr
-		}
-	}
-
-	estRows := st.RowCount
-	var estBytes int64 = 0
-	if bytesPerRow > 0 && estRows > 0 {
-		// avoid overflow paranoia: clamp
-		if bytesPerRow > 0 && estRows > 0 {
-			if estRows > (math.MaxInt64 / bytesPerRow) {
-				estBytes = math.MaxInt64
-			} else {
-				estBytes = bytesPerRow * estRows
-			}
-		}
-	}
-
-	// Decide planned task count.
-	targetRowsPerTask := o.TargetRowsPerTask
-	if targetRowsPerTask <= 0 {
-		targetRowsPerTask = defaultTargetRowsPerTask
-	}
-	decision.TargetRowsPerTask = targetRowsPerTask
-	selectedFallbackRowsPerTask := adaptiveFallbackRowsPerTask(targetRowsPerTask, estRows)
-	decision.SelectedFallbackRowsPerTask = selectedFallbackRowsPerTask
-	targetFileBytes := o.TargetFileBytes
-	if targetFileBytes <= 0 {
-		targetFileBytes = defaultTargetFileBytes
-	}
-	// Prefer fewer, larger files when concurrency is low; prefer smaller files
-	// when concurrency is high. This keeps throughput good across single-node and
-	// multi-worker setups without hard-coding environment-specific defaults.
-	if targetFileBytes == defaultTargetFileBytes && st.TableBytes > 0 {
-		const gib = 1024 * 1024 * 1024
-		// Scale desired part size by planned end-to-end concurrency.
-		switch {
-		case o.MaxInFlightTasks <= 2:
-			if st.TableBytes <= 8*gib {
-				targetFileBytes = 1 * gib
-			} else {
-				targetFileBytes = 512 * 1024 * 1024
-			}
-		case o.MaxInFlightTasks <= 8:
-			targetFileBytes = 512 * 1024 * 1024
-		default:
-			// Keep the default 256MiB target for high parallelism.
-			targetFileBytes = defaultTargetFileBytes
-		}
-		// Persist so the CLI prints the effective plan.
-		o.TargetFileBytes = targetFileBytes
-	}
-	decision.TargetFileBytes = targetFileBytes
-	taskTargetBytes := targetFileBytes * filesPerPlannedTask
-	if taskTargetBytes <= 0 || taskTargetBytes/filesPerPlannedTask != targetFileBytes {
-		taskTargetBytes = targetFileBytes
-	}
-	decision.TaskTargetBytes = taskTargetBytes
-	decision.FilesPerTask = filesPerPlannedTask
-
-	minTasks := int64(effectiveMinTaskConcurrency) * int64(o.MinTasksMultiplier)
-	if minTasks < int64(effectiveMinTaskConcurrency) {
-		minTasks = int64(effectiveMinTaskConcurrency)
-	}
-	if minTasks < 1 {
-		minTasks = 1
-	}
-	decision.MinimumTasks = minTasks
-
-	var tasks int64 = 0
-
-	// Primary: bytes-based
-	if estBytes > 0 {
-		tasks = int64(math.Ceil(float64(estBytes) / float64(taskTargetBytes)))
-		decision.PlannedTasksByBytes = int(tasks)
-	}
-
-	// Fallback: rows-based
-	if estRows > 0 && selectedFallbackRowsPerTask > 0 {
-		decision.PlannedTasksByRows = int(math.Ceil(float64(estRows) / float64(selectedFallbackRowsPerTask)))
-	}
-	if tasks <= 0 && estRows > 0 && selectedFallbackRowsPerTask > 0 {
-		tasks = int64(decision.PlannedTasksByRows)
-		decision.SelectedReason = "adaptive_rows_fallback"
-	}
-
-	// Final fallback
-	if tasks < 1 {
-		tasks = minTasks
-		decision.SelectedReason = "min_tasks_fallback"
-	}
-
-	if decision.SelectedReason == "" && decision.PlannedTasksByBytes > 0 {
-		decision.SelectedReason = "bytes_based"
-	}
-
-	// Ensure enough tasks to keep workers busy
-	if tasks < minTasks {
-		tasks = minTasks
-	}
-
-	// Hard cap to avoid millions of tasks
-	maxTasks := int64(o.MaxInFlightTasks * 64)
-	if maxTasks < 128 {
-		maxTasks = 128
-	}
-	if maxTasks > 4096 {
-		maxTasks = 4096
-	}
-	if tasks > maxTasks {
-		tasks = maxTasks
-	}
-
-	if connectors.SupportsCursorRangeSplit(domain) {
-		o.PlannedTasks = int(tasks)
-		if o.PlannedTasks < 1 {
-			o.PlannedTasks = 1
-		}
-	} else {
-		o.PlannedTasks = 1
-	}
-
-	// Keep target_file_bytes behavior stable by computing it against the existing
-	// heuristic. Once the final task count is known, align scheduler concurrency
-	// to active workers when the caller did not set max_in_flight_tasks explicitly.
-	if !explicitMaxInFlight && activeWorkers > 0 && o.PlannedTasks > 0 {
-		o.MaxInFlightTasks = minInt(o.PlannedTasks, activeWorkers)
-		decision.SelectedMaxInFlightReason = "active_workers"
-	}
-
-	decision.FinalPlannedTasks = o.PlannedTasks
-	decision.MaxInFlightTasks = o.MaxInFlightTasks
-	o.PlannedTasksSource = jobopts.PerformanceValueSourceInferred
-	if explicitMaxInFlight {
-		o.MaxInFlightTasksSource = jobopts.PerformanceValueSourceExplicit
-	} else {
-		o.MaxInFlightTasksSource = jobopts.PerformanceValueSourceInferred
-	}
-
-	return o, decision
-}
-
-func heuristicMaxInFlightTasks(st connectors.CursorStats, localTarget bool) int {
-	cpuCap := runtime.NumCPU()
-	if cpuCap < 2 {
-		cpuCap = 2
-	}
-	ramCap := 32
-	if memBytes, ok := sysinfo.TotalMemoryBytes(); ok {
-		const perTask = 1536 * 1024 * 1024 // ~1.5GiB
-		ramCap = int(memBytes / perTask)
-		if ramCap < 2 {
-			ramCap = 2
-		}
-	}
-	n := cpuCap
-	if ramCap < n {
-		n = ramCap
-	}
-	if n > 32 {
-		n = 32
-	}
-	// Extra safety cap for single-host/local endpoints.
-	// When the DB and object store are on the same machine/VM, very high concurrency
-	// can reduce throughput (disk contention, page cache churn). Keep it moderate
-	// unless the machine has plenty of memory.
-	if localTarget || st.SourceIsLocal {
-		if memBytes, ok := sysinfo.TotalMemoryBytes(); ok {
-			const gib = 1024 * 1024 * 1024
-			switch {
-			case memBytes <= 12*gib:
-				if n > 2 {
-					n = 2
-				}
-			case memBytes <= 24*gib:
-				if n > 4 {
-					n = 4
-				}
-			case memBytes <= 64*gib:
-				if n > 8 {
-					n = 8
-				}
-			default:
-				if n > 16 {
-					n = 16
-				}
-			}
-		} else if n > 8 {
-			n = 8
-		}
-	}
-	return n
-}
-
-func adaptiveFallbackRowsPerTask(targetRowsPerTask, estRows int64) int64 {
-	if targetRowsPerTask <= 0 {
-		targetRowsPerTask = defaultTargetRowsPerTask
-	}
-	// Preserve explicit non-default target_rows_per_task overrides.
-	if targetRowsPerTask != defaultTargetRowsPerTask {
-		return targetRowsPerTask
-	}
-	switch {
-	case estRows <= 0:
-		return targetRowsPerTask
-	case estRows <= smallTableRowsThreshold:
-		return defaultTargetRowsPerTask
-	case estRows <= mediumTableRowsThreshold:
-		return mediumFallbackRowsPerTask
-	default:
-		return largeFallbackRowsPerTask
-	}
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func buildOrderedCursorRangeTasks(runID string, baseIndex int, table, column string, domain connectors.CursorDomain, fromHWM string, stats connectors.CursorStats, o jobopts.Options, snapshotCtx string) ([]db.TaskInsert, error) {
-	maxValue := strings.TrimSpace(stats.MaxValue)
-	minValue := strings.TrimSpace(stats.MinValue)
-	if maxValue == "" || minValue == "" {
-		return nil, nil
-	}
-
-	startInclusive := minValue
-	if strings.TrimSpace(fromHWM) != "" {
-		next, ok := connectors.CursorSuccessor(domain, fromHWM)
-		if !ok {
-			return nil, nil
-		}
-		startInclusive = next
-	}
-	if startInclusive == "" || connectors.CompareCursorValues(domain, startInclusive, maxValue) > 0 {
-		return nil, nil
-	}
-
-	plannedTasks := o.PlannedTasks
-	if plannedTasks <= 0 {
-		plannedTasks = 1
-		if o.ChunkSize > 0 {
-			if span, ok := connectors.ClosedCursorSpanUnits(domain, startInclusive, maxValue); ok && span > 0 {
-				plannedTasks = int(math.Ceil(float64(span) / float64(o.ChunkSize)))
-			}
-		}
-	}
-	if plannedTasks < 1 {
-		plannedTasks = 1
-	}
-
-	uppers, err := connectors.SplitCursorRange(domain, startInclusive, maxValue, plannedTasks)
-	if err != nil {
-		return nil, err
-	}
-	lower := strings.TrimSpace(fromHWM)
-	lowerExclusive := lower != ""
-	idx := baseIndex
-	sourceMode := o.NormalizedSourceMode()
-	queryHash := strings.TrimSpace(o.QueryHash)
-	tasks := make([]db.TaskInsert, 0, len(uppers))
-	for _, upper := range uppers {
-		part := partitionSpecSQLCursorRange(table, sourceMode, queryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, column, domain, lower, lowerExclusive, upper, true, idx, snapshotCtx)
-		tasks = append(tasks, db.TaskInsert{
-			ID:            newID(),
-			RunID:         runID,
-			TaskIndex:     idx,
-			PartitionSpec: part,
-			Status:        "PENDING",
-		})
-		lower = upper
-		lowerExclusive = true
-		idx++
-	}
-	return tasks, nil
-}
-
-// persistTunedOptionsBestEffort handles persist tuned options best effort behavior.
-// It exists to keep this logic isolated and reusable.
-func persistTunedOptionsBestEffort(ctx context.Context, st *db.Store, job db.Job, o jobopts.Options) error {
-	var m map[string]any
-	_ = json.Unmarshal(job.OptionsJSON, &m)
-	m = o.MergeInto(m)
-
-	b, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	job.OptionsJSON = b
-	return st.UpdateJob(ctx, job)
-}
-
-type cursorValidator interface {
-	ValidateCursorColumn(ctx context.Context, table, cursorColumn string) (connectors.CursorColumnValidation, error)
-}
-
-type tableDescriber interface {
-	DescribeTable(ctx context.Context, table string) ([]string, []*sql.ColumnType, error)
-}
-
-type cursorStatDiscoverer interface {
-	DiscoverCursorStats(ctx context.Context, table, cursorColumn string, domain connectors.CursorDomain) (connectors.CursorStats, error)
-}
-
-// discoverCursorStats handles source statistics discovery for ordered-cursor capable engines.
-func discoverCursorStats(ctx context.Context, r cursorStatDiscoverer, sourceEngine, table, cursorCol string, domain connectors.CursorDomain) (connectors.CursorStats, error) {
-	stats, err := r.DiscoverCursorStats(ctx, table, cursorCol, domain)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return connectors.CursorStats{}, fmt.Errorf("ordered-cursor stats query timed out (engine=%s table=%s cursor_column=%s deadline=%s): %w", sourceEngine, table, cursorCol, ctxDeadlineRFC3339(ctx), err)
-		}
-		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
-			return connectors.CursorStats{}, fmt.Errorf("ordered-cursor stats query was canceled (engine=%s table=%s cursor_column=%s): %w", sourceEngine, table, cursorCol, err)
-		}
-		return connectors.CursorStats{}, fmt.Errorf("ordered-cursor stats query failed (engine=%s table=%s cursor_column=%s): %w", sourceEngine, table, cursorCol, err)
-	}
-	return stats, nil
-}
-
-func discoverQueryCursorStats(ctx context.Context, r connectors.SourceQueryReader, sourceEngine, query, cursorCol string, domain connectors.CursorDomain, queryHash string) (connectors.CursorStats, error) {
-	stats, err := r.DiscoverQueryCursorStats(ctx, query, cursorCol, domain)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return connectors.CursorStats{}, fmt.Errorf("query-mode stats query timed out (engine=%s query_hash=%s cursor_column=%s deadline=%s): %w", sourceEngine, queryHash, cursorCol, ctxDeadlineRFC3339(ctx), err)
-		}
-		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
-			return connectors.CursorStats{}, fmt.Errorf("query-mode stats query was canceled (engine=%s query_hash=%s cursor_column=%s): %w", sourceEngine, queryHash, cursorCol, err)
-		}
-		return connectors.CursorStats{}, fmt.Errorf("query-mode stats query failed (engine=%s query_hash=%s cursor_column=%s): %w", sourceEngine, queryHash, cursorCol, err)
-	}
-	return stats, nil
-}
-
-func validateCursorColumn(ctx context.Context, r cursorValidator, sourceEngine, table, cursorCol string) (connectors.CursorColumnValidation, error) {
-	cv, err := r.ValidateCursorColumn(ctx, table, cursorCol)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return connectors.CursorColumnValidation{}, fmt.Errorf("ordered-cursor column validation timed out (engine=%s table=%s cursor_column=%s deadline=%s): %w", sourceEngine, table, cursorCol, ctxDeadlineRFC3339(ctx), err)
-		}
-		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
-			return connectors.CursorColumnValidation{}, fmt.Errorf("ordered-cursor column validation was canceled (engine=%s table=%s cursor_column=%s): %w", sourceEngine, table, cursorCol, err)
-		}
-		return connectors.CursorColumnValidation{}, fmt.Errorf("ordered-cursor column validation failed (engine=%s table=%s cursor_column=%s): %w", sourceEngine, table, cursorCol, err)
-	}
-	return cv, nil
-}
-
-func validateQueryCursorColumn(ctx context.Context, r connectors.SourceQueryReader, sourceEngine, query, cursorCol, queryHash string) (connectors.CursorColumnValidation, error) {
-	cv, err := r.ValidateQueryCursorColumn(ctx, query, cursorCol)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return connectors.CursorColumnValidation{}, fmt.Errorf("query-mode column validation timed out (engine=%s query_hash=%s cursor_column=%s deadline=%s): %w", sourceEngine, queryHash, cursorCol, ctxDeadlineRFC3339(ctx), err)
-		}
-		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
-			return connectors.CursorColumnValidation{}, fmt.Errorf("query-mode column validation was canceled (engine=%s query_hash=%s cursor_column=%s): %w", sourceEngine, queryHash, cursorCol, err)
-		}
-		return connectors.CursorColumnValidation{}, fmt.Errorf("query-mode column validation failed (engine=%s query_hash=%s cursor_column=%s): %w", sourceEngine, queryHash, cursorCol, err)
-	}
-	return cv, nil
-}
-
-func openCursorReader(ctx context.Context, st *db.Store, k crypto.Key, connID, sourceEngine string) (connectors.TableReader, error) {
-	src, err := st.GetConnection(ctx, connID)
-	if err != nil {
-		return nil, err
-	}
-	sec, err := crypto.Decrypt(k, src.SecretEncBlob, []byte(src.ID))
-	if err != nil {
-		return nil, err
-	}
-	var m map[string]any
-	if err := json.Unmarshal(sec, &m); err != nil {
-		return nil, err
-	}
-	dsn, _ := m["dsn"].(string)
-	if strings.TrimSpace(dsn) == "" {
-		return nil, fmt.Errorf("source connection secret missing dsn")
-	}
-	r, err := connectors.OpenCursorReader(ctx, sourceEngine, dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open source reader (engine=%s): %w", sourceEngine, err)
-	}
-	return r, nil
-}
-
-func openDocumentReader(ctx context.Context, st *db.Store, k crypto.Key, connID, sourceEngine string) (connectors.DocumentReader, error) {
-	src, err := st.GetConnection(ctx, connID)
-	if err != nil {
-		return nil, err
-	}
-	sec, err := crypto.Decrypt(k, src.SecretEncBlob, []byte(src.ID))
-	if err != nil {
-		return nil, err
-	}
-	var m map[string]any
-	if err := json.Unmarshal(sec, &m); err != nil {
-		return nil, err
-	}
-	dsn, _ := m["dsn"].(string)
-	if strings.TrimSpace(dsn) == "" {
-		return nil, fmt.Errorf("source connection secret missing dsn")
-	}
-	r, err := connectors.OpenDocumentReader(ctx, sourceEngine, dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open source reader (engine=%s): %w", sourceEngine, err)
-	}
-	return r, nil
-}
-
-func ctxDeadlineRFC3339(ctx context.Context) string {
-	if d, ok := ctx.Deadline(); ok {
-		return d.UTC().Format(time.RFC3339Nano)
-	}
-	return "none"
 }

@@ -1,0 +1,184 @@
+name: CI
+
+# Checks every pull request. release.yml reuses this workflow with
+# publish: true, so the checks are defined once and images are pushed only
+# after everything here passes.
+on:
+  pull_request:
+  workflow_call:
+    inputs:
+      publish:
+        description: Push the master and worker images to Docker Hub.
+        type: boolean
+        default: false
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: false
+      DOCKERHUB_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels its older, now outdated run.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test (race detector)
+        run: go test -race -count=1 ./...
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    # Real databases for the connector tests that are skipped without
+    # ORABBIT_IT_*_DSN (internal/connectors/*_integration_test.go).
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: pw
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: pw
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -ppw" --health-interval 5s --health-timeout 5s --health-retries 30
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ROOT_PASSWORD: pw
+        ports: ["3307:3306"]
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized" --health-interval 5s --health-timeout 5s --health-retries 30
+      clickhouse:
+        image: clickhouse/clickhouse-server:25.8
+        env:
+          CLICKHOUSE_PASSWORD: pw
+        ports: ["9000:9000"]
+        options: >-
+          --health-cmd "clickhouse-client --password pw --query 'SELECT 1'" --health-interval 5s --health-timeout 5s --health-retries 30
+    env:
+      ORABBIT_IT_POSTGRES_DSN: postgres://postgres:pw@localhost:5432/postgres?sslmode=disable
+      ORABBIT_IT_POSTGRES_SNAPSHOT_TABLE: orabbit_it_snapshot
+      ORABBIT_IT_MYSQL_DSN: root:pw@tcp(localhost:3306)/mysql
+      ORABBIT_IT_MARIADB_DSN: root:pw@tcp(localhost:3307)/mysql
+      ORABBIT_IT_CLICKHOUSE_DSN: clickhouse://default:pw@localhost:9000/default
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Seed snapshot table
+        run: |
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -v ON_ERROR_STOP=1 -c \
+            "CREATE TABLE orabbit_it_snapshot (id bigint PRIMARY KEY); INSERT INTO orabbit_it_snapshot SELECT generate_series(1, 10);"
+      - name: Test
+        run: go test -race -count=1 -v -run 'Integration|ReadOnly' ./internal/connectors/
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      # Needs a release built with Go >= the go.mod version. Bump it together
+      # with the Go toolchain.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+      - name: shellcheck
+        run: shellcheck deploy-*.sh healthcheck.sh scripts/*.sh
+      - name: Validate Compose files
+        env:
+          ORABBIT_HTTP_AUTH_TOKEN: ci
+          ORABBIT_WORKER_AUTH_TOKEN: ci
+          ORABBIT_MASTER_KEY: ci
+        run: |
+          for f in .env.*.example; do cp "$f" "${f%.example}"; done
+          docker compose -f docker-compose.yaml config -q
+          docker compose -f docker-compose.ex-db.yml config -q
+          docker compose -f docker-compose.minio.yml config -q
+          docker compose -f docker-compose.worker.yml config -q
+          docker compose -f docker-compose.master.yml -f docker-compose.master.grpc-publish.yml config -q
+          docker compose -f docker-compose.master.yml -f docker-compose.master.backup.yml config -q
+
+  vulncheck:
+    name: Vulnerability check
+    uses: ./.github/workflows/vulncheck.yml
+
+  images:
+    name: Image (${{ matrix.target }})
+    needs: [test, integration, lint, vulncheck]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [master, worker]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.orabbit
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          load: true
+          tags: levonghukas/orabbit:latest-${{ matrix.target }}
+          # Fresh base images and OS packages every run, so security fixes
+          # are never hidden by the layer cache; Go build stages stay cached.
+          pull: true
+          no-cache-filters: runtime-base,master-runtime-base
+          cache-from: type=gha,scope=orabbit-${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=orabbit-${{ matrix.target }}
+
+      - name: Smoke test
+        run: |
+          image=levonghukas/orabbit:latest-${{ matrix.target }}
+          test "$(docker run --rm --entrypoint id "$image" -u)" = 10001
+          # -h prints the flag set and exits 2; the binary must start at all.
+          out="$(docker run --rm "$image" -h 2>&1 || true)"
+          grep -q -- '-insecure' <<<"$out" || { echo "$out"; exit 1; }
+
+      - name: Scan (Trivy)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: levonghukas/orabbit:latest-${{ matrix.target }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      # Publishing only happens when release.yml calls this workflow. The
+      # image that was just smoke-tested and scanned is the one pushed.
+      - name: Log in to Docker Hub
+        if: inputs.publish
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push
+        if: inputs.publish
+        run: docker push levonghukas/orabbit:latest-${{ matrix.target }}

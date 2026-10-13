@@ -1,0 +1,11 @@
+# Reachable vulnerabilities accepted until a fixed release exists.
+# One OSV ID per line, then a reason. Review on every dependency update and
+# remove an entry as soon as a fix is released. scripts/vulncheck.sh fails on
+# any reachable vulnerability not listed here.
+
+# hamba/avro decoder DoS/overflow, pulled in by apache/iceberg-go to read
+# Iceberg manifests. No fixed version exists. Inputs are manifests O_Rabbit
+# or its own catalog wrote, not untrusted data.
+GO-2026-5046
+GO-2026-5047
+GO-2026-5048

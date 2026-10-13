@@ -44,7 +44,7 @@ func canceledObjectFixture(t *testing.T, suffix string) (*Store, Task, time.Time
 func TestCanceledObjectCandidateQuarantineAndDryRun(t *testing.T) {
 	ctx := context.Background()
 	st, task, _, candidateID := canceledObjectFixture(t, "canceled-object")
-	
+
 	deadline := time.Date(2030, 1, 2, 3, 4, 5, 1, time.UTC)
 	if _, err := st.db.ExecContext(ctx, `UPDATE canceled_object_candidates SET quarantine_until=? WHERE id=?`, canceledObjectTimestamp(deadline), candidateID); err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func TestCanceledObjectCleanupExpiryIsExactAndIdempotent(t *testing.T) {
 	).Scan(&attemptStatus, &finishedAt, &errorClass); err != nil {
 		t.Fatal(err)
 	}
-	if attemptStatus != "EXPIRED" || finishedAt != expireAt.Format(time.RFC3339Nano) || errorClass != string(CleanupDeleteAmbiguous) {
+	if attemptStatus != "EXPIRED" || finishedAt != FormatTimestamp(expireAt) || errorClass != string(CleanupDeleteAmbiguous) {
 		t.Fatalf("attempt status=%q finished_at=%q error_class=%q", attemptStatus, finishedAt, errorClass)
 	}
 	unrelated, err := st.GetCanceledObjectCandidate(ctx, unrelatedID)

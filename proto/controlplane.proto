@@ -18,6 +18,59 @@ service ControlPlane {
 
   rpc ReportTaskProgress(ReportTaskProgressRequest) returns (ReportTaskProgressResponse);
   rpc ReportTaskResult(ReportTaskResultRequest) returns (ReportTaskResultResponse);
+
+  // Worker identity. EnrollWorker is the only RPC accepted without a client
+  // certificate; it exchanges a single-purpose enrollment token and a CSR for
+  // a master-issued identity certificate. RenewWorkerCertificate requires the
+  // current identity certificate.
+  rpc EnrollWorker(EnrollWorkerRequest) returns (EnrollWorkerResponse);
+  rpc RenewWorkerCertificate(RenewWorkerCertificateRequest) returns (RenewWorkerCertificateResponse);
+
+  // Returns the source and target credentials for one task attempt, only to
+  // the authenticated worker that currently holds that attempt's lease.
+  rpc GetTaskCredentials(GetTaskCredentialsRequest) returns (GetTaskCredentialsResponse);
+  rpc ReportMultipartLifecycle(ReportMultipartLifecycleRequest) returns (ReportMultipartLifecycleResponse);
+}
+
+message EnrollWorkerRequest {
+  string enrollment_token = 1; // secret; do not log
+  string csr_pem = 2;          // PKCS#10 CSR; the private key never leaves the worker
+  string name = 3;             // operator-facing label, metadata only
+  string hostname = 4;
+}
+
+message EnrollWorkerResponse {
+  string worker_id = 1;        // server-issued immutable identity (UUID)
+  string certificate_pem = 2;
+  string ca_certificate_pem = 3;
+  int64 not_after_unix_ms = 4;
+  string pool = 5;
+}
+
+message RenewWorkerCertificateRequest {
+  string worker_id = 1;
+  string csr_pem = 2;
+}
+
+message RenewWorkerCertificateResponse {
+  string certificate_pem = 1;
+  int64 not_after_unix_ms = 2;
+}
+
+message GetTaskCredentialsRequest {
+  string worker_id = 1;
+  string task_id = 2;
+  string attempt_id = 3;
+  string fencing_token = 4;
+  string boot_id = 5;
+}
+
+message GetTaskCredentialsResponse {
+  string source_dsn = 1;           // do not log
+  string s3_access_key_id = 2;     // do not log
+  string s3_secret_access_key = 3; // do not log
+  string s3_session_token = 4;     // set for temporary (STS) credentials
+  int64 s3_expires_at_unix_ms = 5; // 0 when the credentials do not expire
 }
 
 message RegisterWorkerRequest {
@@ -46,8 +99,8 @@ message HeartbeatResponse {}
 message RequestTaskRequest {
   string worker_id = 1;
   string capabilities_json = 2;
-  // Current value is 5. The master accepts an exact match only; see
-  // docs/WORKER_PROTOCOL_COMPATIBILITY.md.
+  // Current value is 6. The master accepts an exact match only. Version 6
+  // moved task secrets from TaskAssignment to GetTaskCredentials.
   int32 protocol_version = 3;
   string boot_id = 4;
 }
@@ -70,9 +123,10 @@ message TaskAssignment {
   // Planning / partition
   string partition_spec_json = 10;
 
-  // Source
+  // Source. Credentials are never sent here; use GetTaskCredentials.
   string source_engine = 20; // e.g. mssql, postgres
-  string source_dsn = 21;    // decrypted DSN; do not log
+  reserved 21;
+  reserved "source_dsn";
   string source_sql = 22;
 
   // Target (S3/MinIO)
@@ -81,9 +135,8 @@ message TaskAssignment {
   string s3_bucket = 32;
   string s3_prefix = 33; // base prefix for output objects
   bool s3_force_path_style = 34;
-  string s3_access_key_id = 35;     // do not log
-  string s3_secret_access_key = 36; // do not log
-  string s3_session_token = 37;     // optional
+  reserved 35, 36, 37;
+  reserved "s3_access_key_id", "s3_secret_access_key", "s3_session_token";
 
   // Output controls
   int64 target_file_bytes = 40;
@@ -151,6 +204,11 @@ message ArtifactIntegrity {
   string verification_status = 13;
   string verified_at = 14;
   string max_hwm = 15;
+  // Checksum the object store computed for the uploaded object
+  // (x-amz-checksum-sha256): base64 SHA-256 of the whole object, or of the
+  // part checksums followed by "-<parts>" for multipart uploads. Empty when
+  // the store does not report checksums.
+  string provider_checksum_sha256 = 16;
 }
 
 message RenewTaskLeaseRequest {
@@ -196,3 +254,23 @@ message ReportTaskResultResponse {
   bool accepted = 1;
   string message = 2;
 }
+
+message ReportMultipartLifecycleRequest {
+  string worker_id = 1;
+  string run_id = 2;
+  string task_id = 3;
+  string attempt_id = 4;
+  string fencing_token = 5;
+  string boot_id = 6;
+
+  string event = 10;
+  int32 file_index = 11;
+  string object_key = 12;
+  string provider_upload_id = 13;
+  string sha256 = 14;
+  int64 size = 15;
+  string error_class = 16;
+  string error_message = 17;
+}
+
+message ReportMultipartLifecycleResponse {}
