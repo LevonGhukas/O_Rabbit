@@ -79,7 +79,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     && GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -tags kqueue -trimpath -ldflags "${ldflags}" -o /out/mc .
 
 
-FROM alpine:3.22 AS runtime-base
+FROM alpine:3.24 AS runtime-base
 # Apply OS security updates the base image does not include yet.
 RUN apk upgrade --no-cache && apk add --no-cache ca-certificates tzdata curl
 
