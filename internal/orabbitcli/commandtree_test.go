@@ -76,19 +76,19 @@ func TestMainRunInteractiveHelp(t *testing.T) {
 func TestMainRunSubmitDispatches(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/connections":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `[]`)
-		case r.Method == http.MethodPost && r.URL.Path == "/connections":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/connections":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"id":"conn-1"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/jobs":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/jobs":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `[]`)
-		case r.Method == http.MethodPost && r.URL.Path == "/jobs":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/jobs":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"id":"job-1"}`)
-		case r.Method == http.MethodPost && r.URL.Path == "/jobs/job-1/runs":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/jobs/job-1/runs":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"run":{"id":"run-1"},"tasks":[{}]}`)
 		default:
@@ -138,10 +138,10 @@ job:
 func TestMainRunWatchDispatches(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/runs/run-1":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runs/run-1":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"run":{"id":"run-1","status":"RUNNING"},"tasks":[]}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/sse":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sse":
 			w.Header().Set("Content-Type", "text/event-stream")
 			fl, ok := w.(http.Flusher)
 			if !ok {

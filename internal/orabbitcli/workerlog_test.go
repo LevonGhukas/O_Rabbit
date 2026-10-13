@@ -30,7 +30,7 @@ done
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/workers":
+		case "/api/v1/workers":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `[]`)
 		default:

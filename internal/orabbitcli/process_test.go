@@ -158,7 +158,7 @@ func TestCmdStackStatusJSONUsesStableSchemaForMasterAPI(t *testing.T) {
 				GRPCAddr: "127.0.0.1:65535",
 				DBPath:   "./master.sqlite",
 			})
-		case "/workers":
+		case "/api/v1/workers":
 			_ = json.NewEncoder(w).Encode([]lsWorkerStatus{
 				{
 					ID:            "local-01",
