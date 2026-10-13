@@ -6,11 +6,10 @@ import (
 )
 
 func TestSQLPlanWarnings(t *testing.T) {
+	// An explicit uuid override is stored natively, so it needs no fallback warning.
 	r, err := PlansFromSQLEngineResult("postgres", []string{"id"}, nil, map[string]string{"id": "uuid"})
 	require.NoError(t, err)
-	require.Len(t, r.Warnings, 1)
-	require.Equal(t, "id", r.Warnings[0].Column)
-	require.Equal(t, "semantic_fallback", string(r.Warnings[0].Class))
+	require.Empty(t, r.Warnings)
 	r, err = PlansFromSQLEngineResult("sqlite", []string{"x"}, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, r.Warnings, 1)
