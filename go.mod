@@ -20,11 +20,6 @@ require (
 	github.com/sijms/go-ora/v2 v2.9.0
 	github.com/stretchr/testify v1.12.1
 	github.com/trinodb/trino-go-client v0.333.0
-	github.com/xuri/excelize/v2 v2.11.0
-	go.mongodb.org/mongo-driver v1.11.4
-	golang.org/x/term v0.44.0
-	google.golang.org/grpc v1.79.1
-	gopkg.in/inf.v0 v0.9.1
 	github.com/xuri/excelize/v2 v2.11.1-0.20261011032807-402e3bdd9eae
 	go.mongodb.org/mongo-driver v1.17.10
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.71.0
@@ -34,6 +29,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.46.0
 	golang.org/x/term v0.46.0
 	google.golang.org/grpc v1.84.0
+	gopkg.in/inf.v0 v0.9.1
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.46.1
 )
@@ -164,7 +160,6 @@ require (
 	google.golang.org/api v0.278.0 // indirect
 	google.golang.org/genproto v0.0.0-20260319201613-d00831a3d3e7 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260819154853-08b0e4226688 // indirect
-	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 )
 
