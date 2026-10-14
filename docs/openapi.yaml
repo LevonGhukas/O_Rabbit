@@ -143,6 +143,9 @@ paths:
         `source_connection_id` and `target_connection_id` must name existing
         source and target connections, and `options_json` must be an object
         (or null) with known keys of the right type and valid values.
+        `write_mode` must be `overwrite` (full jobs, the default) or `append`
+        (incremental jobs, the default); `incremental` + `overwrite` and full
+        + `append` are rejected.
         Unknown keys are rejected with a "did you mean" hint. Invalid jobs get
         400 `invalid_input` listing every problem in `details.errors`
         (`[{field, error}]`), and nothing is stored.
@@ -175,8 +178,8 @@ paths:
         "422":
           description: >-
             Planning failed for a reason the caller must fix. A job stored with
-            invalid options_json returns failure_class CONFIGURATION_INVALID
-            and lists every problem in `details.errors`.
+            invalid options_json or an unsafe write_mode returns failure_class
+            CONFIGURATION_INVALID and lists every problem in `details.errors`.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
