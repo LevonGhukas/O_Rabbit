@@ -147,6 +147,10 @@ func TestConnectionDeleteWritesBeforeOnlyAuditRecord(t *testing.T) {
 
 func TestJobCreateUpdateDeleteWriteAuditRecords(t *testing.T) {
 	st := openTestStore(t)
+	// Jobs must reference existing connections of the right kind.
+	for _, c := range []struct{ id, kind, engine string }{{"src-1", "source", "postgres"}, {"tgt-1", "target", "s3"}, {"src-2", "source", "postgres"}, {"tgt-2", "target", "s3"}} {
+		createTestConnection(t, st, db.Connection{ID: c.id, Name: c.id, Kind: c.kind, Engine: c.engine, MetadataJSON: []byte(`{}`), SecretEncBlob: []byte(`{}`)})
+	}
 	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 
 	createBody := `{
