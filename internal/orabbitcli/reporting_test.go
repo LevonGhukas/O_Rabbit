@@ -115,7 +115,7 @@ func TestRenderBenchReportFormatsRequestedSections(t *testing.T) {
 		"  max_in_flight=2\n" +
 		"  planned_tasks=auto\n" +
 		"  effective_partition_span=2\n" +
-		"  fetch_limit_rows=50000\n" +
+		"  fetch_size=50000\n" +
 		"  planning_ms=123\n\n" +
 		"Data\n" +
 		"  rows=10\n" +

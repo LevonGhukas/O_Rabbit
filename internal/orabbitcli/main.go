@@ -406,7 +406,7 @@ func cmdRunInteractive(ctx context.Context, args []string) int {
 		JobName:         "export",
 		TargetNamespace: "orders",
 		TargetTable:     "Orders",
-		WriteMode:       "append",
+		WriteMode:       "", // defaults from Incremental: overwrite for full runs
 		Incremental:     false,
 		Table:           "SalesDB.dbo.BigTable4",
 		IDColumn:        "RowId",
@@ -1045,7 +1045,7 @@ func promptRunConfig(ctx context.Context, prompts *promptSession, cfg *ranConfig
 		if advanced {
 			cfg.AutoTune, err = promptBoolField(ctx, prompts, promptFieldSpec{
 				Label: "Use automatic performance tuning?",
-				Note:  "Lets the planner choose chunking, fetch limit, and concurrency.",
+				Note:  "Lets the planner choose chunking and concurrency.",
 			}, true)
 			if err != nil {
 				return err
@@ -1092,12 +1092,15 @@ func promptRunConfig(ctx context.Context, prompts *promptSession, cfg *ranConfig
 			if cfg.PlannedTasks < 1 {
 				cfg.PlannedTasks = 1
 			}
-			cfg.FetchLimit, err = promptIntField(ctx, prompts, promptFieldSpec{Label: "fetch_limit_rows"}, cfg.FetchLimit)
+			cfg.FetchLimit, err = promptIntField(ctx, prompts, promptFieldSpec{
+				Label: "fetch_size",
+				Note:  "Rows fetched per source round-trip (Oracle, Cassandra, ClickHouse, MongoDB); 0 keeps the engine default.",
+			}, cfg.FetchLimit)
 			if err != nil {
 				return err
 			}
-			if cfg.FetchLimit < 1 {
-				cfg.FetchLimit = 1
+			if cfg.FetchLimit < 0 {
+				cfg.FetchLimit = 0
 			}
 			cfg.ChunkSize = 0
 		}

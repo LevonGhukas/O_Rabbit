@@ -670,6 +670,9 @@ func (s *Server) validateJobRequest(ctx context.Context, req jobCreateRequest) e
 			add(ref.field, fmt.Sprintf("connection %q is a %s connection, not a %s connection", ref.id, conn.Kind, ref.kind))
 		}
 	}
+	if err := jobopts.ValidateWriteMode(req.WriteMode, req.Incremental); err != nil {
+		add("write_mode", err.Error())
+	}
 	var invalid *jobopts.ValidationError
 	if err := jobopts.Validate(req.OptionsJSON, req.SourceSQL, jobopts.Strict); errors.As(err, &invalid) {
 		problems = append(problems, invalid.Errors...)
@@ -720,7 +723,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 			SourceSQL:          req.SourceSQL,
 			TargetNamespace:    req.TargetNamespace,
 			TargetTable:        req.TargetTable,
-			WriteMode:          req.WriteMode,
+			WriteMode:          jobopts.EffectiveWriteMode(req.WriteMode, req.Incremental),
 			Incremental:        req.Incremental,
 			HWMColumn:          req.HWMColumn,
 			OptionsJSON:        req.OptionsJSON,
@@ -816,7 +819,7 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 			SourceSQL:          req.SourceSQL,
 			TargetNamespace:    req.TargetNamespace,
 			TargetTable:        req.TargetTable,
-			WriteMode:          req.WriteMode,
+			WriteMode:          jobopts.EffectiveWriteMode(req.WriteMode, req.Incremental),
 			Incremental:        req.Incremental,
 			HWMColumn:          req.HWMColumn,
 			OptionsJSON:        req.OptionsJSON,
