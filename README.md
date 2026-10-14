@@ -360,6 +360,11 @@ curl -sS -H "Authorization: Bearer $ORABBIT_HTTP_AUTH_TOKEN" http://127.0.0.1:91
   "failure_class", "retryable", "request_id"}}`.
 - `GET /runs` and `GET /connections` accept `limit` (1-1000) and `cursor`; the
   next cursor is in the `X-Next-Cursor` header. Request bodies are limited to 4 MiB.
+- Jobs are validated before they are saved (`POST /jobs`, `PUT /jobs/{id}`):
+  a name, existing source and target connections, and an `options_json`
+  object with known keys of the right type. Unknown keys are rejected with a
+  "did you mean" hint, and a `400 invalid_input` lists every problem in
+  `details.errors` as `{"field": "options_json.planned_tasks", "error": "..."}`.
 
 <details>
 <summary><b>Core routes</b> (relative to <code>/api/v1</code>)</summary>
@@ -399,6 +404,9 @@ curl -sS -H "Authorization: Bearer $ORABBIT_HTTP_AUTH_TOKEN" http://127.0.0.1:91
 Planning failures on `/runs/submit` and `/jobs/{id}/runs` return `422`
 (`run_planning_failed`: fix the request), `503` (`run_planning_failed`: a
 dependency was unreachable, retrying may help) or `500` (`internal_error`).
+A job saved with invalid `options_json` before validation existed returns
+`422` with failure class `CONFIGURATION_INVALID` and the problems in
+`details.errors`; fix the job with `PUT /jobs/{id}`.
 
 A `FAILED` run explains itself in `GET /api/v1/runs/{id}`:
 
@@ -818,6 +826,8 @@ Deprecated options still work. When a run uses one, the planner records a
 | `partition_strategy: int_range` | `ordered_cursor` |
 | Job option `chunk_size` | `planned_tasks` or `target_rows_per_task` |
 | S3 sources without `format` | Set `source.format` |
+| `options_json` keys `iceberg_enabled`, `iceberg_engine`, `iceberg_table`, `iceberg_partition_keys` (never read) | `iceberg_registration` |
+| `options_json` key `fetch_limit_rows` (never read) | Remove it |
 
 ## Troubleshooting
 

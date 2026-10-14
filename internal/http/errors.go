@@ -10,6 +10,7 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 	"github.com/LevonGhukas/O_Rabbit/internal/httperr"
+	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 	"github.com/LevonGhukas/O_Rabbit/internal/planner"
 )
 
@@ -125,10 +126,16 @@ func writeRunPlanningFailure(w http.ResponseWriter, err error) {
 		status, code = http.StatusInternalServerError, httperr.CodeInternalError
 	}
 	retryable := f.Retryable
+	details := map[string]any{"error": db.RedactCredentials(cause)}
+	var invalid *jobopts.ValidationError
+	if errors.As(err, &invalid) {
+		// Every problem in the stored options, so the job can be fixed at once.
+		details["errors"] = invalid.Errors
+	}
 	httperr.WriteAPIError(w, status, httperr.APIError{
 		Code:         code,
 		Message:      "run planning failed",
-		Details:      map[string]any{"error": db.RedactCredentials(cause)},
+		Details:      details,
 		FailureClass: string(f.Class),
 		Retryable:    &retryable,
 	})
