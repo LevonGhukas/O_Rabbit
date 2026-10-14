@@ -28,6 +28,7 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 	"github.com/LevonGhukas/O_Rabbit/internal/httperr"
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
+	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 	sshops "github.com/LevonGhukas/O_Rabbit/internal/ops/ssh"
 	"github.com/LevonGhukas/O_Rabbit/internal/planner"
 	"github.com/LevonGhukas/O_Rabbit/internal/telemetry"
@@ -639,6 +640,60 @@ type runCreateRequest struct {
 	RegistrationConfig json.RawMessage `json:"registration_config"`
 }
 
+// validateJobRequest checks a job before it is created or updated: the name,
+// both connections (they must exist and have the right kind) and every
+// options_json problem. It returns nil or a *requestValidationError listing all
+// problems, so nothing invalid is ever stored.
+func (s *Server) validateJobRequest(ctx context.Context, req jobCreateRequest) error {
+	var problems []jobopts.FieldError
+	add := func(field, message string) {
+		problems = append(problems, jobopts.FieldError{Field: field, Error: message})
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		add("name", "is required")
+	}
+	for _, ref := range []struct{ field, id, kind string }{
+		{"source_connection_id", req.SourceConnectionID, "source"},
+		{"target_connection_id", req.TargetConnectionID, "target"},
+	} {
+		if strings.TrimSpace(ref.id) == "" {
+			add(ref.field, "is required")
+			continue
+		}
+		conn, err := s.st.GetConnection(ctx, ref.id)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			add(ref.field, fmt.Sprintf("connection %q does not exist", ref.id))
+		case err != nil:
+			return err
+		case conn.Kind != ref.kind:
+			add(ref.field, fmt.Sprintf("connection %q is a %s connection, not a %s connection", ref.id, conn.Kind, ref.kind))
+		}
+	}
+	if err := jobopts.ValidateWriteMode(req.WriteMode, req.Incremental); err != nil {
+		add("write_mode", err.Error())
+	}
+	var invalid *jobopts.ValidationError
+	if err := jobopts.Validate(req.OptionsJSON, req.SourceSQL, jobopts.Strict); errors.As(err, &invalid) {
+		problems = append(problems, invalid.Errors...)
+	}
+	if len(problems) == 0 {
+		return nil
+	}
+	return &requestValidationError{message: "invalid job", details: map[string]any{"errors": problems}}
+}
+
+// writeJobValidationError writes a job validation failure: 400 with every
+// problem, or 500 when validation itself could not run.
+func writeJobValidationError(w http.ResponseWriter, err error, action string) {
+	var invalid *requestValidationError
+	if errors.As(err, &invalid) {
+		writeInvalidInput(w, invalid.message, invalid.details)
+		return
+	}
+	writeInternalError(w, "failed to "+action)
+}
+
 // handleJobs handles the /jobs endpoint, which supports listing all jobs (GET) and creating a new job (POST).
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -656,6 +711,10 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 			writeInvalidInput(w, "invalid JSON body", invalidJSONDetails(err))
 			return
 		}
+		if err := s.validateJobRequest(r.Context(), req); err != nil {
+			writeJobValidationError(w, err, "create job")
+			return
+		}
 		j := db.Job{
 			ID:                 newID(),
 			Name:               req.Name,
@@ -664,7 +723,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 			SourceSQL:          req.SourceSQL,
 			TargetNamespace:    req.TargetNamespace,
 			TargetTable:        req.TargetTable,
-			WriteMode:          req.WriteMode,
+			WriteMode:          jobopts.EffectiveWriteMode(req.WriteMode, req.Incremental),
 			Incremental:        req.Incremental,
 			HWMColumn:          req.HWMColumn,
 			OptionsJSON:        req.OptionsJSON,
@@ -748,6 +807,10 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 			writeInvalidInput(w, "invalid JSON body", invalidJSONDetails(err))
 			return
 		}
+		if err := s.validateJobRequest(r.Context(), req); err != nil {
+			writeJobValidationError(w, err, "update job")
+			return
+		}
 		upd := db.Job{
 			ID:                 jobID,
 			Name:               req.Name,
@@ -756,7 +819,7 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 			SourceSQL:          req.SourceSQL,
 			TargetNamespace:    req.TargetNamespace,
 			TargetTable:        req.TargetTable,
-			WriteMode:          req.WriteMode,
+			WriteMode:          jobopts.EffectiveWriteMode(req.WriteMode, req.Incremental),
 			Incremental:        req.Incremental,
 			HWMColumn:          req.HWMColumn,
 			OptionsJSON:        req.OptionsJSON,

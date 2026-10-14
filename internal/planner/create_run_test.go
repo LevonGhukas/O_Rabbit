@@ -10,6 +10,7 @@ import (
 
 	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
+	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 )
 
 func openPlannerStore(t *testing.T) (*db.Store, crypto.Key) {
@@ -146,4 +147,37 @@ func TestDeprecatedOptionsAreRecordedAsRunEvent(t *testing.T) {
 		}
 	}
 	t.Fatalf("no deprecation event in %d events", len(events))
+}
+
+func TestFetchSizeIsCarriedToEveryTask(t *testing.T) {
+	st, k := openPlannerStore(t)
+	job := fileJob(t, st, k, "orders", map[string]any{"format": "csv", "fetch_size": 20000})
+
+	_, tasks, err := CreateRunAndTasks(context.Background(), st, k, job, nil, nil)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	for _, task := range tasks {
+		var spec struct {
+			FetchSize int `json:"fetch_size"`
+		}
+		if err := json.Unmarshal(task.PartitionSpec, &spec); err != nil || spec.FetchSize != 20000 {
+			t.Fatalf("task %d spec=%s err=%v, want fetch_size 20000", task.TaskIndex, task.PartitionSpec, err)
+		}
+	}
+}
+
+func TestIncrementalOverwriteJobIsRejectedBeforeARunExists(t *testing.T) {
+	st, k := openPlannerStore(t)
+	job := fileJob(t, st, k, "orders", map[string]any{"format": "csv"})
+	job.Incremental, job.WriteMode = true, "overwrite"
+	ctx := context.Background()
+
+	_, _, err := CreateRunAndTasks(ctx, st, k, job, nil, nil)
+	if !failure.IsFailure(err, failure.FailureConfigurationInvalid) || !strings.Contains(err.Error(), "write_mode") {
+		t.Fatalf("err=%v, want CONFIGURATION_INVALID naming write_mode", err)
+	}
+	if runs, _ := st.ListRuns(ctx); len(runs) != 0 {
+		t.Fatalf("runs=%d, want none", len(runs))
+	}
 }

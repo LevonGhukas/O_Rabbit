@@ -59,6 +59,7 @@ type cassandraDSN struct {
 	consistency    gocql.Consistency
 	timeout        time.Duration
 	connectTimeout time.Duration
+	pageSize       int // rows per page; 0 keeps the driver default (5000)
 }
 
 // parseCassandraDSN parses a cassandra:// DSN into its components.
@@ -147,6 +148,13 @@ func parseCassandraDSN(dsn string) (cassandraDSN, error) {
 		}
 		out.timeout = d
 	}
+	if p := q.Get("page_size"); p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil || n <= 0 {
+			return cassandraDSN{}, fmt.Errorf("cassandra DSN page_size must be a positive integer, got %q", p)
+		}
+		out.pageSize = n
+	}
 	if t := q.Get("connect_timeout"); t != "" {
 		d, err := time.ParseDuration(t)
 		if err != nil {
@@ -195,6 +203,9 @@ func OpenCassandra(ctx context.Context, dsn string) (*Cassandra, error) {
 	cluster.Consistency = parsed.consistency
 	cluster.Timeout = parsed.timeout
 	cluster.ConnectTimeout = parsed.connectTimeout
+	if parsed.pageSize > 0 {
+		cluster.PageSize = parsed.pageSize
+	}
 
 	if parsed.username != "" {
 		cluster.Authenticator = gocql.PasswordAuthenticator{

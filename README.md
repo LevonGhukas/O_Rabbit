@@ -219,8 +219,10 @@ rejected); see the [quick start](#quick-start) for an example.
 - Target metadata must include `endpoint` and `bucket`. For AWS use the
   regional endpoint, for example `https://s3.eu-west-1.amazonaws.com`.
   `region` defaults to `us-east-1` and `force_path_style` to `true`.
-- With `auto_tune: false`, set `max_in_flight_tasks`, `fetch_limit` and
-  `planned_tasks` or `chunk_size`.
+- With `auto_tune: false`, set `max_in_flight_tasks` and `planned_tasks` or
+  `chunk_size`.
+- `fetch_limit` (optional) is stored as the job option `fetch_size`; see
+  [Write mode and fetch size](#write-mode-and-fetch-size).
 - FlightSQL needs `source.sql`, `incremental: false`, `auto_tune: false` and no
   `id_column` or manual planning fields.
 
@@ -243,6 +245,37 @@ orabbit-client stack stop
 
 The client finds `orabbit-master` and `orabbit-worker` next to its own binary,
 or use `--master-bin` and `--worker-bin`.
+
+### Write mode and fetch size
+
+**`write_mode`** says what a run does to the table already published for its
+dataset:
+
+| Job | `write_mode` | Each run |
+|---|---|---|
+| Full (`incremental: false`) | `overwrite` (default) | replaces the table with the new export |
+| Incremental (`incremental: true`) | `append` (default) | adds the rows after the high-water mark |
+
+An empty `write_mode` gets the default for the job's `incremental` flag. Two
+combinations are rejected when a job is saved (400) and when a stored job is
+run (422, `CONFIGURATION_INVALID`):
+
+- `incremental: true` + `overwrite`: each run reads only new rows, so it would
+  replace the table with just those rows (a run with no new rows would empty it).
+- `incremental: false` + `append`: appending full exports is not supported yet.
+
+**`fetch_size`** (job option, `options_json.fetch_size`) is how many rows the
+source driver fetches per network round-trip. Larger values mean fewer
+round-trips on large exports and a little more memory per worker; `0` keeps
+the engine default. The job value wins over the same setting in the DSN.
+
+| Engine | Applied as | Default |
+|---|---|---|
+| Oracle | DSN `PREFETCH_ROWS` | 5,000 (O_Rabbit sets it when the DSN does not; go-ora's own default is 25) |
+| Cassandra | page size (DSN `page_size`) | 5,000 |
+| ClickHouse | setting `max_block_size` | server default |
+| MongoDB | cursor batch size | 10,000 |
+| PostgreSQL, MySQL, MariaDB, SQL Server, Trino | not used: these drivers stream rows | — |
 
 ### Incremental exports and late-arriving rows
 
@@ -360,6 +393,11 @@ curl -sS -H "Authorization: Bearer $ORABBIT_HTTP_AUTH_TOKEN" http://127.0.0.1:91
   "failure_class", "retryable", "request_id"}}`.
 - `GET /runs` and `GET /connections` accept `limit` (1-1000) and `cursor`; the
   next cursor is in the `X-Next-Cursor` header. Request bodies are limited to 4 MiB.
+- Jobs are validated before they are saved (`POST /jobs`, `PUT /jobs/{id}`):
+  a name, existing source and target connections, and an `options_json`
+  object with known keys of the right type. Unknown keys are rejected with a
+  "did you mean" hint, and a `400 invalid_input` lists every problem in
+  `details.errors` as `{"field": "options_json.planned_tasks", "error": "..."}`.
 
 <details>
 <summary><b>Core routes</b> (relative to <code>/api/v1</code>)</summary>
@@ -399,6 +437,9 @@ curl -sS -H "Authorization: Bearer $ORABBIT_HTTP_AUTH_TOKEN" http://127.0.0.1:91
 Planning failures on `/runs/submit` and `/jobs/{id}/runs` return `422`
 (`run_planning_failed`: fix the request), `503` (`run_planning_failed`: a
 dependency was unreachable, retrying may help) or `500` (`internal_error`).
+A job saved with invalid `options_json` before validation existed returns
+`422` with failure class `CONFIGURATION_INVALID` and the problems in
+`details.errors`; fix the job with `PUT /jobs/{id}`.
 
 A `FAILED` run explains itself in `GET /api/v1/runs/{id}`:
 
@@ -818,6 +859,8 @@ Deprecated options still work. When a run uses one, the planner records a
 | `partition_strategy: int_range` | `ordered_cursor` |
 | Job option `chunk_size` | `planned_tasks` or `target_rows_per_task` |
 | S3 sources without `format` | Set `source.format` |
+| `options_json` keys `iceberg_enabled`, `iceberg_engine`, `iceberg_table`, `iceberg_partition_keys` (never read) | `iceberg_registration` |
+| `options_json` key `fetch_limit_rows` (never read) | `fetch_size` |
 
 ## Troubleshooting
 

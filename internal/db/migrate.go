@@ -44,6 +44,7 @@ var migrations = []migration{
 	{version: 28, apply: normalizeStoredTimestamps},
 	{version: 29, sql: schemaV29},
 	{version: 30, sql: schemaV30},
+	{version: 31, sql: schemaV31},
 }
 
 // normalizeStoredTimestamps rewrites every stored timestamp in
@@ -144,6 +145,25 @@ ALTER TABLE iceberg_registrations ADD COLUMN manual_retry_budget INTEGER NOT NUL
 // schemaV30 indexes job names, which one-shot submits look jobs up by
 // (connection names already have the unique idx_connections_name). It is not
 // unique: existing databases may hold duplicate job names; the newest wins.
+// schemaV31 makes every job's write_mode explicit and valid, keeping what its
+// runs actually did before write_mode was validated:
+//   - full jobs always replaced the table, whatever write_mode said, so they
+//     become "overwrite" (including "append", which was not honoured);
+//   - incremental jobs appended unless write_mode was "overwrite", so other
+//     values (empty, typos, "replace") become "append".
+//
+// Incremental jobs with "overwrite" are left as they are (only the spelling is
+// normalized): they replaced the table with each run's new rows, so their
+// owner must choose. Run start rejects them with CONFIGURATION_INVALID.
+const schemaV31 = `
+UPDATE jobs SET write_mode = 'overwrite'
+ WHERE incremental = 0 AND write_mode <> 'overwrite';
+UPDATE jobs SET write_mode = 'append'
+ WHERE incremental <> 0 AND lower(trim(write_mode)) <> 'overwrite' AND write_mode <> 'append';
+UPDATE jobs SET write_mode = 'overwrite'
+ WHERE incremental <> 0 AND lower(trim(write_mode)) = 'overwrite' AND write_mode <> 'overwrite';
+`
+
 const schemaV30 = `
 CREATE INDEX IF NOT EXISTS idx_jobs_name_created ON jobs(name, created_at);
 `

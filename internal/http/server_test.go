@@ -433,7 +433,7 @@ func TestConnectionDeleteConflictReturnsStructuredError(t *testing.T) {
 		SourceSQL:          "SELECT 1",
 		TargetNamespace:    "ns",
 		TargetTable:        "tbl",
-		WriteMode:          "append",
+		WriteMode:          "overwrite",
 		OptionsJSON:        []byte(`{}`),
 	}
 	if err := st.CreateJob(context.Background(), job); err != nil {
@@ -590,7 +590,7 @@ func TestJobRunsDatasetBusyReturnsStructuredConflict(t *testing.T) {
 		SourceConnectionID: "src-1",
 		TargetConnectionID: "tgt-1",
 		TargetTable:        "big_table",
-		WriteMode:          "append",
+		WriteMode:          "overwrite",
 		OptionsJSON:        []byte(`{}`),
 	}
 	if err := st.CreateJob(context.Background(), job); err != nil {
@@ -666,7 +666,7 @@ func TestStartingJobAgainDoesNotSupersedeItsActiveRun(t *testing.T) {
 		SourceConnectionID: "src-1",
 		TargetConnectionID: "tgt-1",
 		TargetTable:        "big_table",
-		WriteMode:          "append",
+		WriteMode:          "overwrite",
 		OptionsJSON:        []byte(`{}`),
 	}
 	if err := st.CreateJob(context.Background(), job); err != nil {
@@ -762,7 +762,7 @@ func TestJobRunsPersistRegistrationConfigSnapshot(t *testing.T) {
 		SourceConnectionID: "src-reg",
 		TargetConnectionID: "tgt-reg",
 		TargetTable:        "Orders",
-		WriteMode:          "append",
+		WriteMode:          "overwrite",
 		OptionsJSON:        []byte(`{"partition_strategy":"single","table":"SalesDB.dbo.Orders"}`),
 	}
 	if err := st.CreateJob(context.Background(), job); err != nil {
@@ -842,7 +842,7 @@ func TestJobRunsPersistIceRegistrationConfigSnapshotWithRawConfig(t *testing.T) 
 		SourceConnectionID: "src-ice",
 		TargetConnectionID: "tgt-ice",
 		TargetTable:        "Orders",
-		WriteMode:          "append",
+		WriteMode:          "overwrite",
 		OptionsJSON:        []byte(`{"partition_strategy":"single","table":"SalesDB.dbo.Orders"}`),
 	}
 	if err := st.CreateJob(context.Background(), job); err != nil {
@@ -899,14 +899,19 @@ func TestJobRunsPersistIceRegistrationConfigSnapshotWithRawConfig(t *testing.T) 
 
 func TestJobRunsGenericPlannerFailureReturnsStructuredInternalError(t *testing.T) {
 	st := openTestStore(t)
+	// An unrecognized failure: the target metadata is stored in a shape the
+	// planner cannot read. (Invalid options_json is a recognized
+	// configuration problem and returns 422; see the options_json tests.)
+	createTestConnection(t, st, db.Connection{ID: "src-bad", Name: "src-bad", Kind: "source", Engine: "postgres", MetadataJSON: []byte(`{}`), SecretEncBlob: []byte(`{}`)})
+	createTestConnection(t, st, db.Connection{ID: "tgt-bad", Name: "tgt-bad", Kind: "target", Engine: "s3", MetadataJSON: []byte(`[]`), SecretEncBlob: []byte(`{}`)})
 	job := db.Job{
 		ID:                 "job-bad",
 		Name:               "job-bad",
-		SourceConnectionID: "missing-src",
-		TargetConnectionID: "missing-tgt",
+		SourceConnectionID: "src-bad",
+		TargetConnectionID: "tgt-bad",
 		TargetTable:        "big_table",
-		WriteMode:          "append",
-		OptionsJSON:        []byte(`{`),
+		WriteMode:          "overwrite",
+		OptionsJSON:        []byte(`{"partition_strategy":"single"}`),
 	}
 	if err := st.CreateJob(context.Background(), job); err != nil {
 		t.Fatalf("create job: %v", err)

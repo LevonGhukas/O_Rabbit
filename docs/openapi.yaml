@@ -136,11 +136,31 @@ paths:
     post: { summary: Cancel Iceberg registration, responses: { "200": { description: Canceled } } }
   /jobs:
     get: { summary: List jobs, responses: { "200": { description: Jobs } } }
-    post: { summary: Create a job, responses: { "201": { description: Job } } }
+    post:
+      summary: Create a job
+      description: &jobValidation >-
+        The job is validated before it is stored: `name` is required,
+        `source_connection_id` and `target_connection_id` must name existing
+        source and target connections, and `options_json` must be an object
+        (or null) with known keys of the right type and valid values.
+        `write_mode` must be `overwrite` (full jobs, the default) or `append`
+        (incremental jobs, the default); `incremental` + `overwrite` and full
+        + `append` are rejected.
+        Unknown keys are rejected with a "did you mean" hint. Invalid jobs get
+        400 `invalid_input` listing every problem in `details.errors`
+        (`[{field, error}]`), and nothing is stored.
+      responses:
+        "201": { description: Job }
+        "400": { $ref: "#/components/responses/Error" }
   /jobs/{job_id}:
     parameters: [{ $ref: "#/components/parameters/JobID" }]
     get: { summary: A job, responses: { "200": { description: Job } } }
-    put: { summary: Update a job, responses: { "200": { description: Job } } }
+    put:
+      summary: Update a job
+      description: *jobValidation
+      responses:
+        "200": { description: Job }
+        "400": { $ref: "#/components/responses/Error" }
     delete: { summary: Delete a job, responses: { "204": { description: Deleted } } }
   /jobs/{job_id}/runs:
     parameters: [{ $ref: "#/components/parameters/JobID" }]
@@ -155,6 +175,14 @@ paths:
                 registration_config: { type: object }
       responses:
         "201": { description: "{run, tasks}" }
+        "422":
+          description: >-
+            Planning failed for a reason the caller must fix. A job stored with
+            invalid options_json or an unsafe write_mode returns failure_class
+            CONFIGURATION_INVALID and lists every problem in `details.errors`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
   /connections:
     get: { summary: List connections (secrets redacted), responses: { "200": { description: Connections } } }
     post: { summary: Create a connection, responses: { "201": { description: Connection } } }

@@ -64,6 +64,11 @@ type Options struct {
 	// Legacy manual chunk hint for older int-range jobs. New planning prefers PlannedTasks.
 	ChunkSize int64 `json:"chunk_size,omitempty"`
 
+	// FetchSize is how many rows the source driver fetches per network
+	// round-trip (Oracle, Cassandra, ClickHouse, MongoDB; other drivers stream
+	// and ignore it). 0 keeps the engine default.
+	FetchSize int `json:"fetch_size,omitempty"`
+
 	// Downstream configurations
 	TargetFileBytes int64    `json:"target_file_bytes"`
 	PartitionKeys   []string `json:"partition_keys,omitempty"`
@@ -225,6 +230,11 @@ func (o Options) MergeInto(existing map[string]any) map[string]any {
 	m["id_column"] = o.EffectiveCursorColumn()
 	m["chunk_size"] = o.ChunkSize
 	m["target_file_bytes"] = o.TargetFileBytes
+	if o.FetchSize > 0 {
+		m["fetch_size"] = o.FetchSize
+	} else {
+		delete(m, "fetch_size")
+	}
 	if len(o.PartitionKeys) > 0 {
 		m["partition_keys"] = o.PartitionKeys
 	} else {
