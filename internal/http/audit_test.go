@@ -160,7 +160,7 @@ func TestJobCreateUpdateDeleteWriteAuditRecords(t *testing.T) {
 		"source_sql":"SELECT 1",
 		"target_namespace":"ns",
 		"target_table":"tbl",
-		"write_mode":"append",
+		"write_mode":"overwrite",
 		"incremental":false,
 		"options_json":{"partition_strategy":"single"}
 	}`
@@ -180,7 +180,7 @@ func TestJobCreateUpdateDeleteWriteAuditRecords(t *testing.T) {
 		"source_sql":"SELECT 2",
 		"target_namespace":"ns2",
 		"target_table":"tbl2",
-		"write_mode":"replace",
+		"write_mode":"append",
 		"incremental":true,
 		"hwm_column":"updated_at",
 		"options_json":{"partition_strategy":"single"}
@@ -268,7 +268,7 @@ func TestRunStartWritesCompactAuditRecord(t *testing.T) {
 		SourceConnectionID: "src-run",
 		TargetConnectionID: "tgt-run",
 		TargetTable:        "tbl_run",
-		WriteMode:          "append",
+		WriteMode:          "overwrite",
 		OptionsJSON:        []byte(`{"partition_strategy":"single"}`),
 	}); err != nil {
 		t.Fatalf("create job: %v", err)

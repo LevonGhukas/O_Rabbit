@@ -13,6 +13,7 @@ import (
 
 	"github.com/LevonGhukas/O_Rabbit/internal/connectors"
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
+	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 
 	"gopkg.in/yaml.v3"
 )
@@ -203,14 +204,14 @@ func (s *runSubmitFile) validate() error {
 	if s.Job.TargetTable == "" {
 		return invalidRunSubmitf("job.target_table is required")
 	}
-	if s.Job.WriteMode == "" {
-		return invalidRunSubmitf("job.write_mode is required")
-	}
 	if s.Job.Table == "" {
 		return invalidRunSubmitf("job.table is required")
 	}
 	if s.Job.Incremental == nil {
 		return invalidRunSubmitf("job.incremental is required")
+	}
+	if err := jobopts.ValidateWriteMode(s.Job.WriteMode, *s.Job.Incremental); err != nil {
+		return invalidRunSubmitf("job.write_mode %v", err)
 	}
 	if s.Job.AutoTune == nil {
 		return invalidRunSubmitf("job.auto_tune is required")
@@ -227,8 +228,8 @@ func (s *runSubmitFile) validate() error {
 	if s.Job.ChunkSize < 0 {
 		return invalidRunSubmitf("job.chunk_size must be >= 0")
 	}
-	if s.Job.FetchLimit < 0 {
-		return invalidRunSubmitf("job.fetch_limit must be >= 0")
+	if s.Job.FetchLimit < 0 || s.Job.FetchLimit > connectors.MaxFetchSize {
+		return invalidRunSubmitf("job.fetch_limit must be between 0 and %d", connectors.MaxFetchSize)
 	}
 	if s.Iceberg.Enabled && s.Iceberg.Engine != "" && s.Iceberg.Engine != "rest-go" && s.Iceberg.Engine != "ice" {
 		return invalidRunSubmitf("iceberg.engine must be rest-go or ice")
@@ -259,15 +260,12 @@ func (s *runSubmitFile) validate() error {
 			return invalidRunSubmitf("job.id_column is required for %s submissions", s.Source.Engine)
 		}
 		if *s.Job.AutoTune {
-			if s.Job.PlannedTasks > 0 || s.Job.ChunkSize > 0 || s.Job.FetchLimit > 0 {
-				return invalidRunSubmitf("manual planning fields planned_tasks, chunk_size, and fetch_limit must be omitted when job.auto_tune=true")
+			if s.Job.PlannedTasks > 0 || s.Job.ChunkSize > 0 {
+				return invalidRunSubmitf("manual planning fields planned_tasks and chunk_size must be omitted when job.auto_tune=true")
 			}
 		} else {
 			if s.Job.MaxInFlightTasks < 1 {
 				return invalidRunSubmitf("job.max_in_flight_tasks must be >= 1 when job.auto_tune=false")
-			}
-			if s.Job.FetchLimit < 1 {
-				return invalidRunSubmitf("job.fetch_limit must be >= 1 when job.auto_tune=false")
 			}
 			if s.Job.PlannedTasks < 1 && s.Job.ChunkSize < 1 {
 				return invalidRunSubmitf("job.planned_tasks or job.chunk_size must be set when job.auto_tune=false")
@@ -365,8 +363,10 @@ func validateRunConfigForSubmission(cfg ranConfig) error {
 	if strings.TrimSpace(cfg.TargetNamespace) == "" || strings.TrimSpace(cfg.TargetTable) == "" {
 		return invalidRunSubmitf("job.target_namespace and job.target_table are required")
 	}
-	if strings.TrimSpace(cfg.WriteMode) == "" {
-		return invalidRunSubmitf("job.write_mode is required")
+	// Empty write_mode defaults from incremental (overwrite for full runs,
+	// append for incremental ones), like one-shot submits.
+	if err := jobopts.ValidateWriteMode(cfg.WriteMode, cfg.Incremental); err != nil {
+		return invalidRunSubmitf("job.write_mode %v", err)
 	}
 	if strings.TrimSpace(cfg.Table) == "" {
 		return invalidRunSubmitf("job.table is required")
@@ -400,15 +400,12 @@ func validateRunConfigForSubmission(cfg ranConfig) error {
 			return invalidRunSubmitf("planning values must be >= 0")
 		}
 		if cfg.AutoTune {
-			if cfg.PlannedTasks > 0 || cfg.ChunkSize > 0 || cfg.FetchLimit > 0 {
-				return invalidRunSubmitf("manual planning fields planned_tasks, chunk_size, and fetch_limit must be omitted when job.auto_tune=true")
+			if cfg.PlannedTasks > 0 || cfg.ChunkSize > 0 {
+				return invalidRunSubmitf("manual planning fields planned_tasks and chunk_size must be omitted when job.auto_tune=true")
 			}
 		} else {
 			if cfg.MaxInFlightTasks < 1 {
 				return invalidRunSubmitf("job.max_in_flight_tasks must be >= 1 when job.auto_tune=false")
-			}
-			if cfg.FetchLimit < 1 {
-				return invalidRunSubmitf("job.fetch_limit must be >= 1 when job.auto_tune=false")
 			}
 			if cfg.PlannedTasks < 1 && cfg.ChunkSize < 1 {
 				return invalidRunSubmitf("job.planned_tasks or job.chunk_size must be set when job.auto_tune=false")
@@ -450,8 +447,10 @@ func buildJobPayloadFromConfig(cfg ranConfig, sourceConnectionID, targetConnecti
 		optionsJSON["id_column"] = cfg.IDColumn
 		optionsJSON["planned_tasks"] = cfg.PlannedTasks
 		optionsJSON["chunk_size"] = cfg.ChunkSize
-		// fetch_limit is validated but not stored: no planner or worker reads
-		// it from options_json, and the master rejects unknown options.
+		if cfg.FetchLimit > 0 {
+			// Stored as fetch_size: rows the source driver fetches per round-trip.
+			optionsJSON["fetch_size"] = cfg.FetchLimit
+		}
 	default:
 		return jobPayload{}, invalidRunSubmitf("source.engine %q is known but not yet supported by run submit in this build", engine)
 	}
@@ -469,7 +468,7 @@ func buildJobPayloadFromConfig(cfg ranConfig, sourceConnectionID, targetConnecti
 		SourceSQL:          sourceSQL,
 		TargetNamespace:    cfg.TargetNamespace,
 		TargetTable:        cfg.TargetTable,
-		WriteMode:          cfg.WriteMode,
+		WriteMode:          jobopts.EffectiveWriteMode(cfg.WriteMode, incremental),
 		Incremental:        incremental,
 		HWMColumn:          hwmColumn,
 		OptionsJSON:        optionsJSON,

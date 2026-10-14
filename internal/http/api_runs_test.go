@@ -1688,7 +1688,7 @@ func seedExistingJobRunFixture(t *testing.T, st *db.Store, jobID string, increme
 		TargetConnectionID: "tgt-" + jobID,
 		TargetNamespace:    "orders",
 		TargetTable:        "Orders",
-		WriteMode:          "append",
+		WriteMode:          "overwrite",
 		Incremental:        incremental,
 		HWMColumn:          &hwmColumn,
 		OptionsJSON:        optionsJSON,

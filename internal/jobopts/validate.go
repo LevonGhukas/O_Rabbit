@@ -20,8 +20,8 @@ type FieldError struct {
 	Error string `json:"error"`
 }
 
-// ValidationError lists every problem found in options_json, so a caller can
-// fix them all at once.
+// ValidationError lists every problem found in a job's configuration
+// (options_json and related job fields), so a caller can fix them all at once.
 type ValidationError struct {
 	Errors []FieldError
 }
@@ -31,7 +31,7 @@ func (e *ValidationError) Error() string {
 	for i, fe := range e.Errors {
 		parts[i] = fe.Field + ": " + fe.Error
 	}
-	return "invalid options_json: " + strings.Join(parts, "; ")
+	return "invalid job configuration: " + strings.Join(parts, "; ")
 }
 
 // ValidateMode selects how strictly options_json is checked.
@@ -179,6 +179,9 @@ func Validate(raw json.RawMessage, sourceSQL string, mode ValidateMode) error {
 	if lookback := strings.TrimSpace(o.CursorLookback); lookback != "" && !validLookback(lookback) {
 		add(".cursor_lookback", `must be a positive integer for integer cursors or a positive duration such as "30m" or "48h", got %q`, lookback)
 	}
+	if o.FetchSize > connectors.MaxFetchSize {
+		add(".fetch_size", "must be at most %d rows, got %d", connectors.MaxFetchSize, o.FetchSize)
+	}
 	if format := strings.TrimSpace(o.FileFormat); format != "" {
 		if err := connectors.ValidateS3Format(format); err != nil {
 			add(".format", "%v", err)
@@ -212,6 +215,7 @@ func strictOnlyChecks(o Options, add func(field, format string, args ...any)) {
 		"planned_tasks":        int64(o.PlannedTasks),
 		"chunk_size":           o.ChunkSize,
 		"target_file_bytes":    o.TargetFileBytes,
+		"fetch_size":           int64(o.FetchSize),
 	} {
 		if value < 0 {
 			add("."+field, "must be 0 or greater, got %d", value)

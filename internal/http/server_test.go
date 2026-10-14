@@ -433,7 +433,7 @@ func TestConnectionDeleteConflictReturnsStructuredError(t *testing.T) {
 		SourceSQL:          "SELECT 1",
 		TargetNamespace:    "ns",
 		TargetTable:        "tbl",
-		WriteMode:          "append",
+		WriteMode:          "overwrite",
 		OptionsJSON:        []byte(`{}`),
 	}
 	if err := st.CreateJob(context.Background(), job); err != nil {
@@ -590,7 +590,7 @@ func TestJobRunsDatasetBusyReturnsStructuredConflict(t *testing.T) {
 		SourceConnectionID: "src-1",
 		TargetConnectionID: "tgt-1",
 		TargetTable:        "big_table",
-		WriteMode:          "append",
+		WriteMode:          "overwrite",
 		OptionsJSON:        []byte(`{}`),
 	}
 	if err := st.CreateJob(context.Background(), job); err != nil {
@@ -666,7 +666,7 @@ func TestStartingJobAgainDoesNotSupersedeItsActiveRun(t *testing.T) {
 		SourceConnectionID: "src-1",
 		TargetConnectionID: "tgt-1",
 		TargetTable:        "big_table",
-		WriteMode:          "append",
+		WriteMode:          "overwrite",
 		OptionsJSON:        []byte(`{}`),
 	}
 	if err := st.CreateJob(context.Background(), job); err != nil {
@@ -762,7 +762,7 @@ func TestJobRunsPersistRegistrationConfigSnapshot(t *testing.T) {
 		SourceConnectionID: "src-reg",
 		TargetConnectionID: "tgt-reg",
 		TargetTable:        "Orders",
-		WriteMode:          "append",
+		WriteMode:          "overwrite",
 		OptionsJSON:        []byte(`{"partition_strategy":"single","table":"SalesDB.dbo.Orders"}`),
 	}
 	if err := st.CreateJob(context.Background(), job); err != nil {
@@ -842,7 +842,7 @@ func TestJobRunsPersistIceRegistrationConfigSnapshotWithRawConfig(t *testing.T) 
 		SourceConnectionID: "src-ice",
 		TargetConnectionID: "tgt-ice",
 		TargetTable:        "Orders",
-		WriteMode:          "append",
+		WriteMode:          "overwrite",
 		OptionsJSON:        []byte(`{"partition_strategy":"single","table":"SalesDB.dbo.Orders"}`),
 	}
 	if err := st.CreateJob(context.Background(), job); err != nil {
@@ -910,7 +910,7 @@ func TestJobRunsGenericPlannerFailureReturnsStructuredInternalError(t *testing.T
 		SourceConnectionID: "src-bad",
 		TargetConnectionID: "tgt-bad",
 		TargetTable:        "big_table",
-		WriteMode:          "append",
+		WriteMode:          "overwrite",
 		OptionsJSON:        []byte(`{"partition_strategy":"single"}`),
 	}
 	if err := st.CreateJob(context.Background(), job); err != nil {
