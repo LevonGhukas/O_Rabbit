@@ -12,6 +12,7 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 	"github.com/LevonGhukas/O_Rabbit/internal/httperr"
+	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 )
 
 func jobValidationServer(t *testing.T) (*Server, *db.Store) {
@@ -237,5 +238,53 @@ func TestRunStartRejectsIncrementalOverwriteJob(t *testing.T) {
 	}
 	if runs, _ := st.ListRuns(context.Background()); len(runs) != 0 {
 		t.Fatalf("%d run(s) created, want none", len(runs))
+	}
+}
+
+// Data Sync in O_Project switches one sync between full and incremental mode
+// through /runs/submit, which reuses the same job. write_mode must follow the
+// mode every time, or a switch to incremental would leave the unsafe
+// incremental+overwrite combination and the next run would be rejected.
+func TestOneShotSubmitKeepsWriteModeConsistentWhenModeSwitches(t *testing.T) {
+	srv := newSubmitTestServer(openTestStore(t))
+	submit := func(incremental bool) db.Job {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/runs/submit", strings.NewReader(fmt.Sprintf(`{
+			"source": {"engine": "postgres", "dsn": "postgres://u:p@db/app", "table": "public.orders", "cursor_column": "id", "incremental": %t},
+			"target": {"s3_endpoint": "http://minio:9000", "s3_bucket": "b", "s3_access_key_id": "k", "s3_secret_access_key": "s"},
+			"iceberg": {"enabled": false}
+		}`, incremental))))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("incremental=%t: status=%d body=%s", incremental, rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			JobID string `json:"job_id"`
+		}
+		decodeJSONBody(t, rec, &resp)
+		job, err := srv.st.GetJob(context.Background(), resp.JobID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return job
+	}
+
+	var jobID string
+	for _, step := range []struct {
+		incremental bool
+		want        string
+	}{{false, "overwrite"}, {true, "append"}, {false, "overwrite"}} {
+		job := submit(step.incremental)
+		if jobID == "" {
+			jobID = job.ID
+		} else if job.ID != jobID {
+			t.Fatalf("job %s, want the same job %s reused", job.ID, jobID)
+		}
+		if job.Incremental != step.incremental || job.WriteMode != step.want {
+			t.Fatalf("incremental=%t: stored incremental=%t write_mode=%q, want %q", step.incremental, job.Incremental, job.WriteMode, step.want)
+		}
+		if err := jobopts.ValidateWriteMode(job.WriteMode, job.Incremental); err != nil {
+			t.Fatalf("incremental=%t: run start would reject the job: %v", step.incremental, err)
+		}
 	}
 }
