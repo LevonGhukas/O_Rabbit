@@ -61,7 +61,7 @@ func TestRecoveryEndpointAcknowledgesQuarantineIdempotentlyAndAudits(t *testing.
 	st := openTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	if err := st.CreateJob(ctx, db.Job{ID: "http-recover-job", Name: "http-recover-job", SourceConnectionID: "source", TargetConnectionID: "target", SourceSQL: "select 1", TargetNamespace: "ns", TargetTable: "table", WriteMode: "append", OptionsJSON: []byte(`{}`)}); err != nil {
+	if err := st.CreateJob(ctx, db.Job{ID: "http-recover-job", Name: "http-recover-job", SourceConnectionID: "source", TargetConnectionID: "target", SourceSQL: "select 1", TargetNamespace: "ns", TargetTable: "table", WriteMode: "overwrite", OptionsJSON: []byte(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.CreateRun(ctx, db.Run{ID: "http-recover", JobID: "http-recover-job", DatasetKey: "http-recover-dataset", Status: "RUNNING", CorrelationID: "corr", StartedAt: now.Format(time.RFC3339Nano)}); err != nil {

@@ -32,6 +32,7 @@ func TestValidateAcceptsValidOptions(t *testing.T) {
 		`{"worker_pool":"etl-a","where_clause":"status = 'open'","cursor_lookback":"48h"}`,
 		`{"cursor_lookback":"1000","column_types":{"amount":"decimal(12,2)","note":"nullable<source>"}}`,
 		`{"format":"xlsx","record_path":"/items","select_columns":["a","b"],"partition_keys":["a"]}`,
+		`{"fetch_size":20000}`,
 		// Keys O_Rabbit itself writes: the registration config and leftovers
 		// from older versions, so stored jobs can be fetched and saved back.
 		`{"iceberg_registration":{"enabled":true,"engine":"rest-go","table":"ns.t"},"iceberg_enabled":true,"iceberg_engine":"rest-go","iceberg_table":"ns.t","iceberg_partition_keys":[],"fetch_limit_rows":5000}`,
@@ -72,6 +73,8 @@ func TestValidateRejectsInvalidOptions(t *testing.T) {
 		{"format", `{"format":"pdf"}`, "options_json.format", "unsupported"},
 		{"consistency", `{"consistency_mode":"sometimes"}`, "options_json.consistency_mode", "EVENTUAL"},
 		{"negative", `{"max_in_flight_tasks":-1}`, "options_json.max_in_flight_tasks", "0 or greater"},
+		{"fetch size too large", `{"fetch_size":2000000}`, "options_json.fetch_size", "at most 1000000"},
+		{"negative fetch size", `{"fetch_size":-1}`, "options_json.fetch_size", "0 or greater"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

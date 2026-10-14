@@ -100,7 +100,7 @@ func TestPromptRunConfigNormalModeHidesAdvancedPrompts(t *testing.T) {
 		"Use automatic performance tuning?",
 		"max_in_flight_tasks",
 		"planned_tasks",
-		"fetch_limit_rows",
+		"fetch_size",
 		"Iceberg engine",
 		"config file",
 	} {
@@ -214,6 +214,9 @@ func TestPromptRunConfigNormalModeBuildsExpectedAutoTunePayloadDefaults(t *testi
 	if _, ok := payload.OptionsJSON["fetch_limit_rows"]; ok {
 		t.Fatal("fetch_limit_rows must not be written: nothing reads it")
 	}
+	if payload.WriteMode != "overwrite" {
+		t.Fatalf("WriteMode=%q, want overwrite (the default for full runs)", payload.WriteMode)
+	}
 	if payload.HWMColumn != cfg.IDColumn {
 		t.Fatalf("HWMColumn=%q want=%q", payload.HWMColumn, cfg.IDColumn)
 	}
@@ -249,7 +252,7 @@ func defaultInteractiveTestConfig() ranConfig {
 		JobName:         "export",
 		TargetNamespace: "orders",
 		TargetTable:     "Orders",
-		WriteMode:       "append",
+		WriteMode:       "", // defaults from Incremental
 		Incremental:     false,
 		Table:           "SalesDB.dbo.BigTable4",
 		IDColumn:        "RowId",

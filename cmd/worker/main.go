@@ -53,6 +53,9 @@ type partitionSpec struct {
 	IDColumn       string            `json:"id_column"` // legacy alias
 	From           int64             `json:"from"`      // legacy alias
 	To             int64             `json:"to"`        // legacy alias
+
+	// FetchSize is rows per source round-trip; 0 keeps the engine default.
+	FetchSize int `json:"fetch_size,omitempty"`
 }
 
 func main() {
