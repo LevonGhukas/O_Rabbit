@@ -59,7 +59,7 @@ func oracleInt64CursorTypeClass() oracleCursorTypeClass {
 }
 
 func OpenOracle(ctx context.Context, dsn string) (*Oracle, error) {
-	db, err := sql.Open("oracle", dsn)
+	db, err := sql.Open("oracle", oracleDSNWithDefaultPrefetch(dsn))
 	if err != nil {
 		return nil, err
 	}
