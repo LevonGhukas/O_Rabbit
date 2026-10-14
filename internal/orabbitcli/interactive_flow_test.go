@@ -211,8 +211,8 @@ func TestPromptRunConfigNormalModeBuildsExpectedAutoTunePayloadDefaults(t *testi
 	if got := int(payload.OptionsJSON["planned_tasks"].(int)); got != 0 {
 		t.Fatalf("planned_tasks=%d want=0", got)
 	}
-	if got := int(payload.OptionsJSON["fetch_limit_rows"].(int)); got != 0 {
-		t.Fatalf("fetch_limit_rows=%d want=0", got)
+	if _, ok := payload.OptionsJSON["fetch_limit_rows"]; ok {
+		t.Fatal("fetch_limit_rows must not be written: nothing reads it")
 	}
 	if payload.HWMColumn != cfg.IDColumn {
 		t.Fatalf("HWMColumn=%q want=%q", payload.HWMColumn, cfg.IDColumn)
