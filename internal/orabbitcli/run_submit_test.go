@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
+	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 )
 
 func TestCmdRunSubmitFromFile(t *testing.T) {
@@ -255,6 +256,35 @@ func TestBuildJobPayloadFromConfigIncludesIcebergRegistrationOptions(t *testing.
 	}
 	if raw["table"] != "mssql.SalesDB__dbo__Orders" {
 		t.Fatalf("table=%v want mssql.SalesDB__dbo__Orders", raw["table"])
+	}
+}
+
+// The CLI creates jobs through POST /jobs, which rejects invalid or unknown
+// options_json keys; its payload must always pass that validation.
+func TestBuildJobPayloadFromConfigPassesStrictOptionsValidation(t *testing.T) {
+	base := ranConfig{
+		SourceEngine: "postgres", HTTPBase: "http://127.0.0.1:9100", SourceName: "src",
+		SourceDSN: "postgres://u:p@db:5432/app", TargetName: "tgt", S3Endpoint: "http://minio:9000",
+		S3Region: "us-east-1", S3Bucket: "bucket1", S3AccessKeyID: "a", S3SecretAccessKey: "b",
+		JobName: "people", TargetNamespace: "demo", TargetTable: "people", WriteMode: "append",
+		Table: "public.people", IDColumn: "id",
+	}
+	auto := base
+	auto.AutoTune, auto.AutoIceberg, auto.IcebergEngine = true, true, "rest-go"
+	manual := base
+	manual.MaxInFlightTasks, manual.PlannedTasks, manual.FetchLimit = 4, 8, 50000
+	for name, cfg := range map[string]ranConfig{"auto_tune with iceberg": auto, "manual planning": manual} {
+		payload, err := buildJobPayloadFromConfig(cfg, "src-1", "tgt-1")
+		if err != nil {
+			t.Fatalf("%s: buildJobPayloadFromConfig: %v", name, err)
+		}
+		raw, err := json.Marshal(payload.OptionsJSON)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := jobopts.Validate(raw, payload.SourceSQL, jobopts.Strict); err != nil {
+			t.Fatalf("%s: options %s fail validation: %v", name, raw, err)
+		}
 	}
 }
 
