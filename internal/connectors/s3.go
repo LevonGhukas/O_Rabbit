@@ -194,6 +194,13 @@ func (r *S3Reader) StreamDocuments(ctx context.Context, collection string, filte
 	}
 }
 
+// ValidateS3Format reports whether format is an accepted S3 file format
+// (csv, json, xml, excel, xlsx, xls, parquet).
+func ValidateS3Format(format string) error {
+	_, err := resolveS3Format(format, "")
+	return err
+}
+
 // resolveS3Format gives explicit logical format configuration precedence over
 // the legacy filename-extension mapping.
 func resolveS3Format(configuredFormat, objectKey string) (string, error) {
