@@ -7,6 +7,7 @@ type FailureClass string
 const (
 	// Core & Infrastructure
 	FailureConfigurationUnavailable FailureClass = "CONFIGURATION_UNAVAILABLE"
+	FailureConfigurationInvalid     FailureClass = "CONFIGURATION_INVALID" // stored job configuration (options_json) must be fixed
 	FailureAuthentication           FailureClass = "AUTHENTICATION_FAILED"
 	FailureAuthorization            FailureClass = "AUTHORIZATION_FAILED"
 	FailureNetworkConnection        FailureClass = "NETWORK_CONNECTION_FAILED"

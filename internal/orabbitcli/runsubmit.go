@@ -450,7 +450,8 @@ func buildJobPayloadFromConfig(cfg ranConfig, sourceConnectionID, targetConnecti
 		optionsJSON["id_column"] = cfg.IDColumn
 		optionsJSON["planned_tasks"] = cfg.PlannedTasks
 		optionsJSON["chunk_size"] = cfg.ChunkSize
-		optionsJSON["fetch_limit_rows"] = cfg.FetchLimit
+		// fetch_limit is validated but not stored: no planner or worker reads
+		// it from options_json, and the master rejects unknown options.
 	default:
 		return jobPayload{}, invalidRunSubmitf("source.engine %q is known but not yet supported by run submit in this build", engine)
 	}

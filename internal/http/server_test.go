@@ -899,14 +899,19 @@ func TestJobRunsPersistIceRegistrationConfigSnapshotWithRawConfig(t *testing.T) 
 
 func TestJobRunsGenericPlannerFailureReturnsStructuredInternalError(t *testing.T) {
 	st := openTestStore(t)
+	// An unrecognized failure: the target metadata is stored in a shape the
+	// planner cannot read. (Invalid options_json is a recognized
+	// configuration problem and returns 422; see the options_json tests.)
+	createTestConnection(t, st, db.Connection{ID: "src-bad", Name: "src-bad", Kind: "source", Engine: "postgres", MetadataJSON: []byte(`{}`), SecretEncBlob: []byte(`{}`)})
+	createTestConnection(t, st, db.Connection{ID: "tgt-bad", Name: "tgt-bad", Kind: "target", Engine: "s3", MetadataJSON: []byte(`[]`), SecretEncBlob: []byte(`{}`)})
 	job := db.Job{
 		ID:                 "job-bad",
 		Name:               "job-bad",
-		SourceConnectionID: "missing-src",
-		TargetConnectionID: "missing-tgt",
+		SourceConnectionID: "src-bad",
+		TargetConnectionID: "tgt-bad",
 		TargetTable:        "big_table",
 		WriteMode:          "append",
-		OptionsJSON:        []byte(`{`),
+		OptionsJSON:        []byte(`{"partition_strategy":"single"}`),
 	}
 	if err := st.CreateJob(context.Background(), job); err != nil {
 		t.Fatalf("create job: %v", err)
