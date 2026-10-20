@@ -128,12 +128,8 @@ func (r *S3Reader) StreamDocuments(ctx context.Context, collection string, filte
 			headers: headers,
 		}, nil
 	case "json":
-		decoder := json.NewDecoder(out.Body)
 		recordPath, _ := filter["record_path"].(string)
-		return &s3JSONIterator{
-			decoder:    decoder,
-			recordPath: recordPath,
-		}, nil
+		return newS3JSONIterator(out.Body, recordPath), nil
 	case "xml":
 		decoder := xml.NewDecoder(out.Body)
 		return &s3XMLIterator{
@@ -302,6 +298,15 @@ func (it *s3CSVIterator) Close() error {
 
 func (it *s3CSVIterator) FieldOrder() []string {
 	return append([]string(nil), it.headers...)
+}
+
+// newS3JSONIterator reads the record array of a JSON file. Numbers are kept
+// as written (json.Number): float64 would turn integer IDs above 2^53 into
+// different numbers and make every integer column look like a float.
+func newS3JSONIterator(body io.Reader, recordPath string) *s3JSONIterator {
+	decoder := json.NewDecoder(body)
+	decoder.UseNumber()
+	return &s3JSONIterator{decoder: decoder, recordPath: recordPath}
 }
 
 type s3JSONIterator struct {

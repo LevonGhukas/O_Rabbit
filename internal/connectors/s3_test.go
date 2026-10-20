@@ -39,15 +39,12 @@ func TestS3JSONFormatWithRecordPath(t *testing.T) {
 	if err != nil || format != "json" {
 		t.Fatalf("format=%q err=%v", format, err)
 	}
-	it := &s3JSONIterator{
-		decoder:    json.NewDecoder(strings.NewReader(`{"airports":[{"id":1}]}`)),
-		recordPath: "/airports",
-	}
+	it := newS3JSONIterator(strings.NewReader(`{"airports":[{"id":1}]}`), "/airports")
 	if !it.Next(context.Background()) {
 		t.Fatalf("next=false err=%v", it.Err())
 	}
 	doc, err := it.Decode()
-	if err != nil || doc["id"] != float64(1) {
+	if err != nil || doc["id"] != json.Number("1") {
 		t.Fatalf("doc=%v err=%v", doc, err)
 	}
 }
@@ -110,14 +107,18 @@ func TestS3JSONIteratorRecordPath(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			it := &s3JSONIterator{decoder: json.NewDecoder(strings.NewReader(tc.input)), recordPath: tc.recordPath}
+			it := newS3JSONIterator(strings.NewReader(tc.input), tc.recordPath)
 			var gotIDs []float64
 			for it.Next(context.Background()) {
 				doc, err := it.Decode()
 				if err != nil {
 					t.Fatal(err)
 				}
-				gotIDs = append(gotIDs, doc["id"].(float64))
+				id, err := doc["id"].(json.Number).Float64()
+				if err != nil {
+					t.Fatal(err)
+				}
+				gotIDs = append(gotIDs, id)
 			}
 			if tc.wantErr != "" {
 				if it.Err() == nil || !strings.Contains(it.Err().Error(), tc.wantErr) {
