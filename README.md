@@ -219,11 +219,14 @@ orabbit-client run interactive --master-http http://master:9100 --master-grpc ma
 **File-based run.** `run submit` takes strict YAML or JSON (unknown fields are
 rejected); see the [quick start](#quick-start) for an example.
 
-- Target metadata must include `endpoint` and `bucket`. For AWS use the
-  regional endpoint, for example `https://s3.eu-west-1.amazonaws.com`.
-  `region` defaults to `us-east-1` and `force_path_style` to `true`.
+- `target` needs `endpoint`, `region` and `bucket` (MinIO accepts
+  `us-east-1`). For AWS use the regional endpoint, for example
+  `https://s3.eu-west-1.amazonaws.com`. `force_path_style` defaults to `false`;
+  set it to `true` for MinIO.
+- `job` needs `incremental` and `auto_tune`, and SQL sources need
+  `cursor_column` (the older name `id_column` is still accepted).
 - With `auto_tune: false`, set `max_in_flight_tasks` and `planned_tasks` or
-  `chunk_size`.
+  `target_rows_per_task`.
 - `fetch_limit` (optional) is stored as the job option `fetch_size`; see
   [Write mode and fetch size](#write-mode-and-fetch-size).
 - FlightSQL needs `source.sql`, `incremental: false`, `auto_tune: false` and no
