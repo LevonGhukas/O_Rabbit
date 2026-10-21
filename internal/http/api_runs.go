@@ -241,6 +241,13 @@ func applyOneShotDestinationIdentity(spec *validatedRunSubmitSpec) {
 	suffix := fmt.Sprintf("%x", digest[:8])
 	spec.TargetConnectionName = "s3-" + suffix
 	spec.JobName += "-" + suffix
+	// Workers read source credentials from the live connection row, so a
+	// connection shared by every job of one engine let each new submit
+	// rewrite the DSN of runs still executing. Scope it to the job.
+	if spec.SourceConnectionName != "" {
+		jobDigest := sha256.Sum256([]byte(spec.JobName))
+		spec.SourceConnectionName += "-" + fmt.Sprintf("%x", jobDigest[:8])
+	}
 }
 
 func normalizedIcebergEngine(raw string) string {
@@ -453,7 +460,7 @@ func validationTypeMappings(ctx context.Context, spec validatedRunSubmitSpec) ([
 			return nil, nil, fmt.Errorf("infer document schema: %w", err)
 		}
 		for _, field := range inference.Fields {
-			out = append(out, map[string]any{"column": field.Name, "logical_type": field.LogicalType.String(), "storage_type": field.Mapping.Destination, "class": field.Mapping.Class, "fallback": field.Mapping.Fallback, "reason": field.Mapping.Reason})
+			out = append(out, map[string]any{"column": field.Name, "logical_type": field.LogicalType.String(), "storage_type": field.Mapping.Destination, "target_type": field.Mapping.Target, "class": field.Mapping.Class, "fallback": field.Mapping.Fallback, "reason": field.Mapping.Reason})
 		}
 		return out, arrowio.MongoTypeWarnings(inference), nil
 	}
@@ -472,6 +479,9 @@ func validationTypeMappings(ctx context.Context, spec validatedRunSubmitSpec) ([
 		cols, types, err = q.DescribeQuery(ctx, spec.SourceQuery)
 	} else {
 		cols, types, err = reader.DescribeTable(ctx, spec.SourceTable)
+		if err == nil {
+			cols, types = arrowio.RestrictToSelectedColumns(cols, types, spec.SelectColumns)
+		}
 	}
 	if err != nil {
 		return out, warnings, nil
@@ -524,14 +534,15 @@ func validationTypeMappingsFromDescription(spec validatedRunSubmitSpec, cols []s
 		if e != nil {
 			continue
 		}
-		if raw, ok := spec.ColumnTypes[col]; ok {
+		raw, hasOverride := spec.ColumnTypes[col]
+		if hasOverride {
 			if parsed, e := typesystem.ResolveOverride(raw, logical); e == nil {
 				logical = parsed
 			}
 		}
-		_, mapping, e := arrowio.PlanForLogicalType(col, logical)
+		_, mapping, e := arrowio.PlanForOverride(col, raw, logical)
 		if e == nil {
-			out = append(out, map[string]any{"column": col, "logical_type": logical.String(), "storage_type": mapping.Destination, "class": mapping.Class, "fallback": mapping.Fallback, "reason": mapping.Reason})
+			out = append(out, map[string]any{"column": col, "logical_type": logical.String(), "storage_type": mapping.Destination, "target_type": mapping.Target, "class": mapping.Class, "fallback": mapping.Fallback, "reason": mapping.Reason})
 		}
 	}
 	return out, result.Warnings
@@ -736,6 +747,10 @@ func (s *Server) writeRunSubmitError(w http.ResponseWriter, err error) {
 	case AsValidationError(err, &validationErr):
 		writeInvalidInput(w, validationErr.message, validationErr.details)
 	default:
+		// The client only sees a generic message; keep the cause in the log.
+		if s.log != nil {
+			s.log.Error("run submit failed", slog.String("err", err.Error()))
+		}
 		writeInternalError(w, "internal server error")
 	}
 }
@@ -1063,28 +1078,24 @@ func buildOneShotJobRequest(spec validatedRunSubmitSpec, sourceConnectionID, tar
 		partitionStrategy = "cdc_stream"
 	}
 	options := map[string]any{
-		"source_mode":            spec.SourceMode,
-		"source_name":            spec.SourceName,
-		"table":                  spec.SourceTable,
-		"query":                  spec.SourceQuery,
-		"query_hash":             spec.QueryHash,
-		"partition_strategy":     partitionStrategy,
-		"auto_tune":              spec.AutoTune,
-		"max_in_flight_tasks":    spec.MaxInFlightTasks,
-		"target_rows_per_task":   spec.TargetRowsPerTask,
-		"cursor_column":          spec.CursorColumn,
-		"id_column":              spec.CursorColumn,
-		"planned_tasks":          spec.PlannedTasks,
-		"target_file_bytes":      spec.TargetFileBytes,
-		"iceberg_enabled":        spec.IcebergEnabled,
-		"iceberg_engine":         spec.IcebergEngine,
-		"iceberg_table":          spec.IcebergTable,
-		"iceberg_partition_keys": spec.IcebergPartitionKeys,
-		"partition_keys":         spec.IcebergPartitionKeys,
-		"consistency_mode":       spec.ConsistencyMode,
-		"where_clause":           spec.WhereClause,
-		"select_columns":         spec.SelectColumns,
-		"column_types":           spec.ColumnTypes,
+		"source_mode":          spec.SourceMode,
+		"source_name":          spec.SourceName,
+		"table":                spec.SourceTable,
+		"query":                spec.SourceQuery,
+		"query_hash":           spec.QueryHash,
+		"partition_strategy":   partitionStrategy,
+		"auto_tune":            spec.AutoTune,
+		"max_in_flight_tasks":  spec.MaxInFlightTasks,
+		"target_rows_per_task": spec.TargetRowsPerTask,
+		"cursor_column":        spec.CursorColumn,
+		"id_column":            spec.CursorColumn,
+		"planned_tasks":        spec.PlannedTasks,
+		"target_file_bytes":    spec.TargetFileBytes,
+		"partition_keys":       spec.IcebergPartitionKeys,
+		"consistency_mode":     spec.ConsistencyMode,
+		"where_clause":         spec.WhereClause,
+		"select_columns":       spec.SelectColumns,
+		"column_types":         spec.ColumnTypes,
 	}
 	if spec.WorkerPool != "" {
 		options["worker_pool"] = spec.WorkerPool

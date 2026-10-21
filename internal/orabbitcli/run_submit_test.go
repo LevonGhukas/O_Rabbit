@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
+	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 )
 
 func TestCmdRunSubmitFromFile(t *testing.T) {
@@ -258,6 +259,35 @@ func TestBuildJobPayloadFromConfigIncludesIcebergRegistrationOptions(t *testing.
 	}
 }
 
+// The CLI creates jobs through POST /jobs, which rejects invalid or unknown
+// options_json keys; its payload must always pass that validation.
+func TestBuildJobPayloadFromConfigPassesStrictOptionsValidation(t *testing.T) {
+	base := ranConfig{
+		SourceEngine: "postgres", HTTPBase: "http://127.0.0.1:9100", SourceName: "src",
+		SourceDSN: "postgres://u:p@db:5432/app", TargetName: "tgt", S3Endpoint: "http://minio:9000",
+		S3Region: "us-east-1", S3Bucket: "bucket1", S3AccessKeyID: "a", S3SecretAccessKey: "b",
+		JobName: "people", TargetNamespace: "demo", TargetTable: "people", WriteMode: "append",
+		Table: "public.people", IDColumn: "id",
+	}
+	auto := base
+	auto.AutoTune, auto.AutoIceberg, auto.IcebergEngine = true, true, "rest-go"
+	manual := base
+	manual.MaxInFlightTasks, manual.PlannedTasks, manual.FetchLimit = 4, 8, 50000
+	for name, cfg := range map[string]ranConfig{"auto_tune with iceberg": auto, "manual planning": manual} {
+		payload, err := buildJobPayloadFromConfig(cfg, "src-1", "tgt-1")
+		if err != nil {
+			t.Fatalf("%s: buildJobPayloadFromConfig: %v", name, err)
+		}
+		raw, err := json.Marshal(payload.OptionsJSON)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := jobopts.Validate(raw, payload.SourceSQL, jobopts.Strict); err != nil {
+			t.Fatalf("%s: options %s fail validation: %v", name, raw, err)
+		}
+	}
+}
+
 func TestBuildJobPayloadFromConfigAcceptsOracle(t *testing.T) {
 	payload, err := buildJobPayloadFromConfig(ranConfig{
 		SourceEngine:      "oracle",
@@ -338,4 +368,79 @@ func writeTempRunSubmitFile(t *testing.T, pattern, body string) string {
 		t.Fatalf("close temp run submit file: %v", err)
 	}
 	return f.Name()
+}
+
+// runSubmitJobFile is a valid run file whose job block ends with jobLines.
+func runSubmitJobFile(t *testing.T, jobLines string) string {
+	t.Helper()
+	return writeTempRunSubmitFile(t, "run-submit-job-*.yaml", `
+master:
+  http: http://127.0.0.1:9100
+source:
+  name: local-postgres
+  engine: postgres
+  dsn: postgres://u:p@db:5432/app
+target:
+  name: local-minio
+  endpoint: http://minio:9000
+  region: us-east-1
+  bucket: bucket1
+  force_path_style: true
+  access_key_id: minioadmin
+  secret_access_key: minioadmin
+job:
+  name: export-people
+  target_namespace: demo
+  target_table: people
+  write_mode: overwrite
+  incremental: false
+  table: public.people
+`+jobLines)
+}
+
+func TestRunSubmitFileCursorColumn(t *testing.T) {
+	for name, lines := range map[string]string{
+		"cursor_column":            "  cursor_column: id\n  auto_tune: true\n",
+		"deprecated id_column":     "  id_column: id\n  auto_tune: true\n",
+		"both with the same value": "  cursor_column: id\n  id_column: id\n  auto_tune: true\n",
+	} {
+		spec, err := loadRunSubmitFile(runSubmitJobFile(t, lines))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		cfg := spec.toRanConfig("")
+		payload, err := buildJobPayloadFromConfig(cfg, "src-1", "tgt-1")
+		if err != nil {
+			t.Fatalf("%s: payload: %v", name, err)
+		}
+		if got := payload.OptionsJSON["cursor_column"]; got != "id" {
+			t.Fatalf("%s: cursor_column=%v want id", name, got)
+		}
+		if _, ok := payload.OptionsJSON["id_column"]; ok {
+			t.Fatalf("%s: the deprecated id_column option must not be sent", name)
+		}
+	}
+
+	_, err := loadRunSubmitFile(runSubmitJobFile(t, "  cursor_column: id\n  id_column: other\n  auto_tune: true\n"))
+	if err == nil || !strings.Contains(err.Error(), "differ") {
+		t.Fatalf("err=%v, want a conflict between cursor_column and id_column", err)
+	}
+	_, err = loadRunSubmitFile(runSubmitJobFile(t, "  auto_tune: true\n"))
+	if err == nil || !strings.Contains(err.Error(), "job.cursor_column is required") {
+		t.Fatalf("err=%v, want job.cursor_column is required", err)
+	}
+}
+
+func TestRunSubmitFileManualPlanningAcceptsTargetRowsPerTask(t *testing.T) {
+	manual := "  cursor_column: id\n  auto_tune: false\n  max_in_flight_tasks: 4\n  fetch_limit: 5000\n"
+	if _, err := loadRunSubmitFile(runSubmitJobFile(t, manual+"  target_rows_per_task: 100000\n")); err != nil {
+		t.Fatalf("target_rows_per_task: %v", err)
+	}
+	if _, err := loadRunSubmitFile(runSubmitJobFile(t, manual+"  planned_tasks: 8\n")); err != nil {
+		t.Fatalf("planned_tasks: %v", err)
+	}
+	_, err := loadRunSubmitFile(runSubmitJobFile(t, manual))
+	if err == nil || !strings.Contains(err.Error(), "job.planned_tasks or job.target_rows_per_task must be set") {
+		t.Fatalf("err=%v, want the manual planning requirement", err)
+	}
 }

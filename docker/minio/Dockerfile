@@ -1,53 +1,48 @@
 # syntax=docker/dockerfile:1
 #
-# MinIO server and client built from upstream source. MinIO no longer
-# publishes community images, and github.com/minio/minio is archived, so
-# RELEASE.2025-10-15T17-29-55Z is its final release. Both are built with a
-# current Go toolchain so the standard library carries current fixes.
+# MinIO server and client built from source. MinIO no longer publishes
+# community images, and github.com/minio/minio is archived: its final release
+# (RELEASE.2025-10-15T17-29-55Z) has unfixed vulnerabilities, including two
+# unauthenticated object writes. So both are built from the maintained
+# community fork by PGSTY (github.com/pgsty/silo, formerly pgsty/minio, and
+# github.com/pgsty/mc), which fixes them. The Go module paths are unchanged
+# (github.com/minio/minio, github.com/minio/mc), so the build is the same.
 #
-# Because upstream no longer updates its dependencies, the build upgrades
-# the Go modules that have known vulnerabilities (MINIO_DEP_UPGRADES /
-# MC_DEP_UPGRADES) to their fixed versions. The MinIO source itself is
-# unchanged. When the image scan in CI flags a module, add or bump it here.
+# The fork keeps most dependencies current; the build upgrades the few Go
+# modules that still have known vulnerabilities (MINIO_DEP_UPGRADES /
+# MC_DEP_UPGRADES). Only list versions newer than the fork's go.mod: `go get`
+# with an older version would downgrade. When the image scan in CI flags a
+# module, add or bump it here.
 #
-# MinIO and mc are AGPL-3.0. The exact upstream source is recorded in the
+# MinIO and mc are AGPL-3.0. The exact source is recorded in the
 # org.opencontainers.image.source/revision labels; the dependency upgrades are
 # the list below.
 #
 # Build and push (multi-arch):
 #   docker buildx build --platform linux/amd64,linux/arm64 --target minio \
-#     -t levonghukas/minio:RELEASE.2025-10-15T17-29-55Z-r1 --push docker/minio
+#     -t levonghukas/minio:RELEASE.2026-10-15T00-00-00Z-r1 --push docker/minio
 #   docker buildx build --platform linux/amd64,linux/arm64 --target mc \
-#     -t levonghukas/mc:RELEASE.2025-08-13T08-35-41Z-r1 --push docker/minio
+#     -t levonghukas/mc:RELEASE.2026-09-16T00-00-00Z-r1 --push docker/minio
 # CI (.github/workflows/minio-images.yml) does this on main.
 
-ARG GO_VERSION=1.26.6
-ARG MINIO_RELEASE=RELEASE.2025-10-15T17-29-55Z
-ARG MINIO_COMMIT=9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a
-ARG MC_RELEASE=RELEASE.2025-08-13T08-35-41Z
-ARG MC_COMMIT=7394ce0dd2a80935aded936b09fa12cbb3cb8096
+# The fork's go.mod requires Go 1.27.2 or newer.
+ARG GO_VERSION=1.27.2
+ARG MINIO_REPO=https://github.com/pgsty/silo
+ARG MINIO_RELEASE=RELEASE.2026-10-15T00-00-00Z
+ARG MINIO_COMMIT=7a3ca0f82100cce06289a465f54139da2639f642
+ARG MC_REPO=https://github.com/pgsty/mc
+ARG MC_RELEASE=RELEASE.2026-09-16T00-00-00Z
+ARG MC_COMMIT=e952aa78f10a2b77dd525a2b7e3143bcda0cd377
 
 # Bump when the image changes without an upstream release (for example new
 # dependency upgrades). Published tags are <release>-r<revision>.
 ARG IMAGE_REVISION=1
 
 ARG MINIO_DEP_UPGRADES="\
-  github.com/apache/thrift@v0.24.0 \
-  github.com/buger/jsonparser@v1.1.2 \
   github.com/go-jose/go-jose/v4@v4.1.5 \
-  github.com/prometheus/prometheus@v0.311.3 \
-  github.com/rabbitmq/amqp091-go@v1.15.0 \
-  go.opentelemetry.io/otel/sdk@v1.46.0 \
-  golang.org/x/crypto@v0.57.0 \
-  golang.org/x/net@v0.59.0 \
-  golang.org/x/text@v0.42.0 \
-  google.golang.org/grpc@v1.84.0"
+  go.opentelemetry.io/otel/sdk@v1.46.0"
 ARG MC_DEP_UPGRADES="\
-  github.com/prometheus/prometheus@v0.311.3 \
-  golang.org/x/crypto@v0.57.0 \
-  golang.org/x/net@v0.59.0 \
-  golang.org/x/text@v0.42.0 \
-  google.golang.org/grpc@v1.84.0"
+  golang.org/x/net@v0.60.0"
 
 
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS build-base
@@ -58,8 +53,8 @@ WORKDIR /src
 
 
 FROM build-base AS build-minio
-ARG MINIO_RELEASE MINIO_COMMIT MINIO_DEP_UPGRADES TARGETOS TARGETARCH
-RUN git clone --depth 1 --branch "${MINIO_RELEASE}" https://github.com/minio/minio . \
+ARG MINIO_REPO MINIO_RELEASE MINIO_COMMIT MINIO_DEP_UPGRADES TARGETOS TARGETARCH
+RUN git clone --depth 1 --branch "${MINIO_RELEASE}" "${MINIO_REPO}" . \
     && test "$(git rev-parse HEAD)" = "${MINIO_COMMIT}"
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     go get ${MINIO_DEP_UPGRADES} && \
@@ -69,8 +64,8 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 
 
 FROM build-base AS build-mc
-ARG MC_RELEASE MC_COMMIT MC_DEP_UPGRADES TARGETOS TARGETARCH
-RUN git clone --depth 1 --branch "${MC_RELEASE}" https://github.com/minio/mc . \
+ARG MC_REPO MC_RELEASE MC_COMMIT MC_DEP_UPGRADES TARGETOS TARGETARCH
+RUN git clone --depth 1 --branch "${MC_RELEASE}" "${MC_REPO}" . \
     && test "$(git rev-parse HEAD)" = "${MC_COMMIT}"
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     go get ${MC_DEP_UPGRADES} && \
@@ -86,10 +81,10 @@ RUN apk upgrade --no-cache && apk add --no-cache ca-certificates tzdata curl
 
 # Client: keeps a shell because Compose init jobs run `mc` from sh scripts.
 FROM runtime-base AS mc
-ARG MC_RELEASE MC_COMMIT
+ARG MC_REPO MC_RELEASE MC_COMMIT
 LABEL org.opencontainers.image.title="mc" \
       org.opencontainers.image.version="${MC_RELEASE}" \
-      org.opencontainers.image.source="https://github.com/minio/mc" \
+      org.opencontainers.image.source="${MC_REPO}" \
       org.opencontainers.image.revision="${MC_COMMIT}" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 COPY --from=build-mc /out/mc /usr/bin/mc
@@ -99,10 +94,10 @@ ENTRYPOINT ["mc"]
 
 
 FROM runtime-base AS minio
-ARG MINIO_RELEASE MINIO_COMMIT
+ARG MINIO_REPO MINIO_RELEASE MINIO_COMMIT
 LABEL org.opencontainers.image.title="minio" \
       org.opencontainers.image.version="${MINIO_RELEASE}" \
-      org.opencontainers.image.source="https://github.com/minio/minio" \
+      org.opencontainers.image.source="${MINIO_REPO}" \
       org.opencontainers.image.revision="${MINIO_COMMIT}" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 COPY --from=build-minio /out/minio /usr/bin/minio
