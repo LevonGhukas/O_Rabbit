@@ -110,8 +110,10 @@ source:
 target:
   name: local-minio
   endpoint: http://minio:9000
+  region: us-east-1
   bucket: bucket1
   prefix: exports
+  force_path_style: true
   access_key_id: minioadmin
   secret_access_key: minioadmin
 
@@ -120,8 +122,9 @@ job:
   target_namespace: demo
   target_table: people
   write_mode: overwrite
+  incremental: false
   table: public.people
-  id_column: id
+  cursor_column: id
   auto_tune: true
 ```
 
@@ -216,13 +219,16 @@ orabbit-client run interactive --master-http http://master:9100 --master-grpc ma
 **File-based run.** `run submit` takes strict YAML or JSON (unknown fields are
 rejected); see the [quick start](#quick-start) for an example.
 
-- Target metadata must include `endpoint` and `bucket`. For AWS use the
-  regional endpoint, for example `https://s3.eu-west-1.amazonaws.com`.
-  `region` defaults to `us-east-1` and `force_path_style` to `true`.
+- `target` needs `endpoint`, `region` and `bucket` (MinIO accepts
+  `us-east-1`). For AWS use the regional endpoint, for example
+  `https://s3.eu-west-1.amazonaws.com`. `force_path_style` defaults to `false`;
+  set it to `true` for MinIO.
+- `job` needs `incremental` and `auto_tune`, and SQL sources need
+  `cursor_column` (the older name `id_column` is still accepted).
 - With `auto_tune: false`, set `max_in_flight_tasks`, `fetch_limit` and
-  `planned_tasks` or `chunk_size`.
+  `planned_tasks` or `target_rows_per_task`.
 - FlightSQL needs `source.sql`, `incremental: false`, `auto_tune: false` and no
-  `id_column` or manual planning fields.
+  `cursor_column` or manual planning fields.
 
 **Run lifecycle.**
 
