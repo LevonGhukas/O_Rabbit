@@ -64,7 +64,8 @@ type runSubmitJobSpec struct {
 	WriteMode         string `json:"write_mode" yaml:"write_mode"`
 	Incremental       *bool  `json:"incremental" yaml:"incremental"`
 	Table             string `json:"table" yaml:"table"`
-	IDColumn          string `json:"id_column,omitempty" yaml:"id_column,omitempty"`
+	CursorColumn      string `json:"cursor_column,omitempty" yaml:"cursor_column,omitempty"`
+	IDColumn          string `json:"id_column,omitempty" yaml:"id_column,omitempty"` // deprecated name of CursorColumn
 	AutoTune          *bool  `json:"auto_tune" yaml:"auto_tune"`
 	MaxInFlightTasks  int    `json:"max_in_flight_tasks,omitempty" yaml:"max_in_flight_tasks,omitempty"`
 	TargetRowsPerTask int64  `json:"target_rows_per_task,omitempty" yaml:"target_rows_per_task,omitempty"`
@@ -157,7 +158,13 @@ func (s *runSubmitFile) validate() error {
 	s.Job.TargetTable = strings.TrimSpace(s.Job.TargetTable)
 	s.Job.WriteMode = strings.TrimSpace(s.Job.WriteMode)
 	s.Job.Table = strings.TrimSpace(s.Job.Table)
+	s.Job.CursorColumn = strings.TrimSpace(s.Job.CursorColumn)
 	s.Job.IDColumn = strings.TrimSpace(s.Job.IDColumn)
+	if s.Job.CursorColumn == "" {
+		s.Job.CursorColumn = s.Job.IDColumn
+	} else if s.Job.IDColumn != "" && s.Job.IDColumn != s.Job.CursorColumn {
+		return invalidRunSubmitf("job.cursor_column %q and the deprecated job.id_column %q differ; set only job.cursor_column", s.Job.CursorColumn, s.Job.IDColumn)
+	}
 	s.Iceberg.Engine = strings.ToLower(strings.TrimSpace(s.Iceberg.Engine))
 	s.Iceberg.Table = strings.TrimSpace(s.Iceberg.Table)
 	s.Iceberg.DefaultsFile = strings.TrimSpace(s.Iceberg.DefaultsFile)
@@ -242,8 +249,8 @@ func (s *runSubmitFile) validate() error {
 		if *s.Job.Incremental {
 			return invalidRunSubmitf("job.incremental=false is required for FlightSQL submissions")
 		}
-		if s.Job.IDColumn != "" {
-			return invalidRunSubmitf("job.id_column is not supported for FlightSQL submissions")
+		if s.Job.CursorColumn != "" {
+			return invalidRunSubmitf("job.cursor_column is not supported for FlightSQL submissions")
 		}
 		if *s.Job.AutoTune {
 			return invalidRunSubmitf("job.auto_tune=false is required for FlightSQL submissions")
@@ -253,10 +260,10 @@ func (s *runSubmitFile) validate() error {
 		}
 	case connectors.SupportsOrderedCursor(s.Source.Engine):
 		if s.Source.SQL != "" {
-			return invalidRunSubmitf("source.sql is not supported for %s run submit; use job.table and job.id_column instead", s.Source.Engine)
+			return invalidRunSubmitf("source.sql is not supported for %s run submit; use job.table and job.cursor_column instead", s.Source.Engine)
 		}
-		if s.Job.IDColumn == "" {
-			return invalidRunSubmitf("job.id_column is required for %s submissions", s.Source.Engine)
+		if s.Job.CursorColumn == "" {
+			return invalidRunSubmitf("job.cursor_column is required for %s submissions", s.Source.Engine)
 		}
 		if *s.Job.AutoTune {
 			if s.Job.PlannedTasks > 0 || s.Job.ChunkSize > 0 || s.Job.FetchLimit > 0 {
@@ -269,8 +276,8 @@ func (s *runSubmitFile) validate() error {
 			if s.Job.FetchLimit < 1 {
 				return invalidRunSubmitf("job.fetch_limit must be >= 1 when job.auto_tune=false")
 			}
-			if s.Job.PlannedTasks < 1 && s.Job.ChunkSize < 1 {
-				return invalidRunSubmitf("job.planned_tasks or job.chunk_size must be set when job.auto_tune=false")
+			if s.Job.PlannedTasks < 1 && s.Job.TargetRowsPerTask < 1 && s.Job.ChunkSize < 1 {
+				return invalidRunSubmitf("job.planned_tasks or job.target_rows_per_task must be set when job.auto_tune=false")
 			}
 		}
 	default:
@@ -321,7 +328,7 @@ func (s runSubmitFile) toRanConfig(masterHTTPOverride string) ranConfig {
 		WriteMode:       s.Job.WriteMode,
 		Incremental:     *s.Job.Incremental,
 		Table:           s.Job.Table,
-		IDColumn:        s.Job.IDColumn,
+		IDColumn:        s.Job.CursorColumn,
 		PlannedTasks:    s.Job.PlannedTasks,
 		ChunkSize:       s.Job.ChunkSize,
 		FetchLimit:      s.Job.FetchLimit,
@@ -381,7 +388,7 @@ func validateRunConfigForSubmission(cfg ranConfig) error {
 			return invalidRunSubmitf("job.incremental=false is required for FlightSQL submissions")
 		}
 		if strings.TrimSpace(cfg.IDColumn) != "" {
-			return invalidRunSubmitf("job.id_column is not supported for FlightSQL submissions")
+			return invalidRunSubmitf("job.cursor_column is not supported for FlightSQL submissions")
 		}
 		if cfg.AutoTune {
 			return invalidRunSubmitf("job.auto_tune=false is required for FlightSQL submissions")
@@ -391,10 +398,10 @@ func validateRunConfigForSubmission(cfg ranConfig) error {
 		}
 	case connectors.SupportsOrderedCursor(engine):
 		if strings.TrimSpace(cfg.SourceSQL) != "" {
-			return invalidRunSubmitf("source.sql is not supported for %s run submit; use job.table and job.id_column instead", engine)
+			return invalidRunSubmitf("source.sql is not supported for %s run submit; use job.table and job.cursor_column instead", engine)
 		}
 		if strings.TrimSpace(cfg.IDColumn) == "" {
-			return invalidRunSubmitf("job.id_column is required for %s submissions", engine)
+			return invalidRunSubmitf("job.cursor_column is required for %s submissions", engine)
 		}
 		if cfg.MaxInFlightTasks < 0 || cfg.TargetRowsPerTask < 0 || cfg.PlannedTasks < 0 || cfg.ChunkSize < 0 || cfg.FetchLimit < 0 {
 			return invalidRunSubmitf("planning values must be >= 0")
@@ -410,8 +417,8 @@ func validateRunConfigForSubmission(cfg ranConfig) error {
 			if cfg.FetchLimit < 1 {
 				return invalidRunSubmitf("job.fetch_limit must be >= 1 when job.auto_tune=false")
 			}
-			if cfg.PlannedTasks < 1 && cfg.ChunkSize < 1 {
-				return invalidRunSubmitf("job.planned_tasks or job.chunk_size must be set when job.auto_tune=false")
+			if cfg.PlannedTasks < 1 && cfg.TargetRowsPerTask < 1 && cfg.ChunkSize < 1 {
+				return invalidRunSubmitf("job.planned_tasks or job.target_rows_per_task must be set when job.auto_tune=false")
 			}
 		}
 	default:
@@ -447,10 +454,10 @@ func buildJobPayloadFromConfig(cfg ranConfig, sourceConnectionID, targetConnecti
 		optionsJSON["max_in_flight_tasks"] = cfg.MaxInFlightTasks
 		optionsJSON["target_rows_per_task"] = cfg.TargetRowsPerTask
 		optionsJSON["cursor_column"] = cfg.IDColumn
-		optionsJSON["id_column"] = cfg.IDColumn
 		optionsJSON["planned_tasks"] = cfg.PlannedTasks
 		optionsJSON["chunk_size"] = cfg.ChunkSize
-		optionsJSON["fetch_limit_rows"] = cfg.FetchLimit
+		// fetch_limit is validated but not stored: no planner or worker reads
+		// it from options_json, and the master rejects unknown options.
 	default:
 		return jobPayload{}, invalidRunSubmitf("source.engine %q is known but not yet supported by run submit in this build", engine)
 	}

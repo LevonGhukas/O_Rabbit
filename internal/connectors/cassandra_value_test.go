@@ -22,5 +22,5 @@ func TestCassandraToDriverValueIsLossless(t *testing.T) {
 	require.Equal(t, "123e4567-e89b-12d3-a456-426614174000", value)
 	value, err = cassandraToDriverValue(map[string]any{"b": 2, "a": 1})
 	require.NoError(t, err)
-	require.Equal(t, `json:{"a":1,"b":2}`, value)
+	require.Equal(t, `{"a":1,"b":2}`, value)
 }
