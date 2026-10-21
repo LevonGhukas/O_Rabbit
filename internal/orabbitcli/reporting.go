@@ -528,7 +528,7 @@ func renderBenchReport(cfg benchReportConfig, runID, runStatus string, details r
 	fmt.Fprintf(&buf, "  max_in_flight=%d\n", cfg.MaxInFlightTasks)
 	fmt.Fprintf(&buf, "  planned_tasks=%s\n", plannedTasks)
 	fmt.Fprintf(&buf, "  effective_partition_span=%d\n", medianInt64(spans))
-	fmt.Fprintf(&buf, "  fetch_limit_rows=%d\n", modeInt(fetchLimits))
+	fmt.Fprintf(&buf, "  fetch_size=%d\n", modeInt(fetchLimits))
 	fmt.Fprintf(&buf, "  planning_ms=%d\n", cfg.PlanningMS)
 
 	buf.WriteString("\nData\n")

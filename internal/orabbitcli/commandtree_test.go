@@ -117,7 +117,7 @@ job:
   name: orders-export
   target_namespace: analytics
   target_table: orders
-  write_mode: append
+  write_mode: overwrite
   incremental: false
   table: SalesDB.dbo.Orders
   id_column: RowId

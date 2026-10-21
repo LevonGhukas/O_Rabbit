@@ -69,7 +69,7 @@ func buildRunReviewSummary(cfg ranConfig, availableWorkers int, workersKnown boo
 			lines = append(lines,
 				fmt.Sprintf("max_in_flight_tasks: %d", cfg.MaxInFlightTasks),
 				fmt.Sprintf("planned_tasks: %d", cfg.PlannedTasks),
-				fmt.Sprintf("fetch_limit_rows: %d", cfg.FetchLimit),
+				fmt.Sprintf("fetch_size: %d", cfg.FetchLimit),
 			)
 		}
 	}

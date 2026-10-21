@@ -492,3 +492,61 @@ func TestMigrationV17CanResumeAfterSchemaCreatedBeforeVersionRecorded(t *testing
 		t.Fatalf("versions=%d indexes=%d", versions, indexes)
 	}
 }
+
+func TestMigrationV31MakesWriteModeExplicitAndKeepsBehavior(t *testing.T) {
+	ctx := context.Background()
+	raw := openRawTestDB(t)
+	for _, m := range migrations {
+		if m.version >= 31 {
+			break
+		}
+		if m.sql != "" {
+			if _, err := raw.ExecContext(ctx, m.sql); err != nil {
+				t.Fatal(err)
+			}
+		} else if m.apply != nil {
+			if err := m.apply(ctx, raw); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := raw.ExecContext(ctx, `INSERT INTO schema_migrations(version,applied_at) VALUES(?,'2026-10-14T00:00:00Z')`, m.version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Each job's want is the mode its runs already behaved as.
+	jobs := []struct {
+		id, mode    string
+		incremental int
+		want        string
+	}{
+		{"full-append", "append", 0, "overwrite"}, // "append" was not honoured for full runs
+		{"full-overwrite", "overwrite", 0, "overwrite"},
+		{"full-typo", "replace", 0, "overwrite"},
+		{"full-empty", "", 0, "overwrite"},
+		{"inc-append", "append", 1, "append"},
+		{"inc-typo", "Append ", 1, "append"},
+		{"inc-empty", "", 1, "append"},
+		{"inc-overwrite", " OVERWRITE", 1, "overwrite"}, // kept: rejected at run start
+	}
+	for _, j := range jobs {
+		if _, err := raw.ExecContext(ctx, `INSERT INTO jobs(id,name,source_connection_id,target_connection_id,source_sql,target_namespace,target_table,write_mode,incremental,options_json,created_at,updated_at) VALUES(?,?,'s','t','','ns','t',?,?,'{}','x','x')`, j.id, j.id, j.mode, j.incremental); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := Migrate(ctx, raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, raw); err != nil { // idempotent
+		t.Fatal(err)
+	}
+	for _, j := range jobs {
+		var got string
+		if err := raw.QueryRowContext(ctx, `SELECT write_mode FROM jobs WHERE id=?`, j.id).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != j.want {
+			t.Errorf("%s: write_mode=%q, want %q", j.id, got, j.want)
+		}
+	}
+}

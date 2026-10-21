@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 	"github.com/LevonGhukas/O_Rabbit/internal/httperr"
+	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 )
 
 func jobValidationServer(t *testing.T) (*Server, *db.Store) {
@@ -22,7 +24,7 @@ func jobValidationServer(t *testing.T) (*Server, *db.Store) {
 }
 
 func jobBody(options string) string {
-	return `{"name":"job","source_connection_id":"src","target_connection_id":"tgt","target_table":"t","write_mode":"append","options_json":` + options + `}`
+	return `{"name":"job","source_connection_id":"src","target_connection_id":"tgt","target_table":"t","write_mode":"overwrite","options_json":` + options + `}`
 }
 
 func serveJSON(srv *Server, method, path, body string) *httptest.ResponseRecorder {
@@ -133,7 +135,7 @@ func TestStoredJobRoundTripsThroughGetAndPut(t *testing.T) {
 	// keys that are no longer written; fetching and saving back must work.
 	srv, st := jobValidationServer(t)
 	options := `{"partition_strategy":"single","table":"public.t","iceberg_registration":{"enabled":true,"engine":"rest-go","table":"ns.t"},"iceberg_enabled":true,"iceberg_engine":"rest-go","iceberg_table":"ns.t","iceberg_partition_keys":null,"fetch_limit_rows":5000,"auto_tune":true,"target_file_bytes":0}`
-	if err := st.CreateJob(context.Background(), db.Job{ID: "old", Name: "old", SourceConnectionID: "src", TargetConnectionID: "tgt", TargetTable: "t", WriteMode: "append", OptionsJSON: json.RawMessage(options)}); err != nil {
+	if err := st.CreateJob(context.Background(), db.Job{ID: "old", Name: "old", SourceConnectionID: "src", TargetConnectionID: "tgt", TargetTable: "t", WriteMode: "overwrite", OptionsJSON: json.RawMessage(options)}); err != nil {
 		t.Fatal(err)
 	}
 	got := serveJSON(srv, http.MethodGet, "/api/v1/jobs/old", "")
@@ -158,7 +160,7 @@ func TestRunStartForStoredInvalidOptionsReturns422(t *testing.T) {
 		"options_json.column_types.a":     `{"partition_strategy":"single","column_types":{"a":"notatype<"}}`,
 	} {
 		srv, st := jobValidationServer(t)
-		if err := st.CreateJob(context.Background(), db.Job{ID: "bad", Name: "bad", SourceConnectionID: "src", TargetConnectionID: "tgt", TargetTable: "t", WriteMode: "append", OptionsJSON: json.RawMessage(options)}); err != nil {
+		if err := st.CreateJob(context.Background(), db.Job{ID: "bad", Name: "bad", SourceConnectionID: "src", TargetConnectionID: "tgt", TargetTable: "t", WriteMode: "overwrite", OptionsJSON: json.RawMessage(options)}); err != nil {
 			t.Fatal(err)
 		}
 		rec := serveJSON(srv, http.MethodPost, "/api/v1/jobs/bad/runs", "")
@@ -168,6 +170,121 @@ func TestRunStartForStoredInvalidOptionsReturns422(t *testing.T) {
 		}
 		if runs, _ := st.ListRuns(context.Background()); len(runs) != 0 {
 			t.Errorf("%s: %d run(s) created, want none", options, len(runs))
+		}
+	}
+}
+
+func TestJobWriteModeIsValidatedAndDefaulted(t *testing.T) {
+	body := func(mode string, incremental bool) string {
+		return fmt.Sprintf(`{"name":"job","source_connection_id":"src","target_connection_id":"tgt","target_table":"t","write_mode":%q,"incremental":%t,"hwm_column":"id","options_json":{"partition_strategy":"single"}}`, mode, incremental)
+	}
+	rejected := []struct {
+		mode        string
+		incremental bool
+		contains    string
+	}{
+		{"overwrite", true, "cannot be combined with incremental"},
+		{"append", false, "not supported for full"},
+		{"replace", false, `got \"replace\"`},
+	}
+	for _, tc := range rejected {
+		srv, st := jobValidationServer(t)
+		rec := serveJSON(srv, http.MethodPost, "/api/v1/jobs", body(tc.mode, tc.incremental))
+		if resp := decodeJobError(t, rec); rec.Code != http.StatusBadRequest || !resp.hasField("write_mode") || !strings.Contains(rec.Body.String(), tc.contains) {
+			t.Errorf("%s incremental=%t: status=%d body=%s, want 400 write_mode containing %q", tc.mode, tc.incremental, rec.Code, rec.Body.String(), tc.contains)
+		}
+		if jobs, _ := st.ListJobs(context.Background()); len(jobs) != 0 {
+			t.Errorf("%s incremental=%t: job stored, want none", tc.mode, tc.incremental)
+		}
+	}
+
+	// Empty or differently spelled modes are stored in canonical form.
+	stored := []struct {
+		mode        string
+		incremental bool
+		want        string
+	}{
+		{"", false, "overwrite"},
+		{"", true, "append"},
+		{" Overwrite ", false, "overwrite"},
+		{"APPEND", true, "append"},
+	}
+	for _, tc := range stored {
+		srv, _ := jobValidationServer(t)
+		rec := serveJSON(srv, http.MethodPost, "/api/v1/jobs", body(tc.mode, tc.incremental))
+		var job db.Job
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("%q incremental=%t: status=%d body=%s", tc.mode, tc.incremental, rec.Code, rec.Body.String())
+		}
+		decodeJSONBody(t, rec, &job)
+		if job.WriteMode != tc.want {
+			t.Errorf("%q incremental=%t: stored write_mode=%q, want %q", tc.mode, tc.incremental, job.WriteMode, tc.want)
+		}
+	}
+}
+
+func TestRunStartRejectsIncrementalOverwriteJob(t *testing.T) {
+	// Stored before validation: replacing the table with only the new rows
+	// (or with nothing, for a run with no new rows) would lose data.
+	srv, st := jobValidationServer(t)
+	hwm := "id"
+	if err := st.CreateJob(context.Background(), db.Job{ID: "inc", Name: "inc", SourceConnectionID: "src", TargetConnectionID: "tgt", TargetTable: "t", WriteMode: "overwrite", Incremental: true, HWMColumn: &hwm, OptionsJSON: json.RawMessage(`{"partition_strategy":"single"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	rec := serveJSON(srv, http.MethodPost, "/api/v1/jobs/inc/runs", "")
+	resp := decodeJobError(t, rec)
+	if rec.Code != http.StatusUnprocessableEntity || resp.Error.FailureClass != string(failure.FailureConfigurationInvalid) || !resp.hasField("write_mode") {
+		t.Fatalf("status=%d body=%s, want 422 CONFIGURATION_INVALID naming write_mode", rec.Code, rec.Body.String())
+	}
+	if runs, _ := st.ListRuns(context.Background()); len(runs) != 0 {
+		t.Fatalf("%d run(s) created, want none", len(runs))
+	}
+}
+
+// Data Sync in O_Project switches one sync between full and incremental mode
+// through /runs/submit, which reuses the same job. write_mode must follow the
+// mode every time, or a switch to incremental would leave the unsafe
+// incremental+overwrite combination and the next run would be rejected.
+func TestOneShotSubmitKeepsWriteModeConsistentWhenModeSwitches(t *testing.T) {
+	srv := newSubmitTestServer(openTestStore(t))
+	submit := func(incremental bool) db.Job {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/runs/submit", strings.NewReader(fmt.Sprintf(`{
+			"source": {"engine": "postgres", "dsn": "postgres://u:p@db/app", "table": "public.orders", "cursor_column": "id", "incremental": %t},
+			"target": {"s3_endpoint": "http://minio:9000", "s3_bucket": "b", "s3_access_key_id": "k", "s3_secret_access_key": "s"},
+			"iceberg": {"enabled": false}
+		}`, incremental))))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("incremental=%t: status=%d body=%s", incremental, rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			JobID string `json:"job_id"`
+		}
+		decodeJSONBody(t, rec, &resp)
+		job, err := srv.st.GetJob(context.Background(), resp.JobID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return job
+	}
+
+	var jobID string
+	for _, step := range []struct {
+		incremental bool
+		want        string
+	}{{false, "overwrite"}, {true, "append"}, {false, "overwrite"}} {
+		job := submit(step.incremental)
+		if jobID == "" {
+			jobID = job.ID
+		} else if job.ID != jobID {
+			t.Fatalf("job %s, want the same job %s reused", job.ID, jobID)
+		}
+		if job.Incremental != step.incremental || job.WriteMode != step.want {
+			t.Fatalf("incremental=%t: stored incremental=%t write_mode=%q, want %q", step.incremental, job.Incremental, job.WriteMode, step.want)
+		}
+		if err := jobopts.ValidateWriteMode(job.WriteMode, job.Incremental); err != nil {
+			t.Fatalf("incremental=%t: run start would reject the job: %v", step.incremental, err)
 		}
 	}
 }

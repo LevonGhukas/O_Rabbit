@@ -74,7 +74,7 @@ func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 		res.OutputPart = int64(t.TaskIndex)
 	}
 
-	src, ms, err := clients.SQLReader(ctx, sourceEngine, taskCredentialsFromContext(ctx).SourceDSN)
+	src, ms, err := clients.SQLReader(ctx, sourceEngine, connectors.WithFetchSize(sourceEngine, taskCredentialsFromContext(ctx).SourceDSN, ps.FetchSize))
 	res.DBConnectMS = ms
 	if err != nil {
 		return res, fmt.Errorf("open %s: %w", sourceEngine, err)
@@ -281,7 +281,13 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 		}
 	}
 
-	it, err := src.StreamDocuments(qctx, collection, filter, batchSize)
+	// fetch_size sets the source cursor batch (MongoDB); batchSize stays the
+	// conversion batch.
+	streamBatch := batchSize
+	if ps.FetchSize > 0 {
+		streamBatch = ps.FetchSize
+	}
+	it, err := src.StreamDocuments(qctx, collection, filter, streamBatch)
 	if err != nil {
 		return res, fmt.Errorf("%s stream: %w", sourceEngine, err)
 	}

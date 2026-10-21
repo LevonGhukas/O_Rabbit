@@ -183,6 +183,48 @@ func activeWorkerCountBestEffort(ctx context.Context, st *db.Store) int {
 	return len(workers)
 }
 
+// withTaskFetchSize adds the job's fetch_size to every task's partition spec,
+// where workers read it. Specs are JSON objects, so the key is merged in
+// without changing how each strategy builds its spec.
+func withTaskFetchSize(tasks []db.TaskInsert, fetchSize int) error {
+	if fetchSize <= 0 {
+		return nil
+	}
+	for i := range tasks {
+		var spec map[string]any
+		if err := json.Unmarshal(tasks[i].PartitionSpec, &spec); err != nil {
+			return fmt.Errorf("task %d partition spec: %w", tasks[i].TaskIndex, err)
+		}
+		spec["fetch_size"] = fetchSize
+		raw, err := json.Marshal(spec)
+		if err != nil {
+			return err
+		}
+		tasks[i].PartitionSpec = raw
+	}
+	return nil
+}
+
+// validateStoredJob reports problems in a stored job that would make its run
+// fail or lose data: invalid options_json and an unsafe write_mode. All
+// problems are returned together as a *jobopts.ValidationError.
+func validateStoredJob(job db.Job) error {
+	var problems []jobopts.FieldError
+	var invalid *jobopts.ValidationError
+	if err := jobopts.Validate(job.OptionsJSON, job.SourceSQL, jobopts.Lenient); errors.As(err, &invalid) {
+		problems = append(problems, invalid.Errors...)
+	} else if err != nil {
+		return err
+	}
+	if err := jobopts.ValidateWriteMode(job.WriteMode, job.Incremental); err != nil {
+		problems = append(problems, jobopts.FieldError{Field: "write_mode", Error: err.Error()})
+	}
+	if len(problems) == 0 {
+		return nil
+	}
+	return &jobopts.ValidationError{Errors: problems}
+}
+
 // CreateRunAndTasks creates a run and inserts tasks.
 //
 // MVP strategies:
@@ -195,7 +237,7 @@ func activeWorkerCountBestEffort(ctx context.Context, st *db.Store) int {
 func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.Job, registrationConfig json.RawMessage, audit *db.AuditRecord) (run db.Run, tasks []db.TaskInsert, err error) {
 	// Jobs saved before options_json was validated on write may be invalid;
 	// report that as a configuration problem the caller must fix.
-	if err := jobopts.Validate(job.OptionsJSON, job.SourceSQL, jobopts.Lenient); err != nil {
+	if err := validateStoredJob(job); err != nil {
 		return db.Run{}, nil, failure.NewFailure(failure.FailureConfigurationInvalid, false, true, err)
 	}
 	o, err := jobopts.Parse(job.OptionsJSON)
@@ -291,6 +333,9 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 		emitPlanEvent(failCtx, st, runIDForFailure, "ERROR", "planner failed", map[string]any{"error": msg})
 	}()
 	startTasks := func(tasks []db.TaskInsert) (bool, error) {
+		if err := withTaskFetchSize(tasks, o.FetchSize); err != nil {
+			return false, err
+		}
 		var admitted bool
 		var err error
 		if audit != nil {

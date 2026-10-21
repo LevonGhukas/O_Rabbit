@@ -219,14 +219,13 @@ orabbit-client run interactive --master-http http://master:9100 --master-grpc ma
 **File-based run.** `run submit` takes strict YAML or JSON (unknown fields are
 rejected); see the [quick start](#quick-start) for an example.
 
-- `target` needs `endpoint`, `region` and `bucket` (MinIO accepts
-  `us-east-1`). For AWS use the regional endpoint, for example
-  `https://s3.eu-west-1.amazonaws.com`. `force_path_style` defaults to `false`;
-  set it to `true` for MinIO.
-- `job` needs `incremental` and `auto_tune`, and SQL sources need
-  `cursor_column` (the older name `id_column` is still accepted).
-- With `auto_tune: false`, set `max_in_flight_tasks`, `fetch_limit` and
-  `planned_tasks` or `target_rows_per_task`.
+- Target metadata must include `endpoint` and `bucket`. For AWS use the
+  regional endpoint, for example `https://s3.eu-west-1.amazonaws.com`.
+  `region` defaults to `us-east-1` and `force_path_style` to `true`.
+- With `auto_tune: false`, set `max_in_flight_tasks` and `planned_tasks` or
+  `chunk_size`.
+- `fetch_limit` (optional) is stored as the job option `fetch_size`; see
+  [Write mode and fetch size](#write-mode-and-fetch-size).
 - FlightSQL needs `source.sql`, `incremental: false`, `auto_tune: false` and no
   `cursor_column` or manual planning fields.
 
@@ -249,6 +248,37 @@ orabbit-client stack stop
 
 The client finds `orabbit-master` and `orabbit-worker` next to its own binary,
 or use `--master-bin` and `--worker-bin`.
+
+### Write mode and fetch size
+
+**`write_mode`** says what a run does to the table already published for its
+dataset:
+
+| Job | `write_mode` | Each run |
+|---|---|---|
+| Full (`incremental: false`) | `overwrite` (default) | replaces the table with the new export |
+| Incremental (`incremental: true`) | `append` (default) | adds the rows after the high-water mark |
+
+An empty `write_mode` gets the default for the job's `incremental` flag. Two
+combinations are rejected when a job is saved (400) and when a stored job is
+run (422, `CONFIGURATION_INVALID`):
+
+- `incremental: true` + `overwrite`: each run reads only new rows, so it would
+  replace the table with just those rows (a run with no new rows would empty it).
+- `incremental: false` + `append`: appending full exports is not supported yet.
+
+**`fetch_size`** (job option, `options_json.fetch_size`) is how many rows the
+source driver fetches per network round-trip. Larger values mean fewer
+round-trips on large exports and a little more memory per worker; `0` keeps
+the engine default. The job value wins over the same setting in the DSN.
+
+| Engine | Applied as | Default |
+|---|---|---|
+| Oracle | DSN `PREFETCH_ROWS` | 5,000 (O_Rabbit sets it when the DSN does not; go-ora's own default is 25) |
+| Cassandra | page size (DSN `page_size`) | 5,000 |
+| ClickHouse | setting `max_block_size` | server default |
+| MongoDB | cursor batch size | 10,000 |
+| PostgreSQL, MySQL, MariaDB, SQL Server, Trino | not used: these drivers stream rows | — |
 
 ### Incremental exports and late-arriving rows
 
@@ -833,7 +863,7 @@ Deprecated options still work. When a run uses one, the planner records a
 | Job option `chunk_size` | `planned_tasks` or `target_rows_per_task` |
 | S3 sources without `format` | Set `source.format` |
 | `options_json` keys `iceberg_enabled`, `iceberg_engine`, `iceberg_table`, `iceberg_partition_keys` (never read) | `iceberg_registration` |
-| `options_json` key `fetch_limit_rows` (never read) | Remove it |
+| `options_json` key `fetch_limit_rows` (never read) | `fetch_size` |
 
 ## Troubleshooting
 
