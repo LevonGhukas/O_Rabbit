@@ -11,6 +11,8 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 	"github.com/LevonGhukas/O_Rabbit/internal/failure"
+	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
 
 func openPlannerStore(t *testing.T) (*db.Store, crypto.Key) {
