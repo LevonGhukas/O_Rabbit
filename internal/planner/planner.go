@@ -381,7 +381,7 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 		if connectors.SupportsOrderedCursor(srcEngine) {
 			part = partitionSpecSQLCursorSingle(o.Table, o.NormalizedSourceMode(), o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, o.EffectiveCursorColumn(), connectors.CursorDomainUnknown, "", false, "")
 		} else {
-			part = PartitionSpecSingleWithFileOptions(o.Table, o.NormalizedSourceMode(), o.QueryHash, o.RecordPath, o.FileFormat)
+			part = PartitionSpecSingleWithFileOptions(o.Table, o.NormalizedSourceMode(), o.QueryHash, o.RecordPath, o.FileFormat, o.ColumnTypes)
 		}
 		tasks := []db.TaskInsert{{
 			ID:            newID(),

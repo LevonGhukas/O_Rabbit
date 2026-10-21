@@ -59,11 +59,17 @@ func TestPartitionSpecSingleWithRecordPath(t *testing.T) {
 }
 
 func TestPartitionSpecSingleWithFileOptions(t *testing.T) {
-	part := string(PartitionSpecSingleWithFileOptions("file.txt", "table", "", "/airports", "json"))
+	part := string(PartitionSpecSingleWithFileOptions("file.txt", "table", "", "/airports", "json", map[string]string{"opened": "nullable<date>"}))
 	for _, expected := range []string{`"record_path":"/airports"`, `"format":"json"`} {
 		if !strings.Contains(part, expected) {
 			t.Fatalf("partition spec=%s missing %s", part, expected)
 		}
+	}
+	var spec struct {
+		ColumnTypes map[string]string `json:"column_types"`
+	}
+	if err := json.Unmarshal([]byte(part), &spec); err != nil || spec.ColumnTypes["opened"] != "nullable<date>" {
+		t.Fatalf("partition spec=%s err=%v, want column_types carried to the worker", part, err)
 	}
 }
 
