@@ -157,6 +157,10 @@ func (s *Server) finalizeRunCommit(ctx context.Context, runID string) error {
 		return err
 	}
 	if err := s.completeRunCommitFn(ctx, runID); err != nil {
+		// Another pass may already have completed the run.
+		if run, getErr := s.st.GetRun(ctx, runID); getErr == nil && run.Status == "SUCCEEDED" {
+			return nil
+		}
 		fields, _ := json.Marshal(map[string]any{
 			"event_type": "RUN_COMPLETION_PENDING_RECOVERY",
 			"error":      err.Error(),
