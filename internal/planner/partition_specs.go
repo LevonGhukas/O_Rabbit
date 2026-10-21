@@ -10,12 +10,13 @@ import (
 // PartitionSpecSingleWithRecordPath constructs a single-task partition
 // specification with optional JSON record selection metadata.
 func PartitionSpecSingleWithRecordPath(table, sourceMode, queryHash, recordPath string) json.RawMessage {
-	return PartitionSpecSingleWithFileOptions(table, sourceMode, queryHash, recordPath, "")
+	return PartitionSpecSingleWithFileOptions(table, sourceMode, queryHash, recordPath, "", nil)
 }
 
 // PartitionSpecSingleWithFileOptions constructs a single-task partition
-// specification with optional file-source metadata.
-func PartitionSpecSingleWithFileOptions(table, sourceMode, queryHash, recordPath, fileFormat string) json.RawMessage {
+// specification with optional file-source metadata. columnTypes are the
+// resolved types of every file column (see resolveFileColumnTypes).
+func PartitionSpecSingleWithFileOptions(table, sourceMode, queryHash, recordPath, fileFormat string, columnTypes map[string]string) json.RawMessage {
 	part := map[string]any{
 		"type":        "single",
 		"source_mode": sourceMode,
@@ -29,6 +30,9 @@ func PartitionSpecSingleWithFileOptions(table, sourceMode, queryHash, recordPath
 	}
 	if strings.TrimSpace(fileFormat) != "" {
 		part["format"] = strings.TrimSpace(fileFormat)
+	}
+	if len(columnTypes) > 0 {
+		part["column_types"] = columnTypes
 	}
 	b, _ := json.Marshal(part)
 	return json.RawMessage(b)

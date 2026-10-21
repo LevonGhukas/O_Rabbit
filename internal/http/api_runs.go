@@ -452,6 +452,9 @@ func validationTypeMappings(ctx context.Context, spec validatedRunSubmitSpec) ([
 			return nil, nil, fmt.Errorf("open document source: %w", err)
 		}
 		defer reader.Close()
+		if connectors.NormalizeSourceEngine(spec.SourceEngine) == "s3" {
+			return fileValidationTypeMappings(ctx, reader, spec)
+		}
 		inference, err := arrowio.InferMongoSchemaFromReader(ctx, reader, spec.SourceTable, nil)
 		if err != nil {
 			return nil, nil, fmt.Errorf("infer document schema: %w", err)
@@ -485,6 +488,38 @@ func validationTypeMappings(ctx context.Context, spec validatedRunSubmitSpec) ([
 	}
 	out, warnings = validationTypeMappingsFromDescription(spec, cols, types)
 	return out, warnings, nil
+}
+
+// fileValidationRowLimit bounds the rows a validation preview reads from a
+// file; the run itself checks the whole file while planning.
+const fileValidationRowLimit = 1000
+
+func fileValidationTypeMappings(ctx context.Context, reader connectors.DocumentReader, spec validatedRunSubmitSpec) ([]map[string]any, []typesystem.TypeWarning, error) {
+	filter := map[string]any{}
+	if spec.RecordPath != "" {
+		filter["record_path"] = spec.RecordPath
+	}
+	if spec.FileFormat != "" {
+		filter["format"] = spec.FileFormat
+	}
+	result, err := arrowio.InferFileTypesFromReader(ctx, reader, spec.SourceTable, filter, spec.ColumnTypes, fileValidationRowLimit)
+	if err != nil {
+		return nil, nil, fmt.Errorf("check file column types: %w", err)
+	}
+	fs, err := arrowio.NewFileSchema(nil, result.Types())
+	if err != nil {
+		return nil, nil, fmt.Errorf("check file column types: %w", err)
+	}
+	mappings := map[string]typesystem.MappingResult{}
+	for _, f := range fs.Fields {
+		mappings[f.Name] = f.Mapping
+	}
+	out := []map[string]any{}
+	for _, c := range result.Columns {
+		m := mappings[c.Name]
+		out = append(out, map[string]any{"column": c.Name, "logical_type": c.Type.String(), "storage_type": m.Destination, "class": m.Class, "fallback": m.Fallback, "reason": m.Reason})
+	}
+	return out, result.Warnings, nil
 }
 
 func validationTypeMappingsFromDescription(spec validatedRunSubmitSpec, cols []string, types []*sql.ColumnType) ([]map[string]any, []typesystem.TypeWarning) {
