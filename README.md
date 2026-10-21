@@ -110,8 +110,10 @@ source:
 target:
   name: local-minio
   endpoint: http://minio:9000
+  region: us-east-1
   bucket: bucket1
   prefix: exports
+  force_path_style: true
   access_key_id: minioadmin
   secret_access_key: minioadmin
 
@@ -120,8 +122,9 @@ job:
   target_namespace: demo
   target_table: people
   write_mode: overwrite
+  incremental: false
   table: public.people
-  id_column: id
+  cursor_column: id
   auto_tune: true
 ```
 
@@ -224,7 +227,7 @@ rejected); see the [quick start](#quick-start) for an example.
 - `fetch_limit` (optional) is stored as the job option `fetch_size`; see
   [Write mode and fetch size](#write-mode-and-fetch-size).
 - FlightSQL needs `source.sql`, `incremental: false`, `auto_tune: false` and no
-  `id_column` or manual planning fields.
+  `cursor_column` or manual planning fields.
 
 **Run lifecycle.**
 

@@ -40,6 +40,19 @@ type OrderedDocumentIterator interface {
 	FieldOrder() []string
 }
 
+// TextDocumentIterator is implemented by file iterators whose values are
+// untyped text cells (CSV, XML, Excel) rather than typed values.
+type TextDocumentIterator interface {
+	DocumentIterator
+	TextCells() bool
+}
+
+// IsTextDocumentIterator reports whether it yields untyped text cells.
+func IsTextDocumentIterator(it DocumentIterator) bool {
+	text, ok := it.(TextDocumentIterator)
+	return ok && text.TextCells()
+}
+
 type DocumentReader interface {
 	Close() error
 	DescribeCollection(ctx context.Context, collection string) ([]DocumentField, error)
