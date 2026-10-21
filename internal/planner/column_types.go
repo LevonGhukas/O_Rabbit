@@ -3,6 +3,8 @@ package planner
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -23,6 +25,13 @@ import (
 // warning. Columns without overrides keep source inference, plus catalog-proven
 // NOT NULL for drivers that cannot report nullability themselves.
 func resolveEffectiveColumnTypes(ctx context.Context, st *db.Store, k crypto.Key, job db.Job, srcEngine string, o jobopts.Options, runID string) (map[string]string, []typesystem.TypeWarning, error) {
+	if connectors.NormalizeSourceEngine(srcEngine) == "s3" {
+		if o.NormalizedPartitionStrategy() != "single" {
+			// Files are only planned as one task; planning rejects the rest.
+			return o.ColumnTypes, nil, nil
+		}
+		return fileColumnTypeResolver(ctx, st, k, job, srcEngine, o, runID)
+	}
 	if connectors.SupportsDocumentReader(srcEngine) || !connectors.SupportsOrderedCursor(srcEngine) {
 		return o.ColumnTypes, nil, nil
 	}
@@ -122,4 +131,35 @@ func resultHasColumn(cols []string, name string) bool {
 		}
 	}
 	return false
+}
+
+// fileColumnTypeResolver is resolveFileColumnTypes; tests replace it so file
+// jobs can be planned without an S3 source.
+var fileColumnTypeResolver = resolveFileColumnTypes
+
+// resolveFileColumnTypes reads the whole file once and resolves every
+// column's type: detected from the values, or the user's override where the
+// values fit it. Files have no source schema to describe, so this full pass is
+// what lets overrides be verified and fall back with a warning, exactly like
+// the probes above do for SQL sources. A file that cannot be read fails
+// planning, because the extraction would fail the same way.
+func resolveFileColumnTypes(ctx context.Context, st *db.Store, k crypto.Key, job db.Job, srcEngine string, o jobopts.Options, runID string) (map[string]string, []typesystem.TypeWarning, error) {
+	reader, err := openDocumentReader(ctx, st, k, job.SourceConnectionID, srcEngine)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer reader.Close()
+	emitPlanEvent(ctx, st, runID, "INFO", "checking file column types", map[string]any{"overrides": len(o.ColumnTypes)})
+	filter := map[string]any{}
+	if recordPath := strings.TrimSpace(o.RecordPath); recordPath != "" {
+		filter["record_path"] = recordPath
+	}
+	if format := strings.TrimSpace(o.FileFormat); format != "" {
+		filter["format"] = format
+	}
+	result, err := arrowio.InferFileTypesFromReader(ctx, reader, o.Table, filter, o.ColumnTypes, 0)
+	if err != nil {
+		return nil, nil, fmt.Errorf("check file column types: %w", err)
+	}
+	return result.Types(), result.Warnings, nil
 }
