@@ -223,6 +223,10 @@ func run() int {
 				break
 			}
 		}
+	})
+	// Lease expiry runs on its own loop so a slow registration or reconciliation
+	// cannot delay recovery of other expired attempts.
+	go runPeriodic(leaderCtx, log, "catalog lease expiration", 2*time.Second, func() {
 		if _, err := st.ExpireRegistrationAttempts(leaderCtx, time.Now(), registrationPolicy); err != nil && leaderCtx.Err() == nil {
 			log.Warn("registration lease expiration scan failed", slog.String("err", err.Error()))
 		}
