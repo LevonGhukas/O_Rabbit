@@ -61,6 +61,15 @@ func inferRunIcebergSchema(ctx context.Context, req RunRequest, tableName string
 			fieldOrder = ordered.FieldOrder()
 		}
 
+		// File runs carry the types the planner resolved over the whole file
+		// (also used by the workers), so the table matches the written data.
+		if fileSchema, ok, err := resolvedFileSchema(req.SourceEngine, fieldOrder, req.ColumnTypes); ok || err != nil {
+			if err != nil {
+				return nil, fmt.Errorf("file schema for iceberg auto-create: %w", err)
+			}
+			return icetable.ArrowSchemaToIcebergWithFreshIDs(fileSchema.Schema, false)
+		}
+
 		var docBuf []map[string]any
 		for it.Next(ctx) {
 			doc, err := it.Decode()
@@ -122,6 +131,9 @@ func InferDurableIcebergSchemaWithWarnings(ctx context.Context, engine, dsn, mod
 			return nil, nil, fmt.Errorf("open document source for durable schema: %w", err)
 		}
 		defer reader.Close()
+		if connectors.NormalizeSourceEngine(engine) == "s3" && len(columnTypes) > 0 {
+			return durableFileSchema(ctx, reader, table, documentFilter(engine, recordPath, fileFormat), columnTypes)
+		}
 		inference, err := arrowio.InferMongoSchemaFromReader(ctx, reader, table, documentFilter(engine, recordPath, fileFormat))
 		if err != nil {
 			return nil, nil, fmt.Errorf("infer document durable schema: %w", err)
@@ -220,4 +232,41 @@ func describeSourceSchemaForAutoCreate(ctx context.Context, reader connectors.Ta
 		}
 	}
 	return cols, colTypes, nil
+}
+
+// resolvedFileSchema builds a file source's schema from the column types the
+// planner resolved. ok is false for other sources and for runs planned
+// without resolved types.
+func resolvedFileSchema(engine string, fieldOrder []string, columnTypes map[string]string) (*arrowio.FileSchema, bool, error) {
+	if connectors.NormalizeSourceEngine(engine) != "s3" || len(columnTypes) == 0 {
+		return nil, false, nil
+	}
+	fs, err := arrowio.NewFileSchema(fieldOrder, columnTypes)
+	return fs, true, err
+}
+
+// durableFileSchema snapshots a file run's schema from its resolved column
+// types. The planner already recorded the type warnings for these types.
+func durableFileSchema(ctx context.Context, reader connectors.DocumentReader, table string, filter map[string]any, columnTypes map[string]string) (json.RawMessage, []typesystem.TypeWarning, error) {
+	it, err := reader.StreamDocuments(ctx, table, filter, 1)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open file for durable schema: %w", err)
+	}
+	var fieldOrder []string
+	if ordered, ok := it.(connectors.OrderedDocumentIterator); ok {
+		fieldOrder = ordered.FieldOrder()
+	}
+	if err := it.Close(); err != nil {
+		return nil, nil, fmt.Errorf("close file for durable schema: %w", err)
+	}
+	fs, _, err := resolvedFileSchema("s3", fieldOrder, columnTypes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("file durable schema: %w", err)
+	}
+	iceSchema, err := icetable.ArrowSchemaToIcebergWithFreshIDs(fs.Schema, false)
+	if err != nil {
+		return nil, nil, fmt.Errorf("arrow->iceberg durable schema: %w", err)
+	}
+	schema, err := json.Marshal(iceSchema)
+	return schema, nil, err
 }

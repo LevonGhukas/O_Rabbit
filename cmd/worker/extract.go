@@ -297,6 +297,17 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 		fieldOrder = ordered.FieldOrder()
 	}
 
+	// File sources carry the column types the planner resolved over the whole
+	// file; build the schema from them instead of guessing from the first batch.
+	var fileSchema *arrowio.FileSchema
+	if sourceEngine == "s3" && len(ps.ColumnTypes) > 0 {
+		fileSchema, err = arrowio.NewFileSchema(fieldOrder, ps.ColumnTypes)
+		if err != nil {
+			return res, fmt.Errorf("file schema: %w", err)
+		}
+		schema, schemaInferred = fileSchema.Schema, true
+	}
+
 	var (
 		docBuf []map[string]any
 		alloc  = memory.NewGoAllocator()
@@ -318,7 +329,7 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 		}
 
 		if schemaInferred && len(docBuf) >= batchSize {
-			if err := writeMongoDocBatch(alloc, pw, schema, docBuf); err != nil {
+			if err := writeMongoDocBatch(alloc, pw, schema, fileSchema, docBuf); err != nil {
 				return res, err
 			}
 			rowsRead += int64(len(docBuf))
@@ -353,7 +364,7 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 				return res, fmt.Errorf("infer schema: %w", err)
 			}
 		}
-		if err := writeMongoDocBatch(alloc, pw, schema, docBuf); err != nil {
+		if err := writeMongoDocBatch(alloc, pw, schema, fileSchema, docBuf); err != nil {
 			return res, err
 		}
 		rowsRead += int64(len(docBuf))
@@ -376,8 +387,18 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 	return res, nil
 }
 
-func writeMongoDocBatch(alloc memory.Allocator, pw *parquetRollingWriter, schema *arrow.Schema, docs []map[string]any) error {
-	rec, err := arrowio.MongoDocsToRecord(alloc, schema, docs)
+// writeMongoDocBatch converts one batch of documents and writes it. fileSchema
+// is set for file sources whose column types were resolved by the planner.
+func writeMongoDocBatch(alloc memory.Allocator, pw *parquetRollingWriter, schema *arrow.Schema, fileSchema *arrowio.FileSchema, docs []map[string]any) error {
+	var (
+		rec arrow.RecordBatch
+		err error
+	)
+	if fileSchema != nil {
+		rec, err = arrowio.FileDocsToRecord(alloc, fileSchema, docs)
+	} else {
+		rec, err = arrowio.MongoDocsToRecord(alloc, schema, docs)
+	}
 	if err != nil {
 		return fmt.Errorf("convert batch to arrow: %w", err)
 	}

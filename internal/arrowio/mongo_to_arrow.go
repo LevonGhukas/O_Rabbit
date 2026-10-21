@@ -2,6 +2,7 @@ package arrowio
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"reflect"
@@ -185,6 +186,11 @@ func inferMongoField(values []any, missing bool) (typesystem.LogicalType, *Mongo
 
 func mongoCandidate(v any) (typesystem.LogicalType, string) {
 	switch x := v.(type) {
+	case json.Number: // S3 JSON files decode numbers exactly
+		if _, err := x.Int64(); err == nil {
+			return mongoKind(typesystem.KindInt64), ""
+		}
+		return mongoKind(typesystem.KindFloat64), ""
 	case string:
 		return mongoKind(typesystem.KindString), ""
 	case int, int32, int64:
@@ -407,6 +413,11 @@ func mongoNormalize(v any, t typesystem.LogicalType) (any, error) {
 		return out, nil
 	}
 	switch x := v.(type) {
+	case json.Number:
+		if n, err := x.Int64(); err == nil {
+			return n, nil
+		}
+		return x.Float64()
 	case primitive.DateTime:
 		return x.Time(), nil
 	case primitive.Binary:
@@ -422,6 +433,8 @@ func mongoNormalize(v any, t typesystem.LogicalType) (any, error) {
 }
 func mongoLosslessString(v any) (string, error) {
 	switch x := v.(type) {
+	case json.Number:
+		return x.String(), nil
 	case primitive.ObjectID:
 		return x.Hex(), nil
 	case primitive.Decimal128:
