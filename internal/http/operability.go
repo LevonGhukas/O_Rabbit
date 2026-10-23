@@ -143,6 +143,12 @@ func renderLifecycleMetrics(m db.LifecycleMetrics) string {
 	writeMetricMap(&b, "orabbit_registration_attempts", "phase", m.RegistrationAttemptsByPhase, []string{"PREPARED", "EXTERNAL_COMMIT_STARTED", "CATALOG_COMMITTED", "ICE_STATE_WRITING", "VERIFIED"})
 	writeMetricMap(&b, "orabbit_reconciliations", "status", m.ReconciliationsByStatus, []string{"NONE", "PENDING", "INSPECTING", "RETRY_REQUIRED", "SUCCEEDED", "FAILED", "CANCELED"})
 	writeMetricMap(&b, "orabbit_reconciliations_by_classification", "classification", m.ReconciliationsByClassification, []string{"NONE", "CATALOG_OBSERVATION_UNAVAILABLE", "CATALOG_HISTORY_INCOMPLETE", "RECONCILIATION_CANCELED", "RETRY_LIMIT_EXHAUSTED", "OTHER"})
+	for _, status := range []string{"BLOCKED", "PENDING", "RECONCILING", "REGISTERING", "RETRY_REQUIRED"} {
+		writeLabeledMetric(&b, "orabbit_oldest_registration_age_seconds", "status", status, m.OldestRegistrationAgeSeconds[status])
+	}
+	writeScalarMetric(&b, "orabbit_oldest_registration_attempt_age_seconds", m.OldestRegistrationAttemptAgeSeconds)
+	writeScalarMetric(&b, "orabbit_registration_attempt_leases_expired", float64(m.ExpiredRegistrationAttemptLeases))
+	writeScalarMetric(&b, "orabbit_runs_operator_action_required", float64(m.RunsOperatorActionRequired))
 	writeScalarMetric(&b, "orabbit_registrations_blocked", float64(m.RegistrationBlocked))
 	writeScalarMetric(&b, "orabbit_registrations_retry_required", float64(m.RegistrationRetryRequired))
 	writeLabeledMetric(&b, "orabbit_commit_reconciliation_runs", "outcome", "complete", float64(m.RunsByCommitPhase["COMPLETE"]))
@@ -158,7 +164,13 @@ func writeMetricMap(b *strings.Builder, name, labelName string, values map[strin
 	for _, label := range allowed {
 		allowedSet[label] = struct{}{}
 	}
-	bounded := map[string]int{}
+	// Every allowed label is written, with 0 when absent, so each series
+	// exists from the start: a status that appears for the first time is a
+	// change from 0 that delta() and alerts can see, not a new series.
+	bounded := make(map[string]int, len(allowed))
+	for _, label := range allowed {
+		bounded[label] = 0
+	}
 	for label, value := range values {
 		if _, ok := allowedSet[label]; !ok {
 			if _, supportsOther := allowedSet["OTHER"]; !supportsOther {
