@@ -40,12 +40,24 @@ func cliRootCommand() *cliCommand {
 		},
 	}
 
+	maintenance := &cliCommand{
+		Name:       "maintenance",
+		Run:        cmdMaintenance,
+		RenderHelp: renderMaintenanceGroupHelp,
+		Children: []*cliCommand{
+			{Name: "submit", Run: cmdMaintenanceSubmit},
+			{Name: "show", Run: cmdMaintenanceShow},
+			{Name: "list", Run: cmdMaintenanceList},
+		},
+	}
+
 	return &cliCommand{
 		Name:       CLIName,
 		RenderHelp: usage,
 		Children: []*cliCommand{
 			stack,
 			run,
+			maintenance,
 			{Name: "help", Run: cmdHelp},
 		},
 	}
