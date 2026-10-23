@@ -56,6 +56,10 @@ type partitionSpec struct {
 
 	// FetchSize is rows per source round-trip; 0 keeps the engine default.
 	FetchSize int `json:"fetch_size,omitempty"`
+
+	// Compaction tasks (type iceberg_compact) rewrite these table files.
+	Inputs          []compactionInput `json:"inputs,omitempty"`
+	TargetFileBytes int64             `json:"target_file_bytes,omitempty"`
 }
 
 func main() {

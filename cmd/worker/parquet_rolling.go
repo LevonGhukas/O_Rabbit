@@ -26,6 +26,8 @@ type parquetOutputFile struct {
 type parquetRollingWriter struct {
 	ctx             context.Context
 	targetFileBytes int64
+	// footer is written to every file's key-value metadata.
+	footer map[string]string
 
 	current             *parquetio.Writer
 	currentPath         string
@@ -167,6 +169,13 @@ func (w *parquetRollingWriter) ensureOpen(schema *arrow.Schema) error {
 	pw, path, err := parquetio.NewTempFileWriterInDir(schema, parquetio.Options{Compression: compress.Codecs.Snappy}, workspaceDirFromContext(w.ctx))
 	if err != nil {
 		return err
+	}
+	for key, value := range w.footer {
+		if err := pw.AppendKeyValueMetadata(key, value); err != nil {
+			_ = pw.Close()
+			_ = os.Remove(path)
+			return err
+		}
 	}
 	w.current = pw
 	w.currentPath = path

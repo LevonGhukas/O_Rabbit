@@ -17,6 +17,24 @@ import (
 )
 
 func openRESTCatalog(ctx context.Context, req RunRequest, reg RunConfig, regS3 s3io.Config, table string) (*restcatalog.Catalog, icetable.Identifier, error) {
+	cat, ident, err := newRESTCatalog(ctx, req.DatasetS3.Bucket, reg, regS3, table)
+	if err != nil {
+		return nil, nil, err
+	}
+	ns := ident[:len(ident)-1]
+	if exists, err := cat.CheckNamespaceExists(ctx, ns); err != nil {
+		return nil, nil, err
+	} else if !exists {
+		if err := cat.CreateNamespace(ctx, ns, iceberg.Properties{}); err != nil {
+			return nil, nil, err
+		}
+	}
+	return cat, ident, nil
+}
+
+// newRESTCatalog connects to the registration's REST catalog without changing
+// it, and parses table into an identifier.
+func newRESTCatalog(ctx context.Context, bucket string, reg RunConfig, regS3 s3io.Config, table string) (*restcatalog.Catalog, icetable.Identifier, error) {
 	uri := normalizeLocalhost(reg.URI)
 	if uri == "" {
 		return nil, nil, fmt.Errorf("missing iceberg rest uri in persisted run registration config")
@@ -27,7 +45,7 @@ func openRESTCatalog(ctx context.Context, req RunRequest, reg RunConfig, regS3 s
 	}
 	cat, err := restcatalog.NewCatalog(ctx, "rest", uri,
 		restcatalog.WithOAuthToken(strings.TrimSpace(reg.BearerToken)),
-		restcatalog.WithWarehouseLocation("s3://"+req.DatasetS3.Bucket),
+		restcatalog.WithWarehouseLocation("s3://"+bucket),
 		restcatalog.WithAdditionalProps(icebergRegistrationS3Props(regS3, reg.CredentialVending.Required)),
 	)
 	if err != nil {
@@ -40,16 +58,7 @@ func openRESTCatalog(ctx context.Context, req RunRequest, reg RunConfig, regS3 s
 	if len(parts) < 2 {
 		return nil, nil, fmt.Errorf("invalid iceberg table %q (expected namespace.table)", table)
 	}
-	ident := icetable.Identifier(parts)
-	ns := ident[:len(ident)-1]
-	if exists, err := cat.CheckNamespaceExists(ctx, ns); err != nil {
-		return nil, nil, err
-	} else if !exists {
-		if err := cat.CreateNamespace(ctx, ns, iceberg.Properties{}); err != nil {
-			return nil, nil, err
-		}
-	}
-	return cat, ident, nil
+	return cat, icetable.Identifier(parts), nil
 }
 
 func normalizeLocalhost(raw string) string {
@@ -155,68 +164,40 @@ func runRESTGoRegister(ctx context.Context, log *slog.Logger, req RunRequest, re
 	}
 	identity := OperationIdentity{RegistrationID: req.RegistrationID, RunID: req.RunID, CommitID: req.CommitID, ArtifactSetDigest: req.ArtifactSetDigest, ManifestKey: req.ManifestKey}
 	snapshotProperties := iceberg.Properties(identity.Properties())
-	if reg.Upsert.Enabled && !isFullRefresh && tbl.CurrentSnapshot() != nil {
-		filter, err := buildUpsertDeleteFilter(ctx, tbl, newFiles, reg.Upsert.Keys)
-		if err != nil {
-			return err
-		}
-		if !filter.Equals(iceberg.AlwaysFalse{}) {
-			if err := tx.Delete(ctx, filter, snapshotProperties); err != nil {
-				return fmt.Errorf("iceberg upsert delete existing rows: %w", err)
-			}
-		}
+	if err := applyUpsertDelete(ctx, tx, tbl, reg, isFullRefresh, newFiles, snapshotProperties); err != nil {
+		return err
 	}
-	var existingFiles []string
+	var existing []iceberg.DataFile
 	if isFullRefresh {
-		// Collect all existing data files from the current snapshot so we can
-		// atomically replace them with the new files (true snapshot overwrite).
-		if snap := tbl.CurrentSnapshot(); snap != nil {
-			fs, fsErr := tbl.FS(ctx)
-			if fsErr != nil {
-				return fmt.Errorf("iceberg full refresh: open table fs: %w", fsErr)
-			}
-			manifests, mErr := snap.Manifests(fs)
-			if mErr != nil {
-				return fmt.Errorf("iceberg full refresh: list manifests: %w", mErr)
-			}
-			for _, mf := range manifests {
-				entries, eErr := mf.FetchEntries(fs, true)
-				if eErr != nil {
-					return fmt.Errorf("iceberg full refresh: fetch manifest entries: %w", eErr)
-				}
-				for _, e := range entries {
-					existingFiles = append(existingFiles, e.DataFile().FilePath())
-				}
-			}
+		// A full refresh atomically replaces every live data file with the new
+		// files in one snapshot (true snapshot overwrite).
+		existing, err = currentDataFiles(ctx, tbl)
+		if err != nil {
+			return fmt.Errorf("iceberg full refresh: %w", err)
 		}
 
 		log.Info("iceberg registration full refresh",
 			slog.String("run_id", req.RunID),
 			slog.String("table", table),
-			slog.Int("files_to_delete", len(existingFiles)),
+			slog.Int("files_to_delete", len(existing)),
 			slog.Int("files_to_add", len(newFiles)),
 		)
 	}
 	partitionedTable := !currentSpec.IsUnpartitioned() || len(reg.PartitionSpec) > 0
 	if partitionedTable {
-		fs, err := tbl.FS(ctx)
-		if err != nil {
+		// Workers wrote one partition tuple per file, so the verified files are
+		// registered as they are; the master never reads or rewrites their rows.
+		if err := registerPartitionedFiles(ctx, tx, reg, table, existing, isFullRefresh, newFiles, snapshotProperties); err != nil {
 			return err
 		}
-		reader, err := newParquetRecordReader(ctx, fs, newFiles)
-		if err != nil {
+	} else {
+		existingFiles := make([]string, len(existing))
+		for i, df := range existing {
+			existingFiles[i] = df.FilePath()
+		}
+		if err := applyRESTGoFileMutation(ctx, tx, isFullRefresh, existingFiles, newFiles, snapshotProperties); err != nil {
 			return err
 		}
-		defer reader.Release()
-		if isFullRefresh {
-			if err := tx.Overwrite(ctx, reader, snapshotProperties); err != nil {
-				return fmt.Errorf("iceberg partitioned full refresh: %w", err)
-			}
-		} else if err := tx.Append(ctx, reader, snapshotProperties); err != nil {
-			return fmt.Errorf("iceberg partitioned append: %w", err)
-		}
-	} else if err := applyRESTGoFileMutation(ctx, tx, isFullRefresh, existingFiles, newFiles, snapshotProperties); err != nil {
-		return err
 	}
 	_, err = tx.Commit(ctx)
 	return err

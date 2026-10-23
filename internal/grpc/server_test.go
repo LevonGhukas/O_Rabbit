@@ -38,10 +38,12 @@ func TestBuildParquetObjectPayloadsIncludesOptionalFields(t *testing.T) {
 func TestWorkerProtocolCompatibilityFailsClosed(t *testing.T) {
 	st := openGRPCTestStore(t)
 	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, nil)
-	for _, version := range []int32{0, 5, 6, 8} {
+	// Version 8 workers cannot run compaction tasks, so they must not
+	// receive tasks from a version 9 master.
+	for _, version := range []int32{0, 5, 6, 7, 8, 10} {
 		_, err := srv.RequestTask(context.Background(), &grpcpb.RequestTaskRequest{WorkerId: "legacy", ProtocolVersion: version})
 		if status.Code(err) != codes.FailedPrecondition ||
-			!strings.Contains(err.Error(), "accepted version=7") ||
+			!strings.Contains(err.Error(), "accepted version=9") ||
 			!strings.Contains(err.Error(), "exact match required") {
 			t.Fatalf("version=%d error=%v", version, err)
 		}

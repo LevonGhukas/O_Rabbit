@@ -104,8 +104,11 @@ func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 	res.QueryMS = time.Since(queryStart).Milliseconds()
 
 	alloc := memory.NewGoAllocator()
+	pw, err := newTaskParquetWriter(ctx, t)
+	if err != nil {
+		return res, err
+	}
 	var (
-		pw       = newParquetRollingWriterWithContext(ctx, t.TargetFileBytes)
 		rowsRead int64
 		lastProg time.Time
 	)
@@ -167,7 +170,10 @@ func extractFlightSQLTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 	qctx, cancel := withSourceQueryTimeout(ctx)
 	defer cancel()
 
-	pw := newParquetRollingWriterWithContext(ctx, t.TargetFileBytes)
+	pw, err := newTaskParquetWriter(ctx, t)
+	if err != nil {
+		return res, err
+	}
 	var (
 		rowsRead int64
 		lastProg time.Time
@@ -238,13 +244,15 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 
 	const batchSize = 10000
 	var (
-		pw             *parquetRollingWriter
 		schema         *arrow.Schema
 		rowsRead       int64
 		lastProg       time.Time
 		schemaInferred bool
 	)
-	pw = newParquetRollingWriterWithContext(ctx, t.TargetFileBytes)
+	pw, err := newTaskParquetWriter(ctx, t)
+	if err != nil {
+		return res, err
+	}
 
 	convertStart := time.Now()
 
@@ -389,7 +397,7 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 
 // writeMongoDocBatch converts one batch of documents and writes it. fileSchema
 // is set for file sources whose column types were resolved by the planner.
-func writeMongoDocBatch(alloc memory.Allocator, pw *parquetRollingWriter, schema *arrow.Schema, fileSchema *arrowio.FileSchema, docs []map[string]any) error {
+func writeMongoDocBatch(alloc memory.Allocator, pw parquetOutputWriter, schema *arrow.Schema, fileSchema *arrowio.FileSchema, docs []map[string]any) error {
 	var (
 		rec arrow.RecordBatch
 		err error
