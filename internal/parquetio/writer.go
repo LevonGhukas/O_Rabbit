@@ -65,6 +65,15 @@ func (w *Writer) Write(rec arrow.RecordBatch) error {
 	return w.pw.Write(rec)
 }
 
+// AppendKeyValueMetadata adds a key-value pair to the file footer. It must be
+// called before Close.
+func (w *Writer) AppendKeyValueMetadata(key, value string) error {
+	if w == nil || w.pw == nil {
+		return fmt.Errorf("parquet writer is nil")
+	}
+	return w.pw.AppendKeyValueMetadata(key, value)
+}
+
 func (w *Writer) Schema() *arrow.Schema {
 	if w == nil {
 		return nil

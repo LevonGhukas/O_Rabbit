@@ -102,8 +102,9 @@ type canceledObjectCleaner interface {
 
 // WorkerProtocolVersion is the worker/master protocol revision. Version 6
 // moved task secrets from TaskAssignment to GetTaskCredentials; version 7
-// moved multipart lifecycle reports to ReportMultipartLifecycle.
-const WorkerProtocolVersion = 7
+// moved multipart lifecycle reports to ReportMultipartLifecycle; version 8
+// sends the Iceberg partition spec so workers write one partition per file.
+const WorkerProtocolVersion = 8
 
 const workerProtocolVersion = WorkerProtocolVersion
 

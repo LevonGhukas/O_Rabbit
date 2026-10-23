@@ -665,8 +665,9 @@ type RequestTaskRequest struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	WorkerId         string                 `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
 	CapabilitiesJson string                 `protobuf:"bytes,2,opt,name=capabilities_json,json=capabilitiesJson,proto3" json:"capabilities_json,omitempty"`
-	// Current value is 6. The master accepts an exact match only. Version 6
-	// moved task secrets from TaskAssignment to GetTaskCredentials.
+	// Current value is 8. The master accepts an exact match only. Version 6
+	// moved task secrets from TaskAssignment to GetTaskCredentials; version 8
+	// added the partition contract (iceberg_partition_spec_json).
 	ProtocolVersion int32  `protobuf:"varint,3,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	BootId          string `protobuf:"bytes,4,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
 	unknownFields   protoimpl.UnknownFields
@@ -800,8 +801,14 @@ type TaskAssignment struct {
 	// Output controls
 	TargetFileBytes int64    `protobuf:"varint,40,opt,name=target_file_bytes,json=targetFileBytes,proto3" json:"target_file_bytes,omitempty"`
 	PartitionKeys   []string `protobuf:"bytes,43,rep,name=partition_keys,json=partitionKeys,proto3" json:"partition_keys,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// The effective Iceberg partition spec of a rest-go registration target, as
+	// the JSON array of the registration option partition_spec. Empty when the
+	// target table is not partitioned. Workers split rows with these transforms
+	// and write one partition tuple per file, so the master can register the
+	// files without rewriting them.
+	IcebergPartitionSpecJson string `protobuf:"bytes,44,opt,name=iceberg_partition_spec_json,json=icebergPartitionSpecJson,proto3" json:"iceberg_partition_spec_json,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *TaskAssignment) Reset() {
@@ -965,6 +972,13 @@ func (x *TaskAssignment) GetPartitionKeys() []string {
 		return x.PartitionKeys
 	}
 	return nil
+}
+
+func (x *TaskAssignment) GetIcebergPartitionSpecJson() string {
+	if x != nil {
+		return x.IcebergPartitionSpecJson
+	}
+	return ""
 }
 
 type ReportTaskProgressRequest struct {
@@ -2154,7 +2168,7 @@ const file_proto_controlplane_proto_rawDesc = "" +
 	"\x10protocol_version\x18\x03 \x01(\x05R\x0fprotocolVersion\x12\x17\n" +
 	"\aboot_id\x18\x04 \x01(\tR\x06bootId\"E\n" +
 	"\x13RequestTaskResponse\x12.\n" +
-	"\x04task\x18\x01 \x01(\v2\x1a.orabbit.v1.TaskAssignmentR\x04task\"\xba\x06\n" +
+	"\x04task\x18\x01 \x01(\v2\x1a.orabbit.v1.TaskAssignmentR\x04task\"\xf9\x06\n" +
 	"\x0eTaskAssignment\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x15\n" +
@@ -2179,7 +2193,8 @@ const file_proto_controlplane_proto_rawDesc = "" +
 	"\ts3_prefix\x18! \x01(\tR\bs3Prefix\x12-\n" +
 	"\x13s3_force_path_style\x18\" \x01(\bR\x10s3ForcePathStyle\x12*\n" +
 	"\x11target_file_bytes\x18( \x01(\x03R\x0ftargetFileBytes\x12%\n" +
-	"\x0epartition_keys\x18+ \x03(\tR\rpartitionKeysJ\x04\b\x15\x10\x16J\x04\b#\x10$J\x04\b$\x10%J\x04\b%\x10&J\x04\b)\x10*J\x04\b*\x10+R\n" +
+	"\x0epartition_keys\x18+ \x03(\tR\rpartitionKeys\x12=\n" +
+	"\x1biceberg_partition_spec_json\x18, \x01(\tR\x18icebergPartitionSpecJsonJ\x04\b\x15\x10\x16J\x04\b#\x10$J\x04\b$\x10%J\x04\b%\x10&J\x04\b)\x10*J\x04\b*\x10+R\n" +
 	"source_dsnR\x10s3_access_key_idR\x14s3_secret_access_keyR\x10s3_session_tokenR\x11max_rows_per_fileR\x10fetch_limit_rows\"\x90\x03\n" +
 	"\x19ReportTaskProgressRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x17\n" +

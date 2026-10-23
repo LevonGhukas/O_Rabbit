@@ -54,6 +54,9 @@ type UpsertConfig struct {
 	Enabled bool     `json:"enabled,omitempty" yaml:"enabled"`
 	Keys    []string `json:"keys,omitempty" yaml:"keys"`
 	Mode    string   `json:"mode,omitempty" yaml:"mode"`
+	// MaxKeys caps the incoming rows of one upsert run; 0 means
+	// DefaultUpsertMaxKeys, or DefaultCompositeUpsertMaxKeys for several keys.
+	MaxKeys int64 `json:"max_keys,omitempty" yaml:"max_keys"`
 }
 
 type CredentialVendingConfig struct {

@@ -281,7 +281,7 @@ func TestUpsertExpressionsRejectDuplicateAndNullKeys(t *testing.T) {
 	values.Release()
 	defer record.Release()
 
-	_, err := upsertExpressionsFromRecord(optionTestSchema(), record, []string{"id"}, map[string]struct{}{})
+	_, err := upsertKeysFromRecord(optionTestSchema(), record, []string{"id"}, map[string]struct{}{})
 	if err == nil || !strings.Contains(err.Error(), "duplicate key") {
 		t.Fatalf("error=%v", err)
 	}
@@ -293,7 +293,7 @@ func TestUpsertExpressionsRejectDuplicateAndNullKeys(t *testing.T) {
 	nullRecord := array.NewRecordBatch(schema, []arrow.Array{nullValues}, 1)
 	nullValues.Release()
 	defer nullRecord.Release()
-	_, err = upsertExpressionsFromRecord(optionTestSchema(), nullRecord, []string{"id"}, map[string]struct{}{})
+	_, err = upsertKeysFromRecord(optionTestSchema(), nullRecord, []string{"id"}, map[string]struct{}{})
 	if err == nil || !strings.Contains(err.Error(), "contains NULL") {
 		t.Fatalf("error=%v", err)
 	}
@@ -317,14 +317,14 @@ func TestUpsertExpressionsBuildBindableCompositeFilter(t *testing.T) {
 	names.Release()
 	defer record.Release()
 
-	expressions, err := upsertExpressionsFromRecord(optionTestSchema(), record, []string{"id", "name"}, map[string]struct{}{})
+	tuples, err := upsertKeysFromRecord(optionTestSchema(), record, []string{"id", "name"}, map[string]struct{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(expressions) != 2 {
-		t.Fatalf("expressions=%d want 2", len(expressions))
+	if len(tuples) != 2 {
+		t.Fatalf("key tuples=%d want 2", len(tuples))
 	}
-	filter := joinExpressions(expressions, false)
+	filter := upsertDeleteExpression([]string{"id", "name"}, tuples)
 	if _, err := iceberg.BindExpr(optionTestSchema(), filter, true); err != nil {
 		t.Fatalf("bind upsert filter: %v", err)
 	}

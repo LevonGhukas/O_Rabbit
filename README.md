@@ -363,7 +363,8 @@ metadata_retention:
 upsert:
   enabled: true
   keys: [id]
-  mode: merge-on-read
+  mode: merge-on-read      # sets write.delete.mode for other engines
+  max_keys: 500000         # default: 500000, or 10000 for composite keys
 
 credential_vending:
   enabled: true
@@ -373,10 +374,27 @@ credential_vending:
 - `additive` schema evolution adds optional columns and allows
   Iceberg-compatible type promotion.
 - Upsert needs Iceberg format v2 and non-null, unique keys in every run.
+  O_Rabbit deletes the replaced rows copy-on-write: it rewrites only the data
+  files whose key ranges overlap the run's keys. iceberg-go v0.5 writes no
+  position deletes for files registered without Parquet field IDs, so
+  `mode: merge-on-read` only sets the table property that other engines use.
+- An upsert run may carry at most `upsert.max_keys` rows. Larger runs fail
+  before any row is read with a non-retryable `CONFIGURATION_INVALID`; split
+  them into smaller incremental runs or use a full refresh.
 - With required credential vending, static S3 keys are not passed to the
   catalog-backed table file system.
-- Unpartitioned registration is zero-copy. Partitioned registration rewrites
-  the committed Parquet files into Iceberg-managed partitioned files.
+- Registration is zero-copy: Iceberg references the verified worker files
+  themselves. For a partitioned `rest-go` table the workers receive the
+  partition spec, split rows with the catalog's transforms and write one
+  partition per file (at most 32 open files per task; more partitions mean
+  more, smaller files). The master reads only Parquet footers. Files with
+  only order-preserving transforms (identity, year, month, day, hour,
+  truncate) keep full column metrics; with `bucket[N]` they carry partition
+  values and counts but no column bounds.
+- `partition_spec` cannot change between an export and its registration. A
+  table that is partitioned while the run has no `partition_spec`, or files
+  from workers older than protocol 8, fail registration with a
+  non-retryable error and nothing is committed; set the spec and export again.
 
 </details>
 
@@ -848,6 +866,9 @@ go test -count=1 -run Integration ./internal/planner ./cmd/worker
   deploy master and workers together.
 - **Protobuf:** `internal/grpcpb` is generated from `proto/controlplane.proto`.
   There is no generator target in the repository, so never edit the generated files by hand.
+  Regenerate with the versions in the generated file headers (protoc 35.1,
+  protoc-gen-go v1.36.11, protoc-gen-go-grpc 1.6.2):
+  `protoc --go_out=. --go_opt=module=github.com/LevonGhukas/O_Rabbit --go-grpc_out=. --go-grpc_opt=module=github.com/LevonGhukas/O_Rabbit proto/controlplane.proto`.
 - **Database:** migrations in `internal/db/migrate.go` run automatically at
   startup. Never edit a migration that may already have run.
 - **API:** add every new `/api/v1` route to `docs/openapi.yaml`; a test checks it.

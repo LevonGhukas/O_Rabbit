@@ -176,6 +176,9 @@ func validateOptions(partitionSpec []PartitionFieldConfig, sortOrder []SortField
 		if upsert.Mode != "copy-on-write" && upsert.Mode != "merge-on-read" {
 			return fmt.Errorf("upsert.mode must be copy-on-write or merge-on-read")
 		}
+		if upsert.MaxKeys < 0 {
+			return fmt.Errorf("upsert.max_keys must be zero (use the default) or positive")
+		}
 	}
 	if vending.Required && !vending.Enabled {
 		return fmt.Errorf("credential_vending.required needs credential_vending.enabled=true")

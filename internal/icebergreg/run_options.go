@@ -43,6 +43,7 @@ type RunUpsertOptions struct {
 	Enabled *bool     `json:"enabled,omitempty" yaml:"enabled,omitempty"`
 	Keys    *[]string `json:"keys,omitempty" yaml:"keys,omitempty"`
 	Mode    *string   `json:"mode,omitempty" yaml:"mode,omitempty"`
+	MaxKeys *int64    `json:"max_keys,omitempty" yaml:"max_keys,omitempty"`
 }
 
 type RunCredentialVendingOptions struct {
@@ -113,6 +114,9 @@ func ApplyRunOptions(cfg RunConfig, options RunOptions) RunConfig {
 	}
 	if options.Upsert.Mode != nil {
 		cfg.Upsert.Mode = *options.Upsert.Mode
+	}
+	if options.Upsert.MaxKeys != nil {
+		cfg.Upsert.MaxKeys = *options.Upsert.MaxKeys
 	}
 	if options.CredentialVending.Enabled != nil {
 		cfg.CredentialVending.Enabled = *options.CredentialVending.Enabled
