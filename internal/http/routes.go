@@ -41,6 +41,8 @@ func (s *Server) apiRoutes() []apiRoute {
 		{v1: "/runs/validate", legacy: []string{"/api/runs/validate"}, target: "/api/runs/validate", handler: s.handleRunValidate},
 		{v1: "/source-engines", legacy: []string{"/api/source-engines"}, target: "/api/source-engines", handler: s.handleSourceEngines},
 		{v1: "/maintenance/submit", legacy: []string{"/api/maintenance/submit"}, target: "/api/maintenance/submit", handler: s.handleMaintenanceSubmit},
+		{v1: "/maintenance", target: "/maintenance", handler: s.handleMaintenance},
+		{v1: "/maintenance/", target: "/maintenance/", handler: s.handleMaintenanceByID},
 		{v1: "/sse", legacy: []string{"/sse"}, target: "/sse", handler: SSEHandler(s.log, s.st, s.bc)},
 	}
 }
