@@ -62,6 +62,19 @@ var (
 		Help:    "Duration of one run publication attempt, by outcome.",
 		Buckets: prometheus.ExponentialBuckets(0.1, 3, 10), // 100ms .. ~33m
 	}, []string{"outcome"})
+
+	catalogSlotsCapacity = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "orabbit_catalog_work_slots_capacity",
+		Help: "Catalog work slots: registrations and reconciliations the master runs at once.",
+	})
+	catalogSlotsInUse = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "orabbit_catalog_work_slots_in_use",
+		Help: "Catalog work slots held by running registrations and reconciliations.",
+	})
+	catalogWorkRejected = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "orabbit_catalog_work_rejected_total",
+		Help: "Registration or reconciliation attempts deferred because every catalog work slot was busy.",
+	})
 )
 
 func init() {
@@ -70,6 +83,7 @@ func init() {
 		httpHandled, httpLatency,
 		taskResults, taskRows, taskBytesRead, taskBytesWritten,
 		commitLatency,
+		catalogSlotsCapacity, catalogSlotsInUse, catalogWorkRejected,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
@@ -152,6 +166,21 @@ func ObserveTaskResult(status string, rowsRead, bytesRead, bytesWritten int64) {
 func ObserveCommit(outcome string, d time.Duration) {
 	commitLatency.WithLabelValues(outcome).Observe(d.Seconds())
 }
+
+// SetCatalogWorkCapacity records how many catalog work slots exist.
+func SetCatalogWorkCapacity(n int) { catalogSlotsCapacity.Set(float64(n)) }
+
+// ObserveCatalogWork records a catalog slot taken (acquired) or not.
+func ObserveCatalogWork(acquired bool) {
+	if acquired {
+		catalogSlotsInUse.Inc()
+		return
+	}
+	catalogWorkRejected.Inc()
+}
+
+// ReleaseCatalogWork records a catalog slot given back.
+func ReleaseCatalogWork() { catalogSlotsInUse.Dec() }
 
 // WriteText appends every registered metric in Prometheus text format.
 func WriteText(w http.ResponseWriter) error {
