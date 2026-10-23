@@ -270,6 +270,20 @@ func run() int {
 			}
 		}
 	})
+	go runPeriodic(leaderCtx, log, "iceberg maintenance", 5*time.Second, func() {
+		for i := 0; i < 2; i++ {
+			processed, err := grpcSrv.ProcessMaintenanceOnce(leaderCtx)
+			if err != nil {
+				if leaderCtx.Err() == nil {
+					log.Warn("iceberg maintenance failed", slog.String("err", err.Error()))
+				}
+				break
+			}
+			if !processed {
+				break
+			}
+		}
+	})
 	if cfg.HistoryRetention > 0 {
 		go runPeriodic(leaderCtx, log, "history retention", cfg.HistoryPruneInterval, func() {
 			res, err := st.PruneHistory(leaderCtx, time.Now().Add(-cfg.HistoryRetention))

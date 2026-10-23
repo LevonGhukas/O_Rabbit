@@ -476,6 +476,12 @@ func (s *Server) buildAssignment(ctx context.Context, t db.Task) (*grpcpb.TaskAs
 	if err != nil {
 		return nil, fmt.Errorf("run %s iceberg partition spec: %w", run.ID, err)
 	}
+	// A compaction run has no registration of its own; its tasks carry the
+	// table's spec, so outputs keep one partition per file.
+	var compaction compactionTaskSpec
+	if json.Unmarshal(t.PartitionSpec, &compaction) == nil && compaction.Type == CompactionTaskType {
+		partitionSpecJSON = string(compaction.IcebergPartitionSpec)
+	}
 	return &grpcpb.TaskAssignment{
 		TaskId:              t.ID,
 		RunId:               run.ID,

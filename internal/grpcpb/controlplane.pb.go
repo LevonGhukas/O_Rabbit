@@ -665,9 +665,10 @@ type RequestTaskRequest struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	WorkerId         string                 `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
 	CapabilitiesJson string                 `protobuf:"bytes,2,opt,name=capabilities_json,json=capabilitiesJson,proto3" json:"capabilities_json,omitempty"`
-	// Current value is 8. The master accepts an exact match only. Version 6
+	// Current value is 9. The master accepts an exact match only. Version 6
 	// moved task secrets from TaskAssignment to GetTaskCredentials; version 8
-	// added the partition contract (iceberg_partition_spec_json).
+	// added the partition contract (iceberg_partition_spec_json); version 9
+	// added compaction tasks (partition_spec_json type iceberg_compact).
 	ProtocolVersion int32  `protobuf:"varint,3,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	BootId          string `protobuf:"bytes,4,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
 	unknownFields   protoimpl.UnknownFields
