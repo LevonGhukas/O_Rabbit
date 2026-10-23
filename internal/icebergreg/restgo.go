@@ -17,6 +17,24 @@ import (
 )
 
 func openRESTCatalog(ctx context.Context, req RunRequest, reg RunConfig, regS3 s3io.Config, table string) (*restcatalog.Catalog, icetable.Identifier, error) {
+	cat, ident, err := newRESTCatalog(ctx, req.DatasetS3.Bucket, reg, regS3, table)
+	if err != nil {
+		return nil, nil, err
+	}
+	ns := ident[:len(ident)-1]
+	if exists, err := cat.CheckNamespaceExists(ctx, ns); err != nil {
+		return nil, nil, err
+	} else if !exists {
+		if err := cat.CreateNamespace(ctx, ns, iceberg.Properties{}); err != nil {
+			return nil, nil, err
+		}
+	}
+	return cat, ident, nil
+}
+
+// newRESTCatalog connects to the registration's REST catalog without changing
+// it, and parses table into an identifier.
+func newRESTCatalog(ctx context.Context, bucket string, reg RunConfig, regS3 s3io.Config, table string) (*restcatalog.Catalog, icetable.Identifier, error) {
 	uri := normalizeLocalhost(reg.URI)
 	if uri == "" {
 		return nil, nil, fmt.Errorf("missing iceberg rest uri in persisted run registration config")
@@ -27,7 +45,7 @@ func openRESTCatalog(ctx context.Context, req RunRequest, reg RunConfig, regS3 s
 	}
 	cat, err := restcatalog.NewCatalog(ctx, "rest", uri,
 		restcatalog.WithOAuthToken(strings.TrimSpace(reg.BearerToken)),
-		restcatalog.WithWarehouseLocation("s3://"+req.DatasetS3.Bucket),
+		restcatalog.WithWarehouseLocation("s3://"+bucket),
 		restcatalog.WithAdditionalProps(icebergRegistrationS3Props(regS3, reg.CredentialVending.Required)),
 	)
 	if err != nil {
@@ -40,16 +58,7 @@ func openRESTCatalog(ctx context.Context, req RunRequest, reg RunConfig, regS3 s
 	if len(parts) < 2 {
 		return nil, nil, fmt.Errorf("invalid iceberg table %q (expected namespace.table)", table)
 	}
-	ident := icetable.Identifier(parts)
-	ns := ident[:len(ident)-1]
-	if exists, err := cat.CheckNamespaceExists(ctx, ns); err != nil {
-		return nil, nil, err
-	} else if !exists {
-		if err := cat.CreateNamespace(ctx, ns, iceberg.Properties{}); err != nil {
-			return nil, nil, err
-		}
-	}
-	return cat, ident, nil
+	return cat, icetable.Identifier(parts), nil
 }
 
 func normalizeLocalhost(raw string) string {
