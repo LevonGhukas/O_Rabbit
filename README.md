@@ -363,7 +363,8 @@ metadata_retention:
 upsert:
   enabled: true
   keys: [id]
-  mode: merge-on-read
+  mode: merge-on-read      # sets write.delete.mode for other engines
+  max_keys: 500000         # default: 500000, or 10000 for composite keys
 
 credential_vending:
   enabled: true
@@ -373,6 +374,13 @@ credential_vending:
 - `additive` schema evolution adds optional columns and allows
   Iceberg-compatible type promotion.
 - Upsert needs Iceberg format v2 and non-null, unique keys in every run.
+  O_Rabbit deletes the replaced rows copy-on-write: it rewrites only the data
+  files whose key ranges overlap the run's keys. iceberg-go v0.5 writes no
+  position deletes for files registered without Parquet field IDs, so
+  `mode: merge-on-read` only sets the table property that other engines use.
+- An upsert run may carry at most `upsert.max_keys` rows. Larger runs fail
+  before any row is read with a non-retryable `CONFIGURATION_INVALID`; split
+  them into smaller incremental runs or use a full refresh.
 - With required credential vending, static S3 keys are not passed to the
   catalog-backed table file system.
 - Registration is zero-copy: Iceberg references the verified worker files
