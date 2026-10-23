@@ -226,3 +226,43 @@ func TestLifecycleMetricsSnapshotIsDeterministic(t *testing.T) {
 		t.Fatalf("leadership metrics=%+v", got)
 	}
 }
+
+// A catalog attempt stuck for an hour, behind which a later registration of
+// the same dataset waits, shows as growing ages and an expired lease, with
+// no run-specific label.
+func TestLifecycleMetricsExposeAStuckCatalogAttempt(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	now := time.Date(2026, 7, 23, 1, 0, 0, 0, time.UTC)
+	stuck := insertRegistrationFixture(t, st, "stuck-run", "stuck-ds", 1, RegistrationRegistering)
+	insertRegistrationFixture(t, st, "waiting-run", "stuck-ds", 2, RegistrationPending)
+	if _, err := st.db.Exec(`INSERT INTO iceberg_registration_attempts(id,registration_id,attempt_number,status,fencing_token,lease_deadline,last_renewed_at,phase,started_at,created_at,updated_at) VALUES
+		('stuck-attempt',?,1,'ACTIVE','stuck-token','2026-07-23T00:10:00Z','2026-07-23T00:05:00Z','EXTERNAL_COMMIT_STARTED','2026-07-23T00:00:00Z','2026-07-23T00:00:00Z','2026-07-23T00:05:00Z')`, stuck.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`UPDATE runs SET operator_action_required=1 WHERE id='stuck-run'`); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.LifecycleMetrics(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.OldestRegistrationAttemptAgeSeconds != 3600 || got.ExpiredRegistrationAttemptLeases != 1 {
+		t.Fatalf("attempt age=%v expired=%d", got.OldestRegistrationAttemptAgeSeconds, got.ExpiredRegistrationAttemptLeases)
+	}
+	if got.OldestRegistrationAgeSeconds[RegistrationPending] != 3600 || got.OldestRegistrationAgeSeconds[RegistrationRegistering] != 3600 {
+		t.Fatalf("queue ages=%v", got.OldestRegistrationAgeSeconds)
+	}
+	if got.RunsOperatorActionRequired != 1 {
+		t.Fatalf("operator action=%d", got.RunsOperatorActionRequired)
+	}
+
+	empty, err := openTestStore(t).LifecycleMetrics(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty.OldestRegistrationAttemptAgeSeconds != 0 || len(empty.OldestRegistrationAgeSeconds) != 0 {
+		t.Fatalf("an idle store must report zero ages: %+v", empty)
+	}
+}

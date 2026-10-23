@@ -164,7 +164,7 @@ func NewServer(log *slog.Logger, st *db.Store, bc *httpapi.Broadcaster, k crypto
 		return s3io.New(ctx, cfg)
 	}
 	s.canceledObjectRetry, s.canceledObjectMax, s.canceledObjectDryRun = 5*time.Minute, 5, true
-	s.catalogWorkSlots = make(chan struct{}, 2)
+	s.SetCatalogWorkLimit(2)
 	s.uploadCapacityLimit, s.uploadCapacityLeaseTTL = 8, 2*time.Minute
 	s.newCanceledObjectCleanerFn = func(ctx context.Context, cfg s3io.Config) (canceledObjectCleaner, error) {
 		return s3io.New(ctx, cfg)
