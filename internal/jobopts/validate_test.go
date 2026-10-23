@@ -27,7 +27,6 @@ func TestValidateAcceptsValidOptions(t *testing.T) {
 		`{}`,
 		`{"partition_strategy":"single"}`,
 		`{"partition_strategy":"int_range","id_column":"id","chunk_size":1000}`,
-		`{"partition_strategy":"cdc_stream","consistency_mode":"strong_cdc"}`,
 		`{"source_mode":"query","query":"SELECT id FROM t"}`,
 		`{"worker_pool":"etl-a","where_clause":"status = 'open'","cursor_lookback":"48h"}`,
 		`{"cursor_lookback":"1000","column_types":{"amount":"decimal(12,2)","note":"nullable<source>"}}`,
@@ -72,6 +71,8 @@ func TestValidateRejectsInvalidOptions(t *testing.T) {
 		{"zero lookback", `{"cursor_lookback":"0"}`, "options_json.cursor_lookback", "positive"},
 		{"format", `{"format":"pdf"}`, "options_json.format", "unsupported"},
 		{"consistency", `{"consistency_mode":"sometimes"}`, "options_json.consistency_mode", "EVENTUAL"},
+		{"cdc consistency", `{"consistency_mode":"strong_cdc"}`, "options_json.consistency_mode", "never propagate source deletes"},
+		{"cdc strategy", `{"partition_strategy":"cdc_stream"}`, "options_json.partition_strategy", "change data capture is not supported"},
 		{"negative", `{"max_in_flight_tasks":-1}`, "options_json.max_in_flight_tasks", "0 or greater"},
 		{"fetch size too large", `{"fetch_size":2000000}`, "options_json.fetch_size", "at most 1000000"},
 		{"negative fetch size", `{"fetch_size":-1}`, "options_json.fetch_size", "0 or greater"},
@@ -124,5 +125,14 @@ func TestDeprecatedKeys(t *testing.T) {
 	}
 	if DeprecatedKeys(json.RawMessage(`"x"`)) != nil {
 		t.Fatal("non-object options have no deprecated keys")
+	}
+}
+
+// A stored job from before CDC was refused fails planning with the reason,
+// instead of creating a task no worker can run.
+func TestValidateRefusesStoredCDCJobsAtPlanning(t *testing.T) {
+	errs := validationErrors(t, `{"partition_strategy":"cdc_stream"}`, "", Lenient)
+	if len(errs) != 1 || !strings.Contains(errs[0].Error, "full refresh") {
+		t.Fatalf("errors=%+v", errs)
 	}
 }

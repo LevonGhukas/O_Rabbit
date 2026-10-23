@@ -772,28 +772,6 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 		})
 		return run, tasks, nil
 
-	case "cdc_stream":
-		part := PartitionSpecCDCStream(o.Table, o.NormalizedSourceMode(), o.QueryHash)
-		tasks := []db.TaskInsert{{
-			ID:            newID(),
-			RunID:         run.ID,
-			TaskIndex:     1,
-			PartitionSpec: part,
-			Status:        "PENDING",
-		}}
-		admitted, err := startTasks(tasks)
-		if err != nil {
-			return db.Run{}, nil, err
-		}
-		if admitted {
-			run.Status = "RUNNING"
-		}
-		emitPlanEvent(ctx, st, run.ID, "INFO", "planner cdc_stream done", map[string]any{
-			"stage": "tasks_created",
-			"tasks": 1,
-		})
-		return run, tasks, nil
-
 	default:
 		return db.Run{}, nil, failure.NewFailure(failure.FailureConfigurationInvalid, false, true, fmt.Errorf("unknown partition_strategy %q", o.PartitionStrategy))
 	}

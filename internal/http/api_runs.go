@@ -921,6 +921,9 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 	if consistencyMode == "" {
 		consistencyMode = "EVENTUAL"
 	}
+	if strings.EqualFold(consistencyMode, "STRONG_CDC") {
+		return validatedRunSubmitSpec{}, invalidSubmitField("consistency.mode", jobopts.ErrCDCNotSupported, nil)
+	}
 
 	icebergEnabled := req.Iceberg.Enabled
 	icebergEngine := normalizedIcebergEngine(req.Iceberg.Engine)
@@ -1074,8 +1077,6 @@ func buildOneShotJobRequest(spec validatedRunSubmitSpec, sourceConnectionID, tar
 	partitionStrategy := "ordered_cursor"
 	if connectors.SupportsDocumentReader(spec.SourceEngine) {
 		partitionStrategy = "single"
-	} else if spec.ConsistencyMode == "STRONG_CDC" {
-		partitionStrategy = "cdc_stream"
 	}
 	options := map[string]any{
 		"source_mode":          spec.SourceMode,
