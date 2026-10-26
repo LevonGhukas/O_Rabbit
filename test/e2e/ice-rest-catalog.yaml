@@ -1,0 +1,15 @@
+# Iceberg REST catalog for the end-to-end stack (test/e2e/docker-compose.yml).
+# Throwaway credentials: the stack is local to one test run.
+uri: jdbc:sqlite:file:/var/lib/ice-rest-catalog/db.sqlite?journal_mode=WAL&synchronous=OFF&journal_size_limit=500
+warehouse: s3://e2e-lake
+
+s3:
+  endpoint: http://minio:9000
+  pathStyleAccess: true
+  accessKeyID: e2e-access
+  secretAccessKey: e2e-secret-key
+  region: us-east-1
+
+anonymousAccess:
+  enabled: true
+  accessConfig: {}

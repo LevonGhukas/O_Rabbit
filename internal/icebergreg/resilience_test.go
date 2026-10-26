@@ -192,3 +192,41 @@ func TestReceiptTimestampIsStableInput(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A registration resumed after its catalog commit (reconciled as exactly
+// committed, or a lease lost after the commit) finds the previous
+// registration's receipt in _ice_state.json. That is the normal order of a
+// dataset, not a conflict.
+func TestVerifyIceStateReceiptOnlyRejectsTheSameRegistration(t *testing.T) {
+	receipt := func(registrationID, commit string) string {
+		t.Helper()
+		body, err := CatalogReceipt{Backend: "rest-go", Namespace: "ns", Table: "ns.tbl", RegistrationID: registrationID, CommitID: strings.Repeat(commit, 64), ArtifactSetDigest: strings.Repeat("d", 64), DefiniteAt: "2026-10-26T00:00:00Z"}.MarshalDeterministic()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(body)
+	}
+	previous := receipt("reg-previous", "a")
+	current := receipt("reg-current", "b")
+	cases := []struct {
+		name     string
+		stored   string
+		receipt  string
+		conflict bool
+	}{
+		{"no stored receipt", "", current, false},
+		{"no receipt yet", previous, "", false},
+		{"previous registration", previous, current, false},
+		{"same registration, same receipt", current, current, false},
+		{"same registration, other receipt", receipt("reg-current", "c"), current, true},
+		{"stored receipt unreadable", `"not a receipt"`, current, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := verifyIceStateReceipt(json.RawMessage(tc.stored), tc.receipt)
+			if (err != nil) != tc.conflict {
+				t.Fatalf("err = %v, want conflict %t", err, tc.conflict)
+			}
+		})
+	}
+}

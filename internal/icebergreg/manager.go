@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
-	"reflect"
 	"sort"
 	"strings"
 
@@ -168,12 +167,8 @@ func (m *Manager) RegisterRun(ctx context.Context, req RunRequest) (RunResult, e
 		if err := json.Unmarshal(ib, &cur); err != nil {
 			return RunResult{}, failure.NewFailure(failure.FailureIceStateVerify, false, true, fmt.Errorf("decode existing _ice_state.json: %w", err))
 		}
-		if len(cur.CatalogReceipt) > 0 && strings.TrimSpace(req.CatalogReceipt) != "" {
-			var expected any
-			var actual any
-			if json.Unmarshal([]byte(req.CatalogReceipt), &expected) != nil || json.Unmarshal(cur.CatalogReceipt, &actual) != nil || !reflect.DeepEqual(expected, actual) {
-				return RunResult{}, failure.NewFailure(failure.FailureIceStateVerify, false, true, fmt.Errorf("conflicting _ice_state.json catalog receipt"))
-			}
+		if err := verifyIceStateReceipt(cur.CatalogReceipt, req.CatalogReceipt); err != nil {
+			return RunResult{}, failure.NewFailure(failure.FailureIceStateVerify, false, true, err)
 		}
 	}
 

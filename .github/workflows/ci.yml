@@ -93,6 +93,51 @@ jobs:
       - name: Test
         run: go test -race -count=1 -v -run 'Integration|ReadOnly' ./internal/connectors/
 
+  e2e:
+    name: End-to-end (master, worker, MinIO, Iceberg catalog)
+    runs-on: ubuntu-latest
+    # The stack is small (one worker, a few thousand rows); the bound catches
+    # a hung run instead of letting it use the 6-hour default.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      # The images under test, built from this checkout with the layer cache
+      # the images job below writes. Tags match test/e2e/docker-compose.yml.
+      - uses: docker/setup-buildx-action@v3
+      - name: Build master image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.orabbit
+          target: master
+          load: true
+          tags: orabbit-master:e2e
+          cache-from: type=gha,scope=orabbit-master
+      - name: Build worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.orabbit
+          target: worker
+          load: true
+          tags: orabbit-worker:e2e
+          cache-from: type=gha,scope=orabbit-worker
+      - name: Run end-to-end test
+        env:
+          ORABBIT_E2E_ARTIFACTS: e2e-artifacts
+          ORABBIT_E2E_SKIP_BUILD: "1"
+        run: ./scripts/e2e.sh
+      - name: Upload stack logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: e2e-artifacts/
+          retention-days: 7
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -137,7 +182,7 @@ jobs:
 
   images:
     name: Image (${{ matrix.target }})
-    needs: [test, integration, lint, vulncheck]
+    needs: [test, integration, e2e, lint, vulncheck]
     runs-on: ubuntu-latest
     strategy:
       matrix:
