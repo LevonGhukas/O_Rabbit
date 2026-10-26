@@ -270,7 +270,13 @@ components:
             table: { type: string }
             query: { type: string }
             cursor_column: { type: string }
-            incremental: { type: boolean }
+            incremental:
+              type: boolean
+              description: >-
+                Resume after the committed high-water mark. Exports inserts and
+                updates that move the cursor; source deletes are not
+                propagated, so run a full refresh (incremental false) to remove
+                deleted rows.
             where_clause: { type: string }
             select_columns: { type: array, items: { type: string } }
             column_types: { type: object, additionalProperties: { type: string } }
@@ -306,7 +312,11 @@ components:
         consistency:
           type: object
           properties:
-            mode: { type: string }
+            mode:
+              type: string
+              enum: [EVENTUAL, STRONG_SNAPSHOT]
+              default: EVENTUAL
+              description: STRONG_CDC is rejected; change data capture is not supported yet.
         worker_pool: { type: string }
     RunSubmitted:
       type: object

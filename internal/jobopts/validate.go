@@ -141,9 +141,11 @@ func Validate(raw json.RawMessage, sourceSQL string, mode ValidateMode) error {
 		return &ValidationError{Errors: errs}
 	}
 	switch o.NormalizedPartitionStrategy() {
-	case "single", "ordered_cursor", "cdc_stream":
+	case "single", "ordered_cursor":
+	case "cdc_stream":
+		add(".partition_strategy", "%s", ErrCDCNotSupported)
 	default:
-		add(".partition_strategy", "must be single, ordered_cursor or cdc_stream, got %q", o.PartitionStrategy)
+		add(".partition_strategy", "must be single or ordered_cursor, got %q", o.PartitionStrategy)
 	}
 	switch o.NormalizedSourceMode() {
 	case "table":
@@ -199,14 +201,21 @@ func Validate(raw json.RawMessage, sourceSQL string, mode ValidateMode) error {
 	return &ValidationError{Errors: errs}
 }
 
+// ErrCDCNotSupported explains why change data capture options are refused.
+// No worker executes a change stream, so accepting them only produced runs
+// that failed later, and implied that source deletes are captured.
+const ErrCDCNotSupported = "change data capture is not supported yet: incremental runs export inserts and updates and never propagate source deletes; run a full refresh to remove deleted rows (see docs/cdc-design.md)"
+
 // strictOnlyChecks rejects values that planning tolerates (an unknown
 // consistency mode is ignored, a negative number means "use the default") but
 // that are almost certainly mistakes when a job is saved.
 func strictOnlyChecks(o Options, add func(field, format string, args ...any)) {
 	switch strings.ToUpper(strings.TrimSpace(o.ConsistencyMode)) {
-	case "", "EVENTUAL", "STRONG_SNAPSHOT", "STRONG_CDC":
+	case "", "EVENTUAL", "STRONG_SNAPSHOT":
+	case "STRONG_CDC":
+		add(".consistency_mode", "%s", ErrCDCNotSupported)
 	default:
-		add(".consistency_mode", "must be EVENTUAL, STRONG_SNAPSHOT or STRONG_CDC, got %q", o.ConsistencyMode)
+		add(".consistency_mode", "must be EVENTUAL or STRONG_SNAPSHOT, got %q", o.ConsistencyMode)
 	}
 	for field, value := range map[string]int64{
 		"max_in_flight_tasks":  int64(o.MaxInFlightTasks),

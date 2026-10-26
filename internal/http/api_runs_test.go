@@ -1741,3 +1741,17 @@ func TestAPIRunSubmitPersistsColumnTypes(t *testing.T) {
 		t.Fatalf("column_types not persisted: %s", job.OptionsJSON)
 	}
 }
+
+func TestAPIRunSubmitRefusesCDCConsistency(t *testing.T) {
+	srv := newSubmitTestServer(openTestStore(t))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs/submit", strings.NewReader(`{
+		"source": {"engine": "postgres", "dsn": "postgresql://user:pass@db:5432/app", "table": "public.orders", "cursor_column": "id", "incremental": true},
+		"target": {"s3_endpoint": "http://minio:9000", "s3_bucket": "bucket1", "s3_access_key_id": "a", "s3_secret_access_key": "b"},
+		"consistency": {"mode": "STRONG_CDC"}
+	}`))
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "consistency.mode") || !strings.Contains(rec.Body.String(), "never propagate source deletes") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}

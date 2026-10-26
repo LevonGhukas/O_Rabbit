@@ -38,19 +38,6 @@ func PartitionSpecSingleWithFileOptions(table, sourceMode, queryHash, recordPath
 	return json.RawMessage(b)
 }
 
-func PartitionSpecCDCStream(table, sourceMode, queryHash string) json.RawMessage {
-	part := map[string]any{
-		"type":        "cdc_stream",
-		"source_mode": sourceMode,
-		"table":       table,
-	}
-	if strings.TrimSpace(queryHash) != "" {
-		part["query_hash"] = strings.TrimSpace(queryHash)
-	}
-	b, _ := json.Marshal(part)
-	return b
-}
-
 func partitionSpecSQLCursorRange(table, sourceMode, queryHash, whereClause string, selectColumns []string, columnTypes map[string]string, column string, domain connectors.CursorDomain, lower string, lowerExclusive bool, upper string, upperInclusive bool, outputPart int, snapshotCtx string) json.RawMessage {
 	part := map[string]any{
 		"type":            "sql_cursor_range",

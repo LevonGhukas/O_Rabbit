@@ -297,6 +297,37 @@ deduplicate downstream, for example with Iceberg upsert on the table's key.
 String, UUID and decimal cursors do not support a look-back, and the
 high-water mark never moves backwards.
 
+### Deleted source rows
+
+Incremental runs export rows whose cursor is above the high-water mark, so
+they capture inserts and updates that move the cursor. **They do not
+propagate deletes:** a row deleted at the source leaves nothing to read, and
+its earlier copy stays in the exported Parquet files and the Iceberg table.
+
+- `cursor_lookback` does not help: it re-reads rows that still exist.
+- Iceberg upsert replaces the target row of every key that appears in a run.
+  It never removes a key that is absent from the run, so it does not
+  propagate deletes either.
+- Change data capture is not supported: the job options
+  `partition_strategy: cdc_stream` and `consistency_mode: STRONG_CDC`, and
+  `consistency.mode: STRONG_CDC` on `/runs/submit`, are rejected. The
+  proposed design is in [docs/cdc-design.md](docs/cdc-design.md).
+
+Safe ways to remove deleted rows today:
+
+- **Full refresh.** A run with `incremental: false` and `write_mode: overwrite`
+  re-reads the whole source. With Iceberg registration it replaces the
+  table's files in one snapshot, so readers never see a half-replaced table.
+  Run one as often as deleted rows must disappear; between refreshes they
+  stay visible.
+- **Soft deletes.** Mark rows as deleted at the source (for example a
+  `deleted_at` column) and move the cursor column when you do. The next
+  incremental run exports the marked row, which replaces the old one under
+  upsert; readers filter marked rows out. Remove rows physically only after a
+  full refresh has run.
+- Many teams combine both: incremental runs for freshness and a scheduled
+  full refresh to drop deleted rows.
+
 ### Column types
 
 Source types are mapped to Arrow, Parquet and Iceberg types automatically.
