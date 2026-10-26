@@ -800,7 +800,8 @@ internal/
 proto/                 Control-plane protobuf source
 docs/                  OpenAPI spec, backup runbook, design review
 docker/minio/          Patched MinIO image build
-scripts/               CI helpers (vulnerability check)
+scripts/               CI helpers (vulnerability check, end-to-end test)
+test/e2e/              End-to-end stack and tests
 ```
 
 </details>
@@ -842,11 +843,29 @@ go test -count=1 -run Integration ./internal/planner ./cmd/worker
 
 </details>
 
+The end-to-end test runs the real master and worker images against
+PostgreSQL, MinIO and an Iceberg REST catalog, then reads the result back
+through the catalog: full and incremental exports, snapshot history, data
+files against the accepted worker files, and two catalog faults on the commit
+(a timeout before the catalog applies it, and a lost reply after it did). It
+needs Docker, Go and `openssl`, and uses ports 15001, 15432, 18181, 19000 and
+19100 on the host:
+
+```sh
+./scripts/e2e.sh
+```
+
+The script builds the images, starts the isolated `orabbit-e2e` stack from
+[`test/e2e/docker-compose.yml`](test/e2e/docker-compose.yml), runs
+`go test ./test/e2e`, saves container logs to `e2e-artifacts/` on failure and
+removes the stack. `ORABBIT_E2E_KEEP=1` leaves the stack running for
+debugging. Without `ORABBIT_E2E=1`, `go test ./...` skips these tests.
+
 ### CI
 
 | Workflow | Runs on | Does |
 |---|---|---|
-| [CI](.github/workflows/ci.yml) | Pull requests; reused by Release images | Unit tests (race detector), integration tests against PostgreSQL, MySQL, MariaDB and ClickHouse, `golangci-lint`, `shellcheck`, Compose validation, vulnerability check, and an image build, smoke test and Trivy scan |
+| [CI](.github/workflows/ci.yml) | Pull requests; reused by Release images | Unit tests (race detector), integration tests against PostgreSQL, MySQL, MariaDB and ClickHouse, the end-to-end test (`scripts/e2e.sh`), `golangci-lint`, `shellcheck`, Compose validation, vulnerability check, and an image build, smoke test and Trivy scan |
 | [Release images](.github/workflows/release.yml) | Push to `main` | Runs CI, then pushes `latest-master` and `latest-worker` |
 | [Vulnerability check](.github/workflows/vulncheck.yml) | Within CI, and every Monday | `scripts/vulncheck.sh`: fails on reachable Go vulnerabilities not reviewed in `.govulncheck-allow` |
 | [MinIO images](.github/workflows/minio-images.yml) | Changes under `docker/minio/` | Builds, tests, scans and publishes the MinIO images |
