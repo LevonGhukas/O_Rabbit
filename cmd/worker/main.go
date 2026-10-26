@@ -22,6 +22,7 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 	grpcapi "github.com/LevonGhukas/O_Rabbit/internal/grpc"
 	"github.com/LevonGhukas/O_Rabbit/internal/grpcpb"
+	"github.com/LevonGhukas/O_Rabbit/internal/hwmboundary"
 	"github.com/LevonGhukas/O_Rabbit/internal/sysinfo"
 	"github.com/LevonGhukas/O_Rabbit/internal/telemetry"
 	"github.com/LevonGhukas/O_Rabbit/internal/workerworkspace"
@@ -56,6 +57,11 @@ type partitionSpec struct {
 
 	// FetchSize is rows per source round-trip; 0 keeps the engine default.
 	FetchSize int `json:"fetch_size,omitempty"`
+	// HWMBoundarySkip lists rows at the high-water mark already exported by
+	// an earlier run; only the task whose range starts at the mark has it.
+	HWMBoundarySkip *hwmboundary.Skip `json:"hwm_boundary_skip,omitempty"`
+	// TrackHWMBoundary asks the task to report the rows at its largest cursor value.
+	TrackHWMBoundary bool `json:"track_hwm_boundary,omitempty"`
 }
 
 func main() {

@@ -285,10 +285,32 @@ the engine default. The job value wins over the same setting in the DSN.
 
 ### Incremental exports and late-arriving rows
 
-An incremental run resumes strictly after the dataset's high-water mark, the
-largest cursor value committed so far. Rows that become visible later with a
-smaller cursor value are missed, for example an `updated_at` set when a
-transaction starts but committed after a run has read past it.
+An incremental run resumes at the dataset's high-water mark, the largest
+cursor value committed so far, and reads `cursor >= mark`. Rows committed
+later with the same cursor value as the mark are therefore exported by the
+next run. To avoid exporting the rows at the mark twice, each commit stores
+the hashes of the rows sitting exactly at the new mark in `_state.json`
+(`hwm_boundary`), and the next run drops boundary rows whose hash is stored.
+Rows with identical content are counted, so a new identical row is still
+exported.
+
+- A dataset whose `_state.json` predates the boundary is seeded by its next
+  run: rows at the mark are treated as already exported and their hashes are
+  recorded. Late rows that arrived before that run cannot be told apart from
+  exported ones and are not recovered.
+- At most 10,000 distinct rows are kept per mark. Above that (typical for
+  coarse cursors such as a `date` column) the run logs a `WARN`
+  `hwm boundary resume` event and resumes strictly after the mark, so late
+  rows with the mark's value can be missed.
+- Cursors of unknown type always resume strictly after the mark.
+- Only SQL sources track the boundary; MongoDB and file sources are unchanged.
+- A row's hash covers every selected column, so changing the selected
+  columns, their types, or a query whose result is not repeatable (for
+  example one selecting `now()`) exports the rows at the mark once more.
+
+Rows that become visible later with a *smaller* cursor value are still
+missed, for example an `updated_at` set when a transaction starts but
+committed after a run has read past it.
 
 Set the job option `cursor_lookback` to re-read a window below the mark on
 every run: a count for integer cursors (`"1000"`) or a duration for date and

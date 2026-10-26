@@ -45,6 +45,7 @@ var migrations = []migration{
 	{version: 29, sql: schemaV29},
 	{version: 30, sql: schemaV30},
 	{version: 31, sql: schemaV31},
+	{version: 32, sql: schemaV32},
 }
 
 // normalizeStoredTimestamps rewrites every stored timestamp in
@@ -162,6 +163,12 @@ UPDATE jobs SET write_mode = 'append'
  WHERE incremental <> 0 AND lower(trim(write_mode)) <> 'overwrite' AND write_mode <> 'append';
 UPDATE jobs SET write_mode = 'overwrite'
  WHERE incremental <> 0 AND lower(trim(write_mode)) = 'overwrite' AND write_mode <> 'overwrite';
+`
+
+// schemaV32 stores the rows each task read at its largest cursor value, which
+// the commit turns into the dataset's high-water-mark boundary.
+const schemaV32 = `
+ALTER TABLE tasks ADD COLUMN hwm_boundary_json TEXT NOT NULL DEFAULT '';
 `
 
 const schemaV30 = `
