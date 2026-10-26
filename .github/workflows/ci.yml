@@ -109,6 +109,14 @@ jobs:
           version: v2.14.0
       - name: shellcheck
         run: shellcheck deploy-*.sh healthcheck.sh scripts/*.sh
+      # The alert rules must parse and their unit tests (a stuck catalog
+      # attempt fires; ordinary retries do not) must pass.
+      - name: Validate Prometheus rules
+        run: |
+          docker run --rm --entrypoint promtool -v "$PWD/monitoring/prometheus:/rules:ro" -w /rules \
+            prom/prometheus:v3.5.0 check rules orabbit-alerts.yml
+          docker run --rm --entrypoint promtool -v "$PWD/monitoring/prometheus:/rules:ro" -w /rules \
+            prom/prometheus:v3.5.0 test rules orabbit-alerts.test.yml
       - name: Validate Compose files
         env:
           ORABBIT_HTTP_AUTH_TOKEN: ci

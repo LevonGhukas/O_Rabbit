@@ -751,7 +751,34 @@ docker run --rm -v orabbit-worker_orabbit_worker_identity:/d debian:bookworm-sli
   run, task, lease, registration and leadership gauges, gRPC and HTTP request
   counts and latencies (`orabbit_grpc_server_*`, `orabbit_http_*`), task
   throughput (`orabbit_task_*`), commit latency
-  (`orabbit_run_commit_duration_seconds`) and Go runtime metrics.
+  (`orabbit_run_commit_duration_seconds`) and Go runtime metrics. Labels are
+  bounded (statuses, phases); no metric names a run, task or worker.
+  - Queue health: `orabbit_oldest_registration_age_seconds{status}`
+    (PENDING from creation, other statuses from their last change),
+    `orabbit_oldest_registration_attempt_age_seconds` (the oldest active
+    catalog call) and `orabbit_registration_attempt_leases_expired`.
+  - Catalog capacity: `orabbit_catalog_work_slots_in_use`,
+    `orabbit_catalog_work_slots_capacity` and
+    `orabbit_catalog_work_rejected_total`.
+  - `orabbit_runs_operator_action_required` counts runs that wait for an
+    operator.
+- **Alerts and dashboard:** [`monitoring/prometheus/orabbit-alerts.yml`](monitoring/prometheus/orabbit-alerts.yml)
+  holds Prometheus alert rules; every alert links to its section in
+  [docs/runbooks.md](docs/runbooks.md). `severity: critical` is meant to page,
+  `warning` to open a ticket. Durations wait out normal retries and lease
+  scans, so brief retries do not alert. The rules' unit tests
+  (`orabbit-alerts.test.yml`) run in CI with `promtool`. Import
+  [`monitoring/grafana/orabbit-lifecycle.json`](monitoring/grafana/orabbit-lifecycle.json)
+  into Grafana and pick the Prometheus data source. Only the leader serves
+  `/metrics`, so scrape every master; the rules aggregate with `max()`.
+
+  ```yaml
+  scrape_configs:
+    - job_name: orabbit-master
+      authorization: { credentials_file: /etc/prometheus/orabbit-token }  # ORABBIT_HTTP_AUTH_TOKEN
+      static_configs: [{ targets: ["master:9100"] }]
+  rule_files: [orabbit-alerts.yml]
+  ```
 - **Tracing:** off by default. Set the standard OpenTelemetry variables on the
   master and workers, for example
   `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317` (OTLP/gRPC). Trace
