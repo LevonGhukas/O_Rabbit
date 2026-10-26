@@ -155,16 +155,8 @@ func runRESTGoRegister(ctx context.Context, log *slog.Logger, req RunRequest, re
 	}
 	identity := OperationIdentity{RegistrationID: req.RegistrationID, RunID: req.RunID, CommitID: req.CommitID, ArtifactSetDigest: req.ArtifactSetDigest, ManifestKey: req.ManifestKey}
 	snapshotProperties := iceberg.Properties(identity.Properties())
-	if reg.Upsert.Enabled && !isFullRefresh && tbl.CurrentSnapshot() != nil {
-		filter, err := buildUpsertDeleteFilter(ctx, tbl, newFiles, reg.Upsert.Keys)
-		if err != nil {
-			return err
-		}
-		if !filter.Equals(iceberg.AlwaysFalse{}) {
-			if err := tx.Delete(ctx, filter, snapshotProperties); err != nil {
-				return fmt.Errorf("iceberg upsert delete existing rows: %w", err)
-			}
-		}
+	if err := applyUpsertDelete(ctx, tx, tbl, reg, isFullRefresh, newFiles, snapshotProperties); err != nil {
+		return err
 	}
 	var existing []iceberg.DataFile
 	if isFullRefresh {

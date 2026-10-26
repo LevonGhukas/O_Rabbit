@@ -167,7 +167,7 @@ func partitionsByPath(t *testing.T, tbl *icetable.Table) (map[string]string, int
 		out[df.FilePath()] = strings.Join(parts, ",")
 		count += df.Count()
 	}
-	scanned, err := tbl.Scan().ToArrowTable(ctx)
+	scanned, err := tbl.Scan(icetable.WitMaxConcurrency(1)).ToArrowTable(ctx) // see currentRows
 	if err != nil {
 		t.Fatal(err)
 	}
