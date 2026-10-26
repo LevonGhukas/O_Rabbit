@@ -1,0 +1,130 @@
+# Isolated stack for the end-to-end test (scripts/e2e.sh, go test ./test/e2e).
+# It uses its own project name, network and ports so it never touches the
+# local development stack. Nothing is persisted: `down -v` removes it all.
+#
+# The master reaches the Iceberg catalog through a fault-injecting proxy that
+# the Go test runs on the host (host.docker.internal), so the test can delay
+# or drop individual catalog requests. The test itself reads the table
+# straight from ice-rest-catalog and MinIO.
+name: orabbit-e2e
+
+x-orabbit-build: &orabbit-build
+  context: ../..
+  dockerfile: Dockerfile.orabbit
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: e2e
+      POSTGRES_PASSWORD: e2e
+      POSTGRES_DB: e2e
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - ./fixtures/postgres-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U e2e -d e2e"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  minio:
+    image: levonghukas/minio:RELEASE.2025-10-15T17-29-55Z-r1
+    command: server /data --address ":9000"
+    environment:
+      MINIO_ROOT_USER: e2e-access
+      MINIO_ROOT_PASSWORD: e2e-secret-key
+    ports:
+      - "127.0.0.1:19000:9000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  minio-init:
+    image: levonghukas/mc:RELEASE.2025-08-13T08-35-41Z-r1
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        mc alias set e2e http://minio:9000 e2e-access e2e-secret-key
+        mc mb -p e2e/e2e-lake
+    restart: "no"
+
+  ice-rest-catalog:
+    image: altinity/ice-rest-catalog:0.11.0
+    command: ["-c", "/etc/ice/ice-rest-catalog.yaml"]
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:15001:5000"
+    volumes:
+      - ./ice-rest-catalog.yaml:/etc/ice/ice-rest-catalog.yaml:ro
+    tmpfs:
+      - /var/lib/ice-rest-catalog
+
+  master:
+    image: orabbit-master:e2e
+    build:
+      <<: *orabbit-build
+      target: master
+    command:
+      - "-db"
+      - "/var/lib/orabbit/master.sqlite"
+      - "-http-addr"
+      - "0.0.0.0:9100"
+      - "-grpc-addr"
+      - "0.0.0.0:9102"
+      - "-insecure=true"
+      # Plaintext gRPC stays on the private e2e network; 9102 is not published.
+      - "-allow-insecure-remote-grpc=true"
+      - "-log-format"
+      - "json"
+    environment:
+      ORABBIT_HTTP_AUTH_TOKEN: "${ORABBIT_HTTP_AUTH_TOKEN:?set ORABBIT_HTTP_AUTH_TOKEN}"
+      ORABBIT_WORKER_AUTH_TOKEN: "${ORABBIT_WORKER_AUTH_TOKEN:?set ORABBIT_WORKER_AUTH_TOKEN}"
+      ORABBIT_MASTER_KEY: "${ORABBIT_MASTER_KEY:?set ORABBIT_MASTER_KEY}"
+      AWS_EC2_METADATA_DISABLED: "true"
+      # Short catalog timings so the fault scenarios finish in seconds. The
+      # injected catalog delay (test/e2e) must stay longer than the timeout.
+      ORABBIT_REGISTRATION_TIMEOUT: 10s
+      ORABBIT_REGISTRATION_LEASE_DURATION: 6s
+      ORABBIT_RECONCILIATION_LEASE_DURATION: 6s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      ice-rest-catalog:
+        condition: service_started
+    ports:
+      - "127.0.0.1:19100:9100"
+
+  worker:
+    image: orabbit-worker:e2e
+    build:
+      <<: *orabbit-build
+      target: worker
+    command:
+      - "-master"
+      - "master:9102"
+      - "-worker-id"
+      - "e2e-worker-1"
+      - "-worker-addr"
+      - "worker"
+      - "-insecure=true"
+      - "-poll"
+      - "1s"
+    environment:
+      ORABBIT_WORKER_AUTH_TOKEN: "${ORABBIT_WORKER_AUTH_TOKEN:?set ORABBIT_WORKER_AUTH_TOKEN}"
+    depends_on:
+      master:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully

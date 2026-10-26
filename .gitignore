@@ -9,6 +9,7 @@
 
 # Logs
 *.log
+/e2e-artifacts/
 
 # Build outputs
 /orabbit-client
