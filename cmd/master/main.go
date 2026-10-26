@@ -30,6 +30,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "rotate-master-key" {
 		os.Exit(runRotateMasterKey(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "check-db" {
+		os.Exit(runCheckDB(os.Args[2:]))
+	}
 	os.Exit(run())
 }
 
