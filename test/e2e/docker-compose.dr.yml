@@ -1,0 +1,45 @@
+# Disaster-recovery overlay for the end-to-end stack: the master keeps its
+# database on a volume, and Litestream replicates it to MinIO with the
+# production litestream.yml. Used by the restore drill (ORABBIT_E2E_DR=1
+# scripts/e2e.sh), which deletes the volume to simulate losing the master
+# host and restores it with scripts/master-restore.sh.
+services:
+  master:
+    volumes:
+      - master_data:/var/lib/orabbit
+
+  backup-bucket-init:
+    image: levonghukas/mc:RELEASE.2025-08-13T08-35-41Z-r1
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        mc alias set e2e http://minio:9000 e2e-access e2e-secret-key
+        mc mb -p e2e/e2e-backups
+    restart: "no"
+
+  litestream:
+    image: litestream/litestream:0.3.13
+    command: ["replicate", "-config", "/etc/litestream.yml"]
+    environment:
+      LITESTREAM_BUCKET: e2e-backups
+      # The drill restores from master-a and replicates the restored master
+      # to a new path, as the runbook requires.
+      LITESTREAM_PATH: ${E2E_LITESTREAM_PATH:-master-a}
+      LITESTREAM_ENDPOINT: http://minio:9000
+      LITESTREAM_REGION: us-east-1
+      LITESTREAM_FORCE_PATH_STYLE: "true"
+      AWS_ACCESS_KEY_ID: e2e-access
+      AWS_SECRET_ACCESS_KEY: e2e-secret-key
+    volumes:
+      - master_data:/var/lib/orabbit
+      - ../../litestream.yml:/etc/litestream.yml:ro
+    depends_on:
+      backup-bucket-init:
+        condition: service_completed_successfully
+
+volumes:
+  master_data:

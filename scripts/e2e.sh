@@ -8,14 +8,26 @@
 #
 # Set ORABBIT_E2E_SKIP_BUILD=1 when the orabbit-master:e2e and
 # orabbit-worker:e2e images are already built (CI builds them with its cache).
+# Set ORABBIT_E2E_DR=1 to add the Litestream backup (docker-compose.dr.yml)
+# and run the disaster-recovery drill; its report is written to the
+# artifacts directory on success too.
 # Set ORABBIT_E2E_KEEP=1 to leave the stack running for debugging; remove it
 # later with: docker compose -p orabbit-e2e down -v
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-compose=(docker compose -f test/e2e/docker-compose.yml)
+services=(postgres minio ice-rest-catalog master worker)
+COMPOSE_FILE=test/e2e/docker-compose.yml
+if [ "${ORABBIT_E2E_DR:-0}" = "1" ]; then
+	COMPOSE_FILE="$COMPOSE_FILE:test/e2e/docker-compose.dr.yml"
+	services+=(litestream)
+fi
+# Exported so the drill's restore and verify scripts use the same stack.
+export COMPOSE_FILE
+compose=(docker compose)
 artifacts="${ORABBIT_E2E_ARTIFACTS:-e2e-artifacts}"
+export ORABBIT_E2E_ARTIFACTS="$artifacts"
 
 # Throwaway secrets for this stack only, never reused.
 ORABBIT_HTTP_AUTH_TOKEN="$(openssl rand -hex 32)"
@@ -51,6 +63,6 @@ trap cleanup EXIT
 if [ "${ORABBIT_E2E_SKIP_BUILD:-0}" != "1" ]; then
 	"${compose[@]}" build
 fi
-"${compose[@]}" up -d --wait --wait-timeout 180 postgres minio ice-rest-catalog master worker
+"${compose[@]}" up -d --wait --wait-timeout 180 "${services[@]}"
 
-ORABBIT_E2E=1 go test -count=1 -timeout 15m -v ./test/e2e/
+ORABBIT_E2E=1 go test -count=1 -timeout 20m -v ./test/e2e/
