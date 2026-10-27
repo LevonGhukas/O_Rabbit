@@ -255,6 +255,9 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 		srcEngine = "db"
 	}
 	o.SourceMode = o.NormalizedSourceMode()
+	if err := jobopts.ValidateReconciliationEngine(o, srcEngine); err != nil {
+		return db.Run{}, nil, failure.NewFailure(failure.FailureConfigurationInvalid, false, true, err)
+	}
 	if strings.TrimSpace(o.WhereClause) != "" {
 		if err := connectors.ValidateWhereClause(o.WhereClause); err != nil {
 			return db.Run{}, nil, failure.NewFailure(failure.FailureConfigurationInvalid, false, true, fmt.Errorf("options_json.where_clause is invalid: %w", err))
@@ -554,6 +557,9 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 				}
 				return db.Run{}, nil, fmt.Errorf("cursor column %q was not found in table %q", cursorColumn, o.Table)
 			}
+			if o.EffectiveReconciliation().Enabled() {
+				return db.Run{}, nil, failure.NewFailure(failure.FailureConfigurationInvalid, false, true, fmt.Errorf("options_json.reconciliation needs the cursor column %q to exist so extraction and the count share one range", cursorColumn))
+			}
 			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, "", connectors.CursorDomainInt64, "", false, "")
 			tasks := []db.TaskInsert{{
 				ID:            newID(),
@@ -744,11 +750,17 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 				return db.Run{}, nil, err
 			}
 		} else {
-			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, cursorColumn, cv.Domain, lowerBound, lowerExclusive, snapshotCtx)
+			part, err := singleCursorSpecWithUpper(o, partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, cursorColumn, cv.Domain, lowerBound, lowerExclusive, snapshotCtx), stats.MaxValue)
+			if err != nil {
+				return db.Run{}, nil, err
+			}
 			tasks = []db.TaskInsert{{ID: newID(), RunID: run.ID, TaskIndex: idx, PartitionSpec: part, Status: "PENDING"}}
 		}
 		if len(tasks) == 0 {
-			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, cursorColumn, cv.Domain, lowerBound, lowerExclusive, snapshotCtx)
+			part, err := singleCursorSpecWithUpper(o, partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, cursorColumn, cv.Domain, lowerBound, lowerExclusive, snapshotCtx), stats.MaxValue)
+			if err != nil {
+				return db.Run{}, nil, err
+			}
 			tasks = []db.TaskInsert{{ID: newID(), RunID: run.ID, TaskIndex: idx, PartitionSpec: part, Status: "PENDING"}}
 		}
 

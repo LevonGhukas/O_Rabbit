@@ -75,6 +75,10 @@ type Options struct {
 
 	// Consistency configuration
 	ConsistencyMode string `json:"consistency_mode,omitempty"`
+
+	// Reconciliation optionally counts the planned source range at commit and
+	// compares it with the rows written. Absent means off.
+	Reconciliation *Reconciliation `json:"reconciliation,omitempty"`
 }
 
 func (o Options) NormalizedSourceMode() string {
@@ -244,6 +248,11 @@ func (o Options) MergeInto(existing map[string]any) map[string]any {
 		m["consistency_mode"] = strings.ToUpper(v)
 	} else {
 		delete(m, "consistency_mode")
+	}
+	if o.Reconciliation != nil {
+		m["reconciliation"] = o.EffectiveReconciliation()
+	} else {
+		delete(m, "reconciliation")
 	}
 	return m
 }

@@ -426,3 +426,70 @@ func TestCassandraConnectorConformanceIntegration(t *testing.T) {
 		t.Fatalf("token bounds=%+v, want ordered int64 tokens", stats)
 	}
 }
+
+// TestSQLCountRangeMatchesQueryCursorIntegration checks that CountRange counts
+// exactly the rows QueryCursor returns for the same CursorQuery.
+func TestSQLCountRangeMatchesQueryCursorIntegration(t *testing.T) {
+	ran := false
+	for _, e := range sqlConformanceEngines() {
+		dsn := os.Getenv(e.env)
+		if dsn == "" {
+			continue
+		}
+		ran = true
+		t.Run(e.engine, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			seed, err := e.seedDB(dsn)
+			if err != nil {
+				t.Fatalf("open seed connection: %v", err)
+			}
+			defer seed.Close()
+			seedConformanceTable(t, ctx, seed, e)
+			r, err := OpenCursorReader(ctx, e.engine, dsn)
+			if err != nil {
+				t.Fatalf("open reader: %v", err)
+			}
+			defer r.Close()
+			counter, ok := r.(RangeCounter)
+			if !ok {
+				t.Fatalf("%s reader does not implement RangeCounter", e.engine)
+			}
+			base := CursorQuery{Table: e.tableName(), CursorColumn: "id", CursorDomain: CursorDomainInt64}
+			cases := map[string]func(CursorQuery) CursorQuery{
+				"no bounds": func(q CursorQuery) CursorQuery { return q },
+				"exclusive lower inclusive upper": func(q CursorQuery) CursorQuery {
+					q.LowerBound, q.LowerExclusive, q.UpperBound, q.UpperInclusive = "10", true, "20", true
+					return q
+				},
+				"inclusive lower exclusive upper": func(q CursorQuery) CursorQuery {
+					q.LowerBound, q.UpperBound = "10", "20"
+					return q
+				},
+				"where clause": func(q CursorQuery) CursorQuery {
+					q.LowerBound, q.LowerExclusive, q.UpperBound, q.UpperInclusive = "10", true, "20", true
+					q.WhereClause = "amount >= 15"
+					return q
+				},
+			}
+			for name, mutate := range cases {
+				q := mutate(base)
+				rows, _, _, _, err := r.QueryCursor(ctx, q)
+				if err != nil {
+					t.Fatalf("%s: query: %v", name, err)
+				}
+				want := int64(countRows(t, rows))
+				got, err := counter.CountRange(ctx, q)
+				if err != nil {
+					t.Fatalf("%s: count: %v", name, err)
+				}
+				if got != want {
+					t.Fatalf("%s: CountRange=%d, QueryCursor rows=%d", name, got, want)
+				}
+			}
+		})
+	}
+	if !ran {
+		t.Skip("set ORABBIT_IT_*_DSN to run against real databases")
+	}
+}

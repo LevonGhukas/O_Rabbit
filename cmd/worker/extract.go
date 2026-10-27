@@ -84,19 +84,7 @@ func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 	defer cancel()
 
 	queryStart := time.Now()
-	rows, cols, colTypes, cursorIdx, err := src.QueryCursor(qctx, connectors.CursorQuery{
-		Table:          ps.Table,
-		SourceQuery:    sourceQuery,
-		CursorColumn:   ps.CursorColumn,
-		CursorDomain:   connectors.NormalizeCursorDomain(ps.CursorDomain),
-		LowerBound:     ps.Lower,
-		UpperBound:     ps.Upper,
-		LowerExclusive: ps.LowerExclusive,
-		UpperInclusive: ps.UpperInclusive,
-		WhereClause:    ps.WhereClause,
-		SelectColumns:  ps.SelectColumns,
-		ColumnTypes:    ps.ColumnTypes,
-	})
+	rows, cols, colTypes, cursorIdx, err := src.QueryCursor(qctx, ps.CursorQuery(sourceQuery))
 	if err != nil {
 		return res, fmt.Errorf("query cursor partition: %w", err)
 	}

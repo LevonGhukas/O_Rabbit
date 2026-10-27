@@ -328,6 +328,73 @@ Safe ways to remove deleted rows today:
 - Many teams combine both: incremental runs for freshness and a scheduled
   full refresh to drop deleted rows.
 
+### Source reconciliation
+
+An artifact checksum and the worker's row count prove that what was written is
+intact, not that the worker read every row of its range. An optional check
+closes that gap: at commit, after the artifacts verify and before anything is
+published, the master runs `SELECT COUNT(*)` on the source for each task's
+planned range and compares it with the rows the task wrote.
+
+```json
+"partition_strategy": "ordered_cursor",
+"reconciliation": {"mode": "count", "consistency": "immutable", "on_mismatch": "review"}
+```
+
+| Key | Values (default first) | Meaning |
+| --- | --- | --- |
+| `mode` | `off`, `count` | `count` turns the check on. Absent means off. |
+| `consistency` | `none`, `immutable` | `immutable` asserts that the rows of the planned range do not change while the run is in flight. |
+| `on_mismatch` | `fail`, `review` | What a proven mismatch does. |
+
+The count uses the same table or query, where clause, bounds and inclusivity as
+extraction, taken from the task's planned range, never from the worker-reported
+high-water mark. With `count`, the planner pins a single-task run to the maximum
+cursor value it saw at plan time (an inclusive upper bound), so rows inserted
+afterwards fall outside both the extraction and the count. Range-split runs
+already carry plan-time upper bounds. Where no plan-time maximum is known
+(cursors that cannot be range-split, or an empty source at plan time) the task
+stays unbounded above, so rows added to the source during the run count as a
+difference: with `consistency: immutable` that is a mismatch.
+
+Each task ends as:
+
+- `match`: source and output counts are equal.
+- `mismatch`: they differ and `consistency` is `immutable`. This is proven data
+  loss. `on_mismatch: fail` fails the run terminally; `review` fails it with
+  `operator_action_required` and failure class `OPERATOR_ACTION_REQUIRED`. Either
+  way nothing is committed, so the dataset state and the high-water mark do not
+  move; investigate and re-run. There is no action to force-commit a held run.
+- `indeterminate`: they differ and `consistency` is `none`. A mutable source may
+  have changed, so this is recorded as a warning and the commit proceeds.
+- `error`: the count query failed. The commit is retried; an error is never a
+  mismatch.
+
+Results are stored per task and appear in `GET /runs/{id}/diagnosis` as
+`source_reconciliation` (counts per status and every task that did not match,
+with bounds, source rows, output rows and detail).
+
+Limits and cost:
+
+- Needs `partition_strategy: ordered_cursor` and a source of postgres, mysql,
+  mariadb, mssql, oracle, clickhouse or trino. Other engines are rejected when
+  the job is saved.
+- In query mode the job cannot also set `where_clause` (it is ignored in query
+  mode today, see TID-982); put the filter in the query.
+- One extra `COUNT(*)` per task on the source at commit time, so keep an index on
+  the cursor column. The counts run inside the commit timeout
+  (`ORABBIT_COMMIT_TIMEOUT`); a commit that exceeds it is interrupted and retried
+  without recording a failure, so keep the total count time well below it. Pool jobs are counted from the master, which must reach the
+  source (it already does for ordered-cursor planning).
+- `consistency_mode: STRONG_SNAPSHOT` is not applied by the worker yet (TID-981),
+  so it does not make a source immutable; only `reconciliation.consistency`
+  controls how a difference is classified.
+- Rows with a NULL cursor value are outside every bounded range: both extraction
+  and the count exclude them, so reconciliation cannot detect them. The planner
+  rejects cursors it knows are nullable; nullability the catalog does not report
+  is not caught.
+- It is not run again when a commit is retried after its manifest was written.
+
 ### Column types
 
 Source types are mapped to Arrow, Parquet and Iceberg types automatically.
