@@ -266,6 +266,30 @@ func (e *env) assertFaultFired(t *testing.T, f *catalogFault) {
 // runs, each once.
 func (e *env) assertTable(ctx context.Context, t *testing.T, table string, want []exportedRow, runs []string) tableView {
 	t.Helper()
+	return e.assertTableFiles(ctx, t, table, want, e.runFiles(ctx, t, runs))
+}
+
+// runFiles returns the Iceberg paths of the files the master accepted for
+// runs.
+func (e *env) runFiles(ctx context.Context, t *testing.T, runs []string) []string {
+	t.Helper()
+	var out []string
+	for _, runID := range runs {
+		keys, err := e.master.artifactKeys(ctx, runID)
+		if err != nil {
+			t.Fatalf("artifacts of run %s: %v", runID, err)
+		}
+		for _, key := range keys {
+			out = append(out, "s3://"+bucket+"/"+strings.TrimPrefix(key, "/"))
+		}
+	}
+	return out
+}
+
+// assertTableFiles is assertTable with the expected data files given
+// directly, for runs the master no longer knows.
+func (e *env) assertTableFiles(ctx context.Context, t *testing.T, table string, want []exportedRow, wantFiles []string) tableView {
+	t.Helper()
 	view, err := e.catalog.load(ctx, "e2e", table)
 	if err != nil {
 		t.Fatalf("load e2e.%s from the catalog: %v", table, err)
@@ -287,16 +311,7 @@ func (e *env) assertTable(ctx context.Context, t *testing.T, table string, want 
 	if err != nil {
 		t.Fatalf("list data files of e2e.%s: %v", table, err)
 	}
-	var wantFiles []string
-	for _, runID := range runs {
-		keys, err := e.master.artifactKeys(ctx, runID)
-		if err != nil {
-			t.Fatalf("artifacts of run %s: %v", runID, err)
-		}
-		for _, key := range keys {
-			wantFiles = append(wantFiles, "s3://"+bucket+"/"+strings.TrimPrefix(key, "/"))
-		}
-	}
+	wantFiles = append([]string(nil), wantFiles...)
 	sort.Strings(wantFiles)
 	gotFiles := make([]string, 0, len(files))
 	var records int64

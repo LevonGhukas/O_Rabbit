@@ -186,6 +186,12 @@ UPDATE jobs SET write_mode = 'overwrite'
  WHERE incremental <> 0 AND lower(trim(write_mode)) = 'overwrite' AND write_mode <> 'overwrite';
 `
 
+// schemaV32 stores the rows each task read at its largest cursor value, which
+// the commit turns into the dataset's high-water-mark boundary.
+const schemaV32 = `
+ALTER TABLE tasks ADD COLUMN hwm_boundary_json TEXT NOT NULL DEFAULT '';
+`
+
 const schemaV30 = `
 CREATE INDEX IF NOT EXISTS idx_jobs_name_created ON jobs(name, created_at);
 `

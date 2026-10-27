@@ -24,3 +24,14 @@ CREATE TABLE events (
 INSERT INTO events (id, name, created_at)
 SELECT g, 'event-' || g, timestamptz '2026-01-01 00:00:00+00' + g * interval '1 minute'
 FROM generate_series(1, 1000) AS g;
+
+-- Exported with incremental append runs by the disaster-recovery drill.
+CREATE TABLE orders (
+  id         bigint PRIMARY KEY,
+  name       text NOT NULL,
+  created_at timestamptz NOT NULL
+);
+
+INSERT INTO orders (id, name, created_at)
+SELECT g, 'order-' || g, timestamptz '2026-01-01 00:00:00+00' + g * interval '1 minute'
+FROM generate_series(1, 1000) AS g;

@@ -285,10 +285,32 @@ the engine default. The job value wins over the same setting in the DSN.
 
 ### Incremental exports and late-arriving rows
 
-An incremental run resumes strictly after the dataset's high-water mark, the
-largest cursor value committed so far. Rows that become visible later with a
-smaller cursor value are missed, for example an `updated_at` set when a
-transaction starts but committed after a run has read past it.
+An incremental run resumes at the dataset's high-water mark, the largest
+cursor value committed so far, and reads `cursor >= mark`. Rows committed
+later with the same cursor value as the mark are therefore exported by the
+next run. To avoid exporting the rows at the mark twice, each commit stores
+the hashes of the rows sitting exactly at the new mark in `_state.json`
+(`hwm_boundary`), and the next run drops boundary rows whose hash is stored.
+Rows with identical content are counted, so a new identical row is still
+exported.
+
+- A dataset whose `_state.json` predates the boundary is seeded by its next
+  run: rows at the mark are treated as already exported and their hashes are
+  recorded. Late rows that arrived before that run cannot be told apart from
+  exported ones and are not recovered.
+- At most 10,000 distinct rows are kept per mark. Above that (typical for
+  coarse cursors such as a `date` column) the run logs a `WARN`
+  `hwm boundary resume` event and resumes strictly after the mark, so late
+  rows with the mark's value can be missed.
+- Cursors of unknown type always resume strictly after the mark.
+- Only SQL sources track the boundary; MongoDB and file sources are unchanged.
+- A row's hash covers every selected column, so changing the selected
+  columns, their types, or a query whose result is not repeatable (for
+  example one selecting `now()`) exports the rows at the mark once more.
+
+Rows that become visible later with a *smaller* cursor value are still
+missed, for example an `updated_at` set when a transaction starts but
+committed after a run has read past it.
 
 Set the job option `cursor_lookback` to re-read a window below the mark on
 every run: a count for integer cursors (`"1000"`) or a duration for date and
@@ -811,7 +833,7 @@ network-level restrictions.
 - gRPC TLS with enrolled worker identities for any cross-host worker
 - Ports 9100/9102, source databases and object storage restricted at the network layer
 - Read-only users for every source connection
-- Master SQLite backed up (Litestream or `sqlite3 .backup`), and `ORABBIT_MASTER_KEY` stored separately
+- Master SQLite backed up (Litestream or `sqlite3 .backup`), verified regularly with `scripts/verify-master-backup.sh`, and `ORABBIT_MASTER_KEY` stored separately
 - All example MinIO and catalog credentials replaced
 - Cleanup dry-run and retention settings reviewed before enabling deletion
 - Mounted TLS files readable by uid `10001`
@@ -820,7 +842,10 @@ network-level restrictions.
 
 > [!NOTE]
 > **The master is a single point of failure**: there is no automatic failover.
-> Run it under a supervisor that restarts it, and back up its database. See
+> Run it under a supervisor that restarts it, and back up its database. With
+> the Litestream backup the targets are an RPO of 1 minute and an RTO of
+> 30 minutes, checked by a weekly restore drill; restore with
+> `scripts/master-restore.sh`. See
 > [docs/master-backup-restore.md](docs/master-backup-restore.md).
 
 > [!NOTE]
@@ -933,7 +958,7 @@ internal/
 proto/                 Control-plane protobuf source
 docs/                  OpenAPI spec, backup runbook, design review
 docker/minio/          Patched MinIO image build
-scripts/               CI helpers (vulnerability check, end-to-end test)
+scripts/               CI helpers (vulnerability check, end-to-end test), master restore and backup verification
 test/e2e/              End-to-end stack and tests
 ```
 
@@ -993,6 +1018,9 @@ The script builds the images, starts the isolated `orabbit-e2e` stack from
 `go test ./test/e2e`, saves container logs to `e2e-artifacts/` on failure and
 removes the stack. `ORABBIT_E2E_KEEP=1` leaves the stack running for
 debugging. Without `ORABBIT_E2E=1`, `go test ./...` skips these tests.
+`ORABBIT_E2E_DR=1 ./scripts/e2e.sh` adds the master's Litestream backup and
+runs the restore drill described in
+[docs/master-backup-restore.md](docs/master-backup-restore.md#restore-drill).
 
 ### CI
 
@@ -1000,6 +1028,7 @@ debugging. Without `ORABBIT_E2E=1`, `go test ./...` skips these tests.
 |---|---|---|
 | [CI](.github/workflows/ci.yml) | Pull requests; reused by Release images | Unit tests (race detector), integration tests against PostgreSQL, MySQL, MariaDB and ClickHouse, the end-to-end test (`scripts/e2e.sh`), `golangci-lint`, `shellcheck`, Compose validation, vulnerability check, and an image build, smoke test and Trivy scan |
 | [Release images](.github/workflows/release.yml) | Push to `main` | Runs CI, then pushes `latest-master` and `latest-worker` |
+| [Restore drill](.github/workflows/dr-drill.yml) | Every Monday, and on demand | Loses and restores the master in the end-to-end stack (`ORABBIT_E2E_DR=1 scripts/e2e.sh`) and keeps the measured RTO/RPO report |
 | [Vulnerability check](.github/workflows/vulncheck.yml) | Within CI, and every Monday | `scripts/vulncheck.sh`: fails on reachable Go vulnerabilities not reviewed in `.govulncheck-allow` |
 | [MinIO images](.github/workflows/minio-images.yml) | Changes under `docker/minio/` | Builds, tests, scans and publishes the MinIO images |
 
@@ -1088,7 +1117,9 @@ crash is marked `FAILED` at the next start.
 <summary><b>The master cannot decrypt stored secrets</b></summary>
 
 Restore the exact `ORABBIT_MASTER_KEY` that wrote them. A new key cannot read
-old values; use key rotation to change it.
+old values; use key rotation to change it. `orabbit-master check-db -db
+<path>` checks a database against the key in `ORABBIT_MASTER_KEY` without
+starting a master or changing the file (it also runs SQLite's integrity check).
 
 </details>
 

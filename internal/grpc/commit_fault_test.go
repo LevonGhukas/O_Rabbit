@@ -277,7 +277,7 @@ func newCommitFixtureWithChecksum(t *testing.T, suffix string, registrationEnabl
 		rows = 10
 		written = int64(len(parquetBytes))
 	}
-	if accepted, _, _, err := st.CompleteTaskAttemptWithArtifactsAt(ctx, "", taskID, assigned.AttemptID, assigned.FencingToken, "worker-"+suffix, "SUCCEEDED", nil, records, rows, 0, written, time.Date(2026, 7, 22, 10, 1, 0, 0, time.UTC)); err != nil || !accepted {
+	if accepted, _, _, err := st.CompleteTaskAttemptWithArtifactsAndFailureClassAt(ctx, "", taskID, assigned.AttemptID, assigned.FencingToken, "worker-"+suffix, "SUCCEEDED", nil, "", records, rows, 0, written, time.Date(2026, 7, 22, 10, 1, 0, 0, time.UTC), hwmBoundary); err != nil || !accepted {
 		t.Fatalf("complete accepted=%v err=%v", accepted, err)
 	}
 	if changed, status, err := st.TryFinalizeRun(ctx, runID); err != nil || !changed || status != "COMMITTING" {

@@ -194,6 +194,15 @@ message ReportTaskResultRequest {
   repeated string parquet_object_keys = 30;
   string max_hwm_value = 31; // optional, as string
   repeated ArtifactIntegrity artifacts = 32;
+  // Rows read at the task's largest cursor value, kept or dropped as already
+  // exported. Set only when the partition spec asks to track the boundary.
+  HWMBoundary hwm_boundary = 33;
+}
+
+message HWMBoundary {
+  string cursor_value = 1;
+  map<string, int64> row_hashes = 2; // row hash -> rows with that content
+  bool overflow = 3;                 // too many rows to list; row_hashes is empty
 }
 
 message ArtifactIntegrity {

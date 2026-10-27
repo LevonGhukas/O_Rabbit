@@ -702,7 +702,7 @@ func TestExplicitFailureClassificationOverridesMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	message := string(artifact.FailureRemoteChecksumMismatch) + ": object bytes differ"
-	if accepted, _, _, err := st.CompleteTaskAttemptWithArtifactsAndFailureClassAt(ctx, "", a.ID, a.AttemptID, a.FencingToken, "worker", "FAILED", &message, string(failure.FailureConfigurationUnavailable), nil, 0, 0, 0, t0.Add(time.Second)); err != nil || !accepted {
+	if accepted, _, _, err := st.CompleteTaskAttemptWithArtifactsAndFailureClassAt(ctx, "", a.ID, a.AttemptID, a.FencingToken, "worker", "FAILED", &message, string(failure.FailureConfigurationUnavailable), nil, 0, 0, 0, t0.Add(time.Second), nil); err != nil || !accepted {
 		t.Fatalf("accepted=%v err=%v", accepted, err)
 	}
 	attempts, err := st.ListTaskAttempts(ctx, a.ID)

@@ -22,6 +22,7 @@ import (
 	grpcapi "github.com/LevonGhukas/O_Rabbit/internal/grpc"
 	"github.com/LevonGhukas/O_Rabbit/internal/grpcpb"
 	"github.com/LevonGhukas/O_Rabbit/internal/partitionspec"
+	"github.com/LevonGhukas/O_Rabbit/internal/hwmboundary"
 	"github.com/LevonGhukas/O_Rabbit/internal/sysinfo"
 	"github.com/LevonGhukas/O_Rabbit/internal/telemetry"
 	"github.com/LevonGhukas/O_Rabbit/internal/workerworkspace"
