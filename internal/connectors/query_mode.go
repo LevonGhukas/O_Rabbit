@@ -170,61 +170,62 @@ func QueryHash(query string) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-func buildQueryModeCursorSQL(engine string, q CursorQuery) (string, []any, error) {
+// queryModeRange resolves the dialect, the wrapped source expression and the
+// bound predicate shared by query-mode row and count statements. Query mode
+// does not apply where_clause (tracked separately), so neither statement does.
+func queryModeRange(engine string, q CursorQuery) (queryModeDialect, rangeSQL, error) {
 	d, ok := queryModeDialectForEngine(engine)
 	if !ok {
-		return "", nil, fmt.Errorf("query mode is not supported for %s", NormalizeSourceEngine(engine))
+		return d, rangeSQL{}, fmt.Errorf("query mode is not supported for %s", NormalizeSourceEngine(engine))
 	}
 	sourceQuery, err := NormalizeReadOnlySQLQuery(q.SourceQuery)
 	if err != nil {
-		return "", nil, err
+		return d, rangeSQL{}, err
 	}
 	qc, err := d.quoteCursorColumn(q.CursorColumn)
 	if err != nil {
+		return d, rangeSQL{}, err
+	}
+	rng, err := newRangeSQL(q, d.sourceExpr(sourceQuery), qc, false, d.placeholder)
+	return d, rng, err
+}
+
+func buildQueryModeCursorSQL(engine string, q CursorQuery) (string, []any, error) {
+	d, rng, err := queryModeRange(engine, q)
+	if err != nil {
 		return "", nil, err
 	}
-	if NormalizeCursorDomain(string(q.CursorDomain)) == CursorDomainUnknown {
-		return "", nil, fmt.Errorf("cursor domain is required")
-	}
-
-	clauses := make([]string, 0, 2)
-	args := make([]any, 0, 2)
-	argPos := 1
-	if strings.TrimSpace(q.LowerBound) != "" {
-		lowerArg, err := ParseCursorArgument(q.CursorDomain, q.LowerBound)
-		if err != nil {
-			return "", nil, err
-		}
-		op := ">="
-		if q.LowerExclusive {
-			op = ">"
-		}
-		clauses = append(clauses, fmt.Sprintf("%s %s %s", qc, op, d.placeholder(argPos)))
-		args = append(args, lowerArg)
-		argPos++
-	}
-	if strings.TrimSpace(q.UpperBound) != "" {
-		upperArg, err := ParseCursorArgument(q.CursorDomain, q.UpperBound)
-		if err != nil {
-			return "", nil, err
-		}
-		op := "<"
-		if q.UpperInclusive {
-			op = "<="
-		}
-		clauses = append(clauses, fmt.Sprintf("%s %s %s", qc, op, d.placeholder(argPos)))
-		args = append(args, upperArg)
-	}
-
-	query := "SELECT * FROM " + d.sourceExpr(sourceQuery)
-	if len(clauses) > 0 {
-		query += " WHERE " + strings.Join(clauses, " AND ")
-	}
+	query := "SELECT * FROM " + rng.Table + rng.whereSQL()
 	if d.orderedReadsOn != nil && d.orderedReadsOn() {
-		query += fmt.Sprintf(" ORDER BY %s ASC", qc)
+		query += fmt.Sprintf(" ORDER BY %s ASC", rng.Cursor)
 	}
 	query += d.terminator
-	return query, args, nil
+	return query, rng.Args, nil
+}
+
+// buildQueryModeCountSQL counts the rows buildQueryModeCursorSQL selects.
+func buildQueryModeCountSQL(engine string, q CursorQuery) (string, []any, error) {
+	d, rng, err := queryModeRange(engine, q)
+	if err != nil {
+		return "", nil, err
+	}
+	expr := countExpr
+	switch d.engine {
+	case "mssql":
+		expr = mssqlCountExpr
+	case "clickhouse":
+		expr = clickHouseCountExpr
+	}
+	return countFrom(expr, rng.Table, rng) + d.terminator, rng.Args, nil
+}
+
+// queryModeCount runs the count for a query-mode CursorQuery.
+func queryModeCount(ctx context.Context, db *sql.DB, engine string, q CursorQuery) (int64, error) {
+	query, args, err := buildQueryModeCountSQL(engine, q)
+	if err != nil {
+		return 0, err
+	}
+	return queryRangeCount(ctx, db, query, args)
 }
 
 func buildQueryModeStatsSQL(engine, query, cursorColumn string) (string, error) {

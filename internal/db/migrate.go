@@ -46,6 +46,7 @@ var migrations = []migration{
 	{version: 30, sql: schemaV30},
 	{version: 31, sql: schemaV31},
 	{version: 32, sql: schemaV32},
+	{version: 33, sql: schemaV33},
 }
 
 // normalizeStoredTimestamps rewrites every stored timestamp in
@@ -169,6 +170,27 @@ UPDATE jobs SET write_mode = 'overwrite'
 // the commit turns into the dataset's high-water-mark boundary.
 const schemaV32 = `
 ALTER TABLE tasks ADD COLUMN hwm_boundary_json TEXT NOT NULL DEFAULT '';
+`
+
+// schemaV33 records the optional commit-time source reconciliation, one row per
+// task, upserted because a commit attempt can be retried.
+const schemaV33 = `
+CREATE TABLE IF NOT EXISTS source_reconciliations (
+  run_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  method TEXT NOT NULL,
+  consistency TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  lower_bound TEXT NOT NULL DEFAULT '',
+  lower_exclusive INTEGER NOT NULL DEFAULT 0,
+  upper_bound TEXT NOT NULL DEFAULT '',
+  upper_inclusive INTEGER NOT NULL DEFAULT 0,
+  source_rows INTEGER NOT NULL DEFAULT 0,
+  output_rows INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (run_id, task_id)
+);
 `
 
 const schemaV30 = `

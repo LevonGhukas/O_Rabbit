@@ -66,6 +66,7 @@ type Server struct {
 	completeRunCommitFn        func(context.Context, string) error
 	runIcebergRegistrationFn   func(context.Context, string) (bool, icebergreg.RunResult, error)
 	newCommitObjectStoreFn     func(context.Context, s3io.Config) (commitObjectStore, error)
+	openSourceCounterFn        func(context.Context, string, string) (sourceRangeCounter, error)
 	upsertHWMFn                func(context.Context, string, string) error
 	leasePolicy                db.LeasePolicy
 	nowFn                      func() time.Time
@@ -149,6 +150,7 @@ func NewServer(log *slog.Logger, st *db.Store, bc *httpapi.Broadcaster, k crypto
 		icebergRegistrar: registrar,
 	}
 	s.commitRunFn = s.commitRun
+	s.openSourceCounterFn = openSourceRangeCounter
 	s.completeRunCommitFn = st.CompleteRunCommit
 	s.runIcebergRegistrationFn = s.runIcebergRegistration
 	s.newCommitObjectStoreFn = func(ctx context.Context, cfg s3io.Config) (commitObjectStore, error) {

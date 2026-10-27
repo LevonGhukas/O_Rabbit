@@ -49,17 +49,18 @@ type DiagnosisRegistration struct {
 }
 
 type RunDiagnosis struct {
-	RunID               string                 `json:"run_id"`
-	Status              string                 `json:"status"`
-	CommitPhase         string                 `json:"commit_phase,omitempty"`
-	CommitAgeSeconds    float64                `json:"commit_age_seconds,omitempty"`
-	LastClassifiedError string                 `json:"last_classified_error,omitempty"`
-	TaskCounts          map[string]int         `json:"task_counts"`
-	BlockingTasks       []DiagnosisTask        `json:"blocking_tasks,omitempty"`
-	Registration        *DiagnosisRegistration `json:"registration,omitempty"`
-	OperatorReview      bool                   `json:"operator_review_required"`
-	SuggestedNextAction string                 `json:"suggested_next_action"`
-	GeneratedAt         string                 `json:"generated_at"`
+	RunID                string                       `json:"run_id"`
+	Status               string                       `json:"status"`
+	CommitPhase          string                       `json:"commit_phase,omitempty"`
+	CommitAgeSeconds     float64                      `json:"commit_age_seconds,omitempty"`
+	LastClassifiedError  string                       `json:"last_classified_error,omitempty"`
+	TaskCounts           map[string]int               `json:"task_counts"`
+	BlockingTasks        []DiagnosisTask              `json:"blocking_tasks,omitempty"`
+	Registration         *DiagnosisRegistration       `json:"registration,omitempty"`
+	SourceReconciliation *SourceReconciliationSummary `json:"source_reconciliation,omitempty"`
+	OperatorReview       bool                         `json:"operator_review_required"`
+	SuggestedNextAction  string                       `json:"suggested_next_action"`
+	GeneratedAt          string                       `json:"generated_at"`
 }
 
 func (s *Store) DiagnoseRun(ctx context.Context, runID string, now time.Time, maxAttempts int) (RunDiagnosis, error) {
@@ -155,6 +156,12 @@ func (s *Store) DiagnoseRun(ctx context.Context, runID string, now time.Time, ma
 		}
 	}
 
+	recs, err := s.ListSourceReconciliations(ctx, runID)
+	if err != nil {
+		return RunDiagnosis{}, err
+	}
+	out.SourceReconciliation = SummarizeSourceReconciliations(recs)
+
 	out.OperatorReview, out.SuggestedNextAction = diagnoseNextAction(run, out)
 	return out, nil
 }
@@ -167,6 +174,9 @@ func deadlineExpired(raw string, now time.Time) bool {
 func diagnoseNextAction(run Run, diagnosis RunDiagnosis) (bool, string) {
 	if run.Status == "COMMITTING" {
 		return false, "request commit reconciliation; if it remains stale, verify durable leadership"
+	}
+	if sr := diagnosis.SourceReconciliation; sr != nil && sr.Counts[SourceReconciliationMismatch] > 0 {
+		return true, "source reconciliation found a row-count mismatch between the planned source range and the rows written; nothing was committed. Inspect source_reconciliation.findings, then re-run the job"
 	}
 	for _, task := range diagnosis.BlockingTasks {
 		if task.Status == "QUARANTINED" || task.Status == "FAILED" || (task.Status == "PENDING" && task.AttemptCount >= task.MaxAttempts) {
