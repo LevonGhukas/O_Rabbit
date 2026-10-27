@@ -42,6 +42,11 @@ func (s *Server) apiRoutes() []apiRoute {
 		{v1: "/source-engines", legacy: []string{"/api/source-engines"}, target: "/api/source-engines", handler: s.handleSourceEngines},
 		{v1: "/maintenance/submit", legacy: []string{"/api/maintenance/submit"}, target: "/api/maintenance/submit", handler: s.handleMaintenanceSubmit},
 		{v1: "/sse", legacy: []string{"/sse"}, target: "/sse", handler: SSEHandler(s.log, s.st, s.bc)},
+		// Log viewer: new routes, so there are no legacy aliases.
+		{v1: "/events", target: "/events", handler: s.handleEvents},
+		{v1: "/events/stream", target: "/events/stream", handler: s.handleEventsStream},
+		{v1: "/logs/master", target: "/logs/master", handler: s.handleMasterLogs},
+		{v1: "/logs/master/stream", target: "/logs/master/stream", handler: s.handleMasterLogsStream},
 	}
 }
 

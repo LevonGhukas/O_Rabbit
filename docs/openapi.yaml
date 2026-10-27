@@ -211,6 +211,61 @@ paths:
   /workers/{worker_id}:
     parameters: [{ name: worker_id, in: path, required: true, schema: { type: string } }]
     get: { summary: Worker identity and enrollment routes (see README), responses: { "200": { description: Worker } } }
+  /events:
+    get:
+      summary: Run, task and job events across all runs, newest first (log viewer). Messages and fields are masked.
+      parameters:
+        - { $ref: "#/components/parameters/LogLevel" }
+        - { $ref: "#/components/parameters/LogQuery" }
+        - { $ref: "#/components/parameters/LogSince" }
+        - { $ref: "#/components/parameters/LogUntil" }
+        - { $ref: "#/components/parameters/LogBefore" }
+        - { $ref: "#/components/parameters/LogLimit" }
+        - { name: run_id, in: query, schema: { type: string } }
+        - { name: job_id, in: query, schema: { type: string } }
+        - { name: task_id, in: query, schema: { type: string } }
+        - { name: worker_id, in: query, schema: { type: string } }
+        - { name: count, in: query, description: "1 adds total (capped at 10000, see total_capped)", schema: { type: string, enum: ["1"] } }
+      responses:
+        "200": { description: "{items, next_before, total?, total_capped?}; pass next_before as before for the next older page" }
+        "400": { $ref: "#/components/responses/Error" }
+  /events/stream:
+    get:
+      summary: New matching events as Server-Sent Events (event "log", id = seq). Resumes from Last-Event-ID or after.
+      parameters:
+        - { $ref: "#/components/parameters/LogLevel" }
+        - { $ref: "#/components/parameters/LogQuery" }
+        - { name: after, in: query, schema: { type: integer } }
+        - { name: run_id, in: query, schema: { type: string } }
+        - { name: job_id, in: query, schema: { type: string } }
+        - { name: task_id, in: query, schema: { type: string } }
+        - { name: worker_id, in: query, schema: { type: string } }
+      responses:
+        "200": { description: text/event-stream }
+        "503": { description: Too many live log viewers }
+  /logs/master:
+    get:
+      summary: Recent master log records from an in-memory buffer (10000 records), newest first, masked
+      parameters:
+        - { $ref: "#/components/parameters/LogLevel" }
+        - { $ref: "#/components/parameters/LogQuery" }
+        - { $ref: "#/components/parameters/LogSince" }
+        - { $ref: "#/components/parameters/LogUntil" }
+        - { $ref: "#/components/parameters/LogBefore" }
+        - { $ref: "#/components/parameters/LogLimit" }
+      responses:
+        "200": { description: "{items, total, next_before, capacity}" }
+        "503": { description: Log buffer not enabled }
+  /logs/master/stream:
+    get:
+      summary: New master log records as Server-Sent Events (event "log", id = seq)
+      parameters:
+        - { $ref: "#/components/parameters/LogLevel" }
+        - { $ref: "#/components/parameters/LogQuery" }
+        - { name: after, in: query, schema: { type: integer } }
+      responses:
+        "200": { description: text/event-stream }
+        "503": { description: Too many live log viewers, or log buffer not enabled }
   /maintenance/submit:
     post: { summary: Submit Iceberg maintenance, responses: { "201": { description: Maintenance run } } }
   /sse:
@@ -249,6 +304,12 @@ components:
   parameters:
     RunID: { name: run_id, in: path, required: true, schema: { type: string } }
     JobID: { name: job_id, in: path, required: true, schema: { type: string } }
+    LogLevel: { name: level, in: query, description: "Repeatable or comma-separated: DEBUG, INFO, WARN (WARNING), ERROR, CRITICAL", schema: { type: string } }
+    LogQuery: { name: q, in: query, description: Case-insensitive substring of the message or fields (max 200 chars), schema: { type: string } }
+    LogSince: { name: since, in: query, schema: { type: string, format: date-time } }
+    LogUntil: { name: until, in: query, schema: { type: string, format: date-time } }
+    LogBefore: { name: before, in: query, description: Sequence number; returns older entries, schema: { type: integer } }
+    LogLimit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 200 } }
   requestBodies:
     RunSubmit:
       required: true

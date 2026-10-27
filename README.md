@@ -596,6 +596,26 @@ A `FAILED` run explains itself in `GET /api/v1/runs/{id}`:
 </details>
 
 <details>
+<summary><b>Logs</b> (log viewer API)</summary>
+
+- `GET /events` searches run, task and job events across all runs: `level`
+  (repeatable, `DEBUG`..`CRITICAL`), `run_id`, `job_id`, `task_id`, `worker_id`,
+  `q` (substring), `since`/`until` (RFC 3339), `limit` (1-1000) and `before`
+  (the `next_before` of the previous page). `count=1` adds `total`, capped at
+  10000 (`total_capped`).
+- `GET /logs/master` returns the master's own recent log records from an
+  in-memory buffer of 10000 records; stdout logging is unchanged.
+- `GET /events/stream` and `GET /logs/master/stream` stream new entries as SSE
+  (`event: log`, `id` = sequence). They resume after `Last-Event-ID` or `after`.
+  At most 16 live log streams (including container log streams) run at once.
+- Messages and fields are masked before they are returned: URL passwords,
+  bearer tokens, `password=`/`token=`-style values, private keys and fields with
+  secret-looking names. Container logs (`/servers/{id}/containers/{c}/logs`) are
+  masked the same way.
+
+</details>
+
+<details>
 <summary><b>Remote operations</b> (SSH servers, Docker, deployments)</summary>
 
 The master can manage registered SSH servers: system info, Docker containers
