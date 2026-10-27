@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/envutil"
+	"github.com/LevonGhukas/O_Rabbit/internal/logbuffer"
 )
 
 func (c masterConfig) validateLeasePolicy() error {
@@ -272,14 +273,22 @@ func envPositiveIntDefault(key string, def int) int {
 }
 
 func newMasterLogger(levelRaw, formatRaw string) *slog.Logger {
-	level := parseLogLevel(levelRaw)
-	opts := &slog.HandlerOptions{Level: level}
+	return slog.New(newMasterHandler(levelRaw, formatRaw))
+}
 
-	format := strings.ToLower(strings.TrimSpace(formatRaw))
-	if format == "text" {
-		return slog.New(slog.NewTextHandler(os.Stdout, opts))
+// newMasterBufferedLogger logs to stdout exactly like newMasterLogger and also
+// keeps the most recent records (masked) in memory for GET /logs/master.
+func newMasterBufferedLogger(levelRaw, formatRaw string) (*slog.Logger, *logbuffer.Buffer) {
+	buf := logbuffer.New(logbuffer.DefaultCapacity)
+	return slog.New(logbuffer.NewHandler(newMasterHandler(levelRaw, formatRaw), buf)), buf
+}
+
+func newMasterHandler(levelRaw, formatRaw string) slog.Handler {
+	opts := &slog.HandlerOptions{Level: parseLogLevel(levelRaw)}
+	if strings.ToLower(strings.TrimSpace(formatRaw)) == "text" {
+		return slog.NewTextHandler(os.Stdout, opts)
 	}
-	return slog.New(slog.NewJSONHandler(os.Stdout, opts))
+	return slog.NewJSONHandler(os.Stdout, opts)
 }
 
 func parseLogLevel(raw string) slog.Level {
