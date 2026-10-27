@@ -10,6 +10,7 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/arrowio"
 	"github.com/LevonGhukas/O_Rabbit/internal/connectors"
 	"github.com/LevonGhukas/O_Rabbit/internal/grpcpb"
+	"github.com/LevonGhukas/O_Rabbit/internal/hwmboundary"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 )
@@ -29,6 +30,27 @@ type sourceExtract struct {
 	PartitionLower string
 	PartitionUpper string
 	OutputPart     int64
+	// HWMBoundary is the rows read at the largest cursor value, set when the
+	// partition spec asks to track it.
+	HWMBoundary *hwmboundary.Boundary
+}
+
+// newHWMBoundaryFilter returns the tracker and row filter for a task, or nils
+// when the task neither tracks its boundary nor has rows to skip.
+func newHWMBoundaryFilter(ps partitionSpec) (*hwmboundary.Tracker, arrowio.RowFilter) {
+	if !ps.TrackHWMBoundary && ps.HWMBoundarySkip == nil {
+		return nil, nil
+	}
+	tracker := hwmboundary.NewTracker(connectors.NormalizeCursorDomain(ps.CursorDomain), ps.HWMBoundarySkip)
+	return tracker, tracker.Keep
+}
+
+// hwmBoundaryProto converts a task's boundary for ReportTaskResult.
+func hwmBoundaryProto(b *hwmboundary.Boundary) *grpcpb.HWMBoundary {
+	if b == nil {
+		return nil
+	}
+	return &grpcpb.HWMBoundary{CursorValue: b.CursorValue, RowHashes: b.RowHashes, Overflow: b.Overflow}
 }
 
 // sourceQueryTimeout bounds one partition's source query. It is set once from
@@ -84,19 +106,7 @@ func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 	defer cancel()
 
 	queryStart := time.Now()
-	rows, cols, colTypes, cursorIdx, err := src.QueryCursor(qctx, connectors.CursorQuery{
-		Table:          ps.Table,
-		SourceQuery:    sourceQuery,
-		CursorColumn:   ps.CursorColumn,
-		CursorDomain:   connectors.NormalizeCursorDomain(ps.CursorDomain),
-		LowerBound:     ps.Lower,
-		UpperBound:     ps.Upper,
-		LowerExclusive: ps.LowerExclusive,
-		UpperInclusive: ps.UpperInclusive,
-		WhereClause:    ps.WhereClause,
-		SelectColumns:  ps.SelectColumns,
-		ColumnTypes:    ps.ColumnTypes,
-	})
+	rows, cols, colTypes, cursorIdx, err := src.QueryCursor(qctx, ps.CursorQuery(sourceQuery))
 	if err != nil {
 		return res, fmt.Errorf("query cursor partition: %w", err)
 	}
@@ -104,14 +114,18 @@ func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 	res.QueryMS = time.Since(queryStart).Milliseconds()
 
 	alloc := memory.NewGoAllocator()
+	pw, err := newTaskParquetWriter(ctx, t)
+	if err != nil {
+		return res, err
+	}
 	var (
-		pw       = newParquetRollingWriterWithContext(ctx, t.TargetFileBytes)
 		rowsRead int64
 		lastProg time.Time
 	)
 
+	tracker, keepRow := newHWMBoundaryFilter(ps)
 	convertStart := time.Now()
-	total, actualMaxCursor, err := arrowio.RowsToRecordBatchesEngineWithOverrides(sourceEngine, rows, cols, colTypes, ps.ColumnTypes, 50_000, alloc, cursorIdx, connectors.NormalizeCursorDomain(ps.CursorDomain), func(schema *arrow.Schema, rec arrow.RecordBatch) error {
+	total, actualMaxCursor, err := arrowio.RowsToRecordBatchesEngineFiltered(sourceEngine, rows, cols, colTypes, ps.ColumnTypes, 50_000, alloc, cursorIdx, connectors.NormalizeCursorDomain(ps.CursorDomain), keepRow, func(schema *arrow.Schema, rec arrow.RecordBatch) error {
 		rowsRead += rec.NumRows()
 		if time.Since(lastProg) > 5*time.Second {
 			lastProg = time.Now()
@@ -134,6 +148,10 @@ func extractSQLCursorTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 	if err != nil {
 		pw.Abort()
 		return res, fmt.Errorf("read to arrow/parquet: %w", err)
+	}
+	if tracker != nil {
+		b := tracker.Boundary()
+		res.HWMBoundary = &b
 	}
 	if err := pw.Close(); err != nil {
 		pw.Abort()
@@ -167,7 +185,10 @@ func extractFlightSQLTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contr
 	qctx, cancel := withSourceQueryTimeout(ctx)
 	defer cancel()
 
-	pw := newParquetRollingWriterWithContext(ctx, t.TargetFileBytes)
+	pw, err := newTaskParquetWriter(ctx, t)
+	if err != nil {
+		return res, err
+	}
 	var (
 		rowsRead int64
 		lastProg time.Time
@@ -238,13 +259,15 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 
 	const batchSize = 10000
 	var (
-		pw             *parquetRollingWriter
 		schema         *arrow.Schema
 		rowsRead       int64
 		lastProg       time.Time
 		schemaInferred bool
 	)
-	pw = newParquetRollingWriterWithContext(ctx, t.TargetFileBytes)
+	pw, err := newTaskParquetWriter(ctx, t)
+	if err != nil {
+		return res, err
+	}
 
 	convertStart := time.Now()
 
@@ -389,7 +412,7 @@ func extractDocumentTask(ctx context.Context, log *slog.Logger, cp grpcpb.Contro
 
 // writeMongoDocBatch converts one batch of documents and writes it. fileSchema
 // is set for file sources whose column types were resolved by the planner.
-func writeMongoDocBatch(alloc memory.Allocator, pw *parquetRollingWriter, schema *arrow.Schema, fileSchema *arrowio.FileSchema, docs []map[string]any) error {
+func writeMongoDocBatch(alloc memory.Allocator, pw parquetOutputWriter, schema *arrow.Schema, fileSchema *arrowio.FileSchema, docs []map[string]any) error {
 	var (
 		rec arrow.RecordBatch
 		err error

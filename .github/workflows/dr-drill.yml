@@ -1,0 +1,66 @@
+name: Restore drill
+
+# Runs the master disaster-recovery drill (docs/master-backup-restore.md):
+# lose the master host, restore its Litestream backup with
+# scripts/master-restore.sh, and check that the API, workers, catalog and
+# in-flight work recover. It runs weekly so a broken restore path is found
+# before it is needed, and keeps every drill's measured RTO/RPO report.
+on:
+  schedule:
+    - cron: "0 5 * * 1" # Mondays 05:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drill:
+    name: Restore drill
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      # Same images and cache as the end-to-end job in ci.yml.
+      - uses: docker/setup-buildx-action@v3
+      - name: Build master image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.orabbit
+          target: master
+          load: true
+          tags: orabbit-master:e2e
+          cache-from: type=gha,scope=orabbit-master
+      - name: Build worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.orabbit
+          target: worker
+          load: true
+          tags: orabbit-worker:e2e
+          cache-from: type=gha,scope=orabbit-worker
+      - name: Run restore drill
+        env:
+          ORABBIT_E2E_DR: "1"
+          ORABBIT_E2E_ARTIFACTS: e2e-artifacts
+          ORABBIT_E2E_SKIP_BUILD: "1"
+        run: ./scripts/e2e.sh
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f e2e-artifacts/dr-drill-report.json ]; then
+            { echo '## Restore drill'; echo '```json'; cat e2e-artifacts/dr-drill-report.json; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          fi
+      # The report is kept for every drill, so measured RTO/RPO can be
+      # compared over time; logs are included when the drill fails.
+      - name: Upload drill report and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: restore-drill
+          path: e2e-artifacts/
+          retention-days: 90

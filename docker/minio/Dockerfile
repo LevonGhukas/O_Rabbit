@@ -20,13 +20,14 @@
 #
 # Build and push (multi-arch):
 #   docker buildx build --platform linux/amd64,linux/arm64 --target minio \
-#     -t levonghukas/minio:RELEASE.2026-10-15T00-00-00Z-r1 --push docker/minio
+#     -t levonghukas/minio:RELEASE.2026-10-15T00-00-00Z-r2 --push docker/minio
 #   docker buildx build --platform linux/amd64,linux/arm64 --target mc \
-#     -t levonghukas/mc:RELEASE.2026-09-16T00-00-00Z-r1 --push docker/minio
+#     -t levonghukas/mc:RELEASE.2026-09-16T00-00-00Z-r2 --push docker/minio
 # CI (.github/workflows/minio-images.yml) does this on main.
 
-# The fork's go.mod requires Go 1.27.2 or newer.
-ARG GO_VERSION=1.27.2
+# The fork's go.mod requires Go 1.27.2 or newer; 1.27.3 fixes CVE-2026-111943
+# (crypto/x509) in the minio and mc binaries.
+ARG GO_VERSION=1.27.3
 ARG MINIO_REPO=https://github.com/pgsty/silo
 ARG MINIO_RELEASE=RELEASE.2026-10-15T00-00-00Z
 ARG MINIO_COMMIT=7a3ca0f82100cce06289a465f54139da2639f642
@@ -36,7 +37,7 @@ ARG MC_COMMIT=e952aa78f10a2b77dd525a2b7e3143bcda0cd377
 
 # Bump when the image changes without an upstream release (for example new
 # dependency upgrades). Published tags are <release>-r<revision>.
-ARG IMAGE_REVISION=1
+ARG IMAGE_REVISION=2
 
 ARG MINIO_DEP_UPGRADES="\
   github.com/go-jose/go-jose/v4@v4.1.5 \

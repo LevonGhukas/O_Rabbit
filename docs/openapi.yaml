@@ -113,7 +113,14 @@ paths:
     get: { summary: Files written by the run, responses: { "200": { description: Artifacts } } }
   /runs/{run_id}/diagnosis:
     parameters: [{ $ref: "#/components/parameters/RunID" }]
-    get: { summary: Diagnosis of a stuck or failed run, responses: { "200": { description: Diagnosis } } }
+    get:
+      summary: Diagnosis of a stuck or failed run
+      responses:
+        "200":
+          description: Diagnosis
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunDiagnosis" }
   /runs/{run_id}/recover:
     parameters: [{ $ref: "#/components/parameters/RunID" }]
     post: { summary: Operator recovery action, responses: { "200": { description: Recovery result } } }
@@ -270,7 +277,13 @@ components:
             table: { type: string }
             query: { type: string }
             cursor_column: { type: string }
-            incremental: { type: boolean }
+            incremental:
+              type: boolean
+              description: >-
+                Resume after the committed high-water mark. Exports inserts and
+                updates that move the cursor; source deletes are not
+                propagated, so run a full refresh (incremental false) to remove
+                deleted rows.
             where_clause: { type: string }
             select_columns: { type: array, items: { type: string } }
             column_types: { type: object, additionalProperties: { type: string } }
@@ -306,8 +319,73 @@ components:
         consistency:
           type: object
           properties:
-            mode: { type: string }
+            mode:
+              type: string
+              enum: [EVENTUAL, STRONG_SNAPSHOT]
+              default: EVENTUAL
+              description: STRONG_CDC is rejected; change data capture is not supported yet.
         worker_pool: { type: string }
+        reconciliation:
+          $ref: "#/components/schemas/Reconciliation"
+    Reconciliation:
+      type: object
+      description: >
+        Optional commit-time check that counts the planned source range and
+        compares it with the rows written. Needs ordered_cursor and a SQL
+        engine that can count (postgres, mysql, mariadb, mssql, oracle,
+        clickhouse, trino). Also accepted as options_json.reconciliation.
+      properties:
+        mode: { type: string, enum: [off, count], default: off }
+        consistency:
+          type: string
+          enum: [none, immutable]
+          default: none
+          description: immutable asserts the source range does not change during the run, so a difference is proven data loss.
+        on_mismatch: { type: string, enum: [fail, review], default: fail }
+    SourceReconciliationResult:
+      type: object
+      properties:
+        run_id: { type: string }
+        task_id: { type: string }
+        method: { type: string, enum: [count] }
+        consistency: { type: string, enum: [none, immutable] }
+        observed_at: { type: string }
+        lower_bound: { type: string }
+        lower_exclusive: { type: boolean }
+        upper_bound: { type: string }
+        upper_inclusive: { type: boolean }
+        source_rows: { type: integer }
+        output_rows: { type: integer }
+        status: { type: string, enum: [match, mismatch, indeterminate, error] }
+        detail: { type: string }
+    RunDiagnosis:
+      type: object
+      properties:
+        run_id: { type: string }
+        status: { type: string }
+        commit_phase: { type: string }
+        commit_age_seconds: { type: number }
+        last_classified_error: { type: string }
+        task_counts: { type: object, additionalProperties: { type: integer } }
+        blocking_tasks: { type: array, items: { type: object } }
+        registration: { type: object }
+        source_reconciliation:
+          type: object
+          description: Present only when the run was reconciled against the source.
+          properties:
+            method: { type: string }
+            consistency: { type: string }
+            counts:
+              type: object
+              description: Tasks per status (match, mismatch, indeterminate, error).
+              additionalProperties: { type: integer }
+            findings:
+              type: array
+              description: Every task that did not match.
+              items: { $ref: "#/components/schemas/SourceReconciliationResult" }
+        operator_review_required: { type: boolean }
+        suggested_next_action: { type: string }
+        generated_at: { type: string }
     RunSubmitted:
       type: object
       properties:

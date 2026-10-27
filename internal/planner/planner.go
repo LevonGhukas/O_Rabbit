@@ -20,6 +20,7 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/dataset"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 	"github.com/LevonGhukas/O_Rabbit/internal/failure"
+	"github.com/LevonGhukas/O_Rabbit/internal/hwmboundary"
 	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
 )
@@ -71,6 +72,8 @@ type datasetState struct {
 	NextPart    int    `json:"next_part"`
 	SourceMode  string `json:"source_mode"`
 	QueryHash   string `json:"query_hash"`
+	// HWMBoundary lists the rows at MaxHWMValue (hwmboundary.StateKey).
+	HWMBoundary *hwmboundary.Boundary `json:"hwm_boundary,omitempty"`
 }
 
 // loadDatasetState handles load dataset state behavior.
@@ -255,6 +258,9 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 		srcEngine = "db"
 	}
 	o.SourceMode = o.NormalizedSourceMode()
+	if err := jobopts.ValidateReconciliationEngine(o, srcEngine); err != nil {
+		return db.Run{}, nil, failure.NewFailure(failure.FailureConfigurationInvalid, false, true, err)
+	}
 	if strings.TrimSpace(o.WhereClause) != "" {
 		if err := connectors.ValidateWhereClause(o.WhereClause); err != nil {
 			return db.Run{}, nil, failure.NewFailure(failure.FailureConfigurationInvalid, false, true, fmt.Errorf("options_json.where_clause is invalid: %w", err))
@@ -554,6 +560,9 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 				}
 				return db.Run{}, nil, fmt.Errorf("cursor column %q was not found in table %q", cursorColumn, o.Table)
 			}
+			if o.EffectiveReconciliation().Enabled() {
+				return db.Run{}, nil, failure.NewFailure(failure.FailureConfigurationInvalid, false, true, fmt.Errorf("options_json.reconciliation needs the cursor column %q to exist so extraction and the count share one range", cursorColumn))
+			}
 			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, "", connectors.CursorDomainInt64, "", false, "")
 			tasks := []db.TaskInsert{{
 				ID:            newID(),
@@ -724,16 +733,23 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 			}
 		}
 
-		// Resume after the high-water mark, or, with cursor_lookback, at an
-		// inclusive bound below it so late-committed rows are re-read.
-		lowerBound, lowerExclusive := fromHWM, strings.TrimSpace(fromHWM) != ""
-		if lowerExclusive && strings.TrimSpace(o.CursorLookback) != "" {
-			start, err := connectors.CursorLookbackStart(cv.Domain, fromHWM, o.CursorLookback)
-			if err != nil {
-				return db.Run{}, nil, err
+		// Resume at the high-water mark (dropping rows already exported), or,
+		// with cursor_lookback, at an inclusive bound below it.
+		resume, err := planHWMResume(cv.Domain, fromHWM, o.CursorLookback, ds.HWMBoundary)
+		if err != nil {
+			return db.Run{}, nil, err
+		}
+		lowerBound, lowerExclusive := resume.lower, resume.lowerExclusive
+		switch {
+		case fromHWM != "" && strings.TrimSpace(o.CursorLookback) != "":
+			emitPlanEvent(ctx, st, run.ID, "INFO", "cursor lookback applied", map[string]any{"from_hwm": fromHWM, "cursor_lookback": o.CursorLookback, "lower_bound_inclusive": lowerBound})
+		case resume.eventReason != "":
+			fields := map[string]any{"from_hwm": fromHWM, "lower_exclusive": lowerExclusive, "reason": resume.eventReason}
+			if resume.skip != nil {
+				fields["seed"] = resume.skip.Seed
+				fields["skip_rows"] = len(resume.skip.RowHashes)
 			}
-			lowerBound, lowerExclusive = start, false
-			emitPlanEvent(ctx, st, run.ID, "INFO", "cursor lookback applied", map[string]any{"from_hwm": fromHWM, "cursor_lookback": o.CursorLookback, "lower_bound_inclusive": start})
+			emitPlanEvent(ctx, st, run.ID, resume.eventLevel, "hwm boundary resume", fields)
 		}
 
 		idx := basePart + 1
@@ -744,12 +760,23 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 				return db.Run{}, nil, err
 			}
 		} else {
-			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, cursorColumn, cv.Domain, lowerBound, lowerExclusive, snapshotCtx)
+			part, err := singleCursorSpecWithUpper(o, partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, cursorColumn, cv.Domain, lowerBound, lowerExclusive, snapshotCtx), stats.MaxValue)
+			if err != nil {
+				return db.Run{}, nil, err
+			}
 			tasks = []db.TaskInsert{{ID: newID(), RunID: run.ID, TaskIndex: idx, PartitionSpec: part, Status: "PENDING"}}
 		}
 		if len(tasks) == 0 {
-			part := partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, cursorColumn, cv.Domain, lowerBound, lowerExclusive, snapshotCtx)
+			part, err := singleCursorSpecWithUpper(o, partitionSpecSQLCursorSingle(o.Table, sourceMode, o.QueryHash, o.WhereClause, o.SelectColumns, o.ColumnTypes, cursorColumn, cv.Domain, lowerBound, lowerExclusive, snapshotCtx), stats.MaxValue)
+			if err != nil {
+				return db.Run{}, nil, err
+			}
 			tasks = []db.TaskInsert{{ID: newID(), RunID: run.ID, TaskIndex: idx, PartitionSpec: part, Status: "PENDING"}}
+		}
+		if job.Incremental && cv.Domain != connectors.CursorDomainUnknown {
+			if tasks, err = withHWMBoundarySpec(tasks, resume.skip); err != nil {
+				return db.Run{}, nil, err
+			}
 		}
 
 		admitted, err := startTasks(tasks)
@@ -769,28 +796,6 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 			"cursor_domain":  cv.Domain,
 			"source_mode":    sourceMode,
 			"query_hash":     o.QueryHash,
-		})
-		return run, tasks, nil
-
-	case "cdc_stream":
-		part := PartitionSpecCDCStream(o.Table, o.NormalizedSourceMode(), o.QueryHash)
-		tasks := []db.TaskInsert{{
-			ID:            newID(),
-			RunID:         run.ID,
-			TaskIndex:     1,
-			PartitionSpec: part,
-			Status:        "PENDING",
-		}}
-		admitted, err := startTasks(tasks)
-		if err != nil {
-			return db.Run{}, nil, err
-		}
-		if admitted {
-			run.Status = "RUNNING"
-		}
-		emitPlanEvent(ctx, st, run.ID, "INFO", "planner cdc_stream done", map[string]any{
-			"stage": "tasks_created",
-			"tasks": 1,
 		})
 		return run, tasks, nil
 

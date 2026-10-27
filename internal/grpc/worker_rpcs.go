@@ -16,6 +16,7 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/artifact"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 	"github.com/LevonGhukas/O_Rabbit/internal/grpcpb"
+	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 	"github.com/LevonGhukas/O_Rabbit/internal/telemetry"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
@@ -380,12 +381,17 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *grpcpb.ReportTaskRes
 		}
 	}
 
+	hwmBoundary, err := encodeReportedHWMBoundary(req.HwmBoundary)
+	if err != nil {
+		return nil, grpcstatus.Error(codes.InvalidArgument, err.Error())
+	}
+
 	var accepted bool
 	var msg, finalStatus string
 	if len(records) > 0 {
 		accepted, msg, finalStatus, err = s.st.CompleteTaskAttemptWithArtifactsAndFailureClassAt(
 			ctx, req.BootId, req.TaskId, req.AttemptId, req.FencingToken, req.WorkerId,
-			status, errMsg, req.FailureClass, records, req.RowsRead, req.BytesRead, req.BytesWritten, s.nowFn())
+			status, errMsg, req.FailureClass, records, req.RowsRead, req.BytesRead, req.BytesWritten, s.nowFn(), hwmBoundary)
 	} else {
 		b, errJSON := json.Marshal(req.ParquetObjectKeys)
 		if errJSON != nil {
@@ -393,7 +399,7 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *grpcpb.ReportTaskRes
 		}
 		accepted, msg, finalStatus, err = s.st.CompleteTaskAttemptWithFailureClassAt(
 			ctx, req.BootId, req.TaskId, req.AttemptId, req.FencingToken, req.WorkerId,
-			status, errMsg, req.FailureClass, b, req.RowsRead, req.BytesRead, req.BytesWritten, s.nowFn())
+			status, errMsg, req.FailureClass, b, req.RowsRead, req.BytesRead, req.BytesWritten, s.nowFn(), hwmBoundary)
 	}
 
 	if err != nil {
@@ -465,6 +471,16 @@ func (s *Server) buildAssignment(ctx context.Context, t db.Task) (*grpcpb.TaskAs
 	if err != nil {
 		return nil, fmt.Errorf("task %s lease deadline: %w", t.ID, err)
 	}
+	// The partition spec comes from the run's registration snapshot, so every
+	// task of a run splits its output the same way the run registers it.
+	reg, err := icebergreg.ParseRunConfig(run.RegistrationConfigJSON)
+	if err != nil {
+		return nil, fmt.Errorf("run %s: %w", run.ID, err)
+	}
+	partitionSpecJSON, err := reg.WorkerPartitionSpecJSON()
+	if err != nil {
+		return nil, fmt.Errorf("run %s iceberg partition spec: %w", run.ID, err)
+	}
 	return &grpcpb.TaskAssignment{
 		TaskId:              t.ID,
 		RunId:               run.ID,
@@ -485,5 +501,7 @@ func (s *Server) buildAssignment(ctx context.Context, t db.Task) (*grpcpb.TaskAs
 		S3ForcePathStyle:    r.target.ForcePathStyle,
 		TargetFileBytes:     r.opts.TargetFileBytes,
 		PartitionKeys:       r.opts.PartitionKeys,
+
+		IcebergPartitionSpecJson: partitionSpecJSON,
 	}, nil
 }

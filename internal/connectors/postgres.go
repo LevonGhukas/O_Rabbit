@@ -151,56 +151,15 @@ func (p *Postgres) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, [
 		return queryModeCursor(ctx, p.db, "postgres", q)
 	}
 
-	qt, err := quotePostgresMultipartIdent(q.Table)
+	rng, err := postgresRange(q)
 	if err != nil {
 		return nil, nil, nil, -1, err
 	}
-	qc, err := quotePostgresMultipartIdent(q.CursorColumn)
-	if err != nil {
-		return nil, nil, nil, -1, err
-	}
-	if NormalizeCursorDomain(string(q.CursorDomain)) == CursorDomainUnknown {
-		return nil, nil, nil, -1, fmt.Errorf("cursor domain is required")
-	}
 
-	clauses := make([]string, 0, 3)
-	if strings.TrimSpace(q.WhereClause) != "" {
-		clauses = append(clauses, fmt.Sprintf("(%s)", q.WhereClause))
-	}
-	args := make([]any, 0, 2)
-	argPos := 1
-	if strings.TrimSpace(q.LowerBound) != "" {
-		lowerArg, err := ParseCursorArgument(q.CursorDomain, q.LowerBound)
-		if err != nil {
-			return nil, nil, nil, -1, err
-		}
-		op := ">="
-		if q.LowerExclusive {
-			op = ">"
-		}
-		clauses = append(clauses, fmt.Sprintf("%s %s $%d", qc, op, argPos))
-		args = append(args, lowerArg)
-		argPos++
-	}
-	if strings.TrimSpace(q.UpperBound) != "" {
-		upperArg, err := ParseCursorArgument(q.CursorDomain, q.UpperBound)
-		if err != nil {
-			return nil, nil, nil, -1, err
-		}
-		op := "<"
-		if q.UpperInclusive {
-			op = "<="
-		}
-		clauses = append(clauses, fmt.Sprintf("%s %s $%d", qc, op, argPos))
-		args = append(args, upperArg)
-	}
-
-	query := fmt.Sprintf("SELECT %s FROM %s", buildPostgresSelectClause(q.SelectColumns), qt)
-	if len(clauses) > 0 {
-		query += " WHERE " + strings.Join(clauses, " AND ")
-	}
+	query := fmt.Sprintf("SELECT %s FROM %s", buildPostgresSelectClause(q.SelectColumns), rng.Table)
+	query += rng.whereSQL()
 	if postgresOrderedRangeReadsEnabled() {
-		query += fmt.Sprintf(" ORDER BY %s ASC", qc)
+		query += fmt.Sprintf(" ORDER BY %s ASC", rng.Cursor)
 	}
 	query += ";"
 
@@ -223,7 +182,7 @@ func (p *Postgres) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, [
 			conn.Close()
 			return nil, nil, nil, -1, fmt.Errorf("failed to set transaction snapshot %q: %w", q.SnapshotContext, err)
 		}
-		rows, qerr = tx.QueryContext(ctx, query, args...)
+		rows, qerr = tx.QueryContext(ctx, query, rng.Args...)
 		if qerr != nil {
 			tx.Rollback()
 			conn.Close()
@@ -236,7 +195,7 @@ func (p *Postgres) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, [
 			// For simplicity and since worker process exits or closes DB, this is acceptable.
 		}
 	} else {
-		rows, qerr = p.db.QueryContext(ctx, query, args...)
+		rows, qerr = p.db.QueryContext(ctx, query, rng.Args...)
 	}
 
 	if qerr != nil {

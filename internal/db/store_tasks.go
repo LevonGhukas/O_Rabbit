@@ -10,16 +10,19 @@ import (
 )
 
 type Task struct {
-	ID                 string          `json:"id"`
-	RunID              string          `json:"run_id"`
-	TaskIndex          int             `json:"task_index"`
-	PartitionSpec      json.RawMessage `json:"partition_spec_json"`
-	WorkerID           *string         `json:"worker_id"`
-	Status             string          `json:"status"`
-	RowsRead           int64           `json:"rows_read"`
-	BytesRead          int64           `json:"bytes_read"`
-	BytesWritten       int64           `json:"bytes_written"`
-	ParquetObjects     json.RawMessage `json:"parquet_objects_json"`
+	ID             string          `json:"id"`
+	RunID          string          `json:"run_id"`
+	TaskIndex      int             `json:"task_index"`
+	PartitionSpec  json.RawMessage `json:"partition_spec_json"`
+	WorkerID       *string         `json:"worker_id"`
+	Status         string          `json:"status"`
+	RowsRead       int64           `json:"rows_read"`
+	BytesRead      int64           `json:"bytes_read"`
+	BytesWritten   int64           `json:"bytes_written"`
+	ParquetObjects json.RawMessage `json:"parquet_objects_json"`
+	// HWMBoundary is the task's reported hwmboundary.Boundary JSON, empty when
+	// the task did not track it. Kept out of API responses: it can be large.
+	HWMBoundary        json.RawMessage `json:"-"`
 	StartedAt          *string         `json:"started_at"`
 	FinishedAt         *string         `json:"finished_at"`
 	ErrorMessage       *string         `json:"error_message"`
@@ -51,7 +54,7 @@ type TaskExecutionState struct {
 }
 
 func (s *Store) ListTasksForRun(ctx context.Context, runID string) ([]Task, error) {
-	rows, err := s.rdb.QueryContext(ctx, `SELECT t.id,t.run_id,t.task_index,t.partition_spec_json,t.worker_id,t.status,t.rows_read,t.bytes_read,t.bytes_written,t.parquet_objects_json,t.started_at,t.finished_at,t.error_message,t.current_attempt_id,t.attempt_count,t.next_eligible_at,COALESCE(a.attempt_number,0),COALESCE(a.lease_deadline,''),COALESCE(a.last_renewed_at,''),COALESCE(a.status,''),COALESCE(a.failure_class,''),COALESCE(ar.artifact_count,0),COALESCE(ar.artifact_bytes,0),COALESCE(ar.artifact_rows,0),COALESCE(ar.verification_status,''),COALESCE(ar.verification_method,''),COALESCE(ar.verified_at,'') FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_number=t.attempt_count LEFT JOIN (SELECT task_id,COUNT(*) artifact_count,SUM(byte_size) artifact_bytes,SUM(row_count) artifact_rows,MIN(verification_status) verification_status,MIN(verification_method) verification_method,MAX(verified_at) verified_at FROM task_artifacts GROUP BY task_id) ar ON ar.task_id=t.id WHERE t.run_id=? ORDER BY t.task_index ASC;`, runID)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT t.id,t.run_id,t.task_index,t.partition_spec_json,t.worker_id,t.status,t.rows_read,t.bytes_read,t.bytes_written,t.parquet_objects_json,t.hwm_boundary_json,t.started_at,t.finished_at,t.error_message,t.current_attempt_id,t.attempt_count,t.next_eligible_at,COALESCE(a.attempt_number,0),COALESCE(a.lease_deadline,''),COALESCE(a.last_renewed_at,''),COALESCE(a.status,''),COALESCE(a.failure_class,''),COALESCE(ar.artifact_count,0),COALESCE(ar.artifact_bytes,0),COALESCE(ar.artifact_rows,0),COALESCE(ar.verification_status,''),COALESCE(ar.verification_method,''),COALESCE(ar.verified_at,'') FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_number=t.attempt_count LEFT JOIN (SELECT task_id,COUNT(*) artifact_count,SUM(byte_size) artifact_bytes,SUM(row_count) artifact_rows,MIN(verification_status) verification_status,MIN(verification_method) verification_method,MAX(verified_at) verified_at FROM task_artifacts GROUP BY task_id) ar ON ar.task_id=t.id WHERE t.run_id=? ORDER BY t.task_index ASC;`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -59,12 +62,15 @@ func (s *Store) ListTasksForRun(ctx context.Context, runID string) ([]Task, erro
 	var out []Task
 	for rows.Next() {
 		var t Task
-		var part, objs string
-		if err := rows.Scan(&t.ID, &t.RunID, &t.TaskIndex, &part, &t.WorkerID, &t.Status, &t.RowsRead, &t.BytesRead, &t.BytesWritten, &objs, &t.StartedAt, &t.FinishedAt, &t.ErrorMessage, &t.CurrentAttemptID, &t.AttemptCount, &t.NextEligibleAt, &t.AttemptNumber, &t.LeaseDeadline, &t.LastRenewedAt, &t.AttemptStatus, &t.FailureClass, &t.ArtifactCount, &t.ArtifactBytes, &t.ArtifactRows, &t.VerificationStatus, &t.VerificationMethod, &t.ArtifactVerifiedAt); err != nil {
+		var part, objs, boundary string
+		if err := rows.Scan(&t.ID, &t.RunID, &t.TaskIndex, &part, &t.WorkerID, &t.Status, &t.RowsRead, &t.BytesRead, &t.BytesWritten, &objs, &boundary, &t.StartedAt, &t.FinishedAt, &t.ErrorMessage, &t.CurrentAttemptID, &t.AttemptCount, &t.NextEligibleAt, &t.AttemptNumber, &t.LeaseDeadline, &t.LastRenewedAt, &t.AttemptStatus, &t.FailureClass, &t.ArtifactCount, &t.ArtifactBytes, &t.ArtifactRows, &t.VerificationStatus, &t.VerificationMethod, &t.ArtifactVerifiedAt); err != nil {
 			return nil, err
 		}
 		t.PartitionSpec = []byte(part)
 		t.ParquetObjects = []byte(objs)
+		if boundary != "" {
+			t.HWMBoundary = []byte(boundary)
+		}
 		out = append(out, t)
 	}
 	return out, rows.Err()

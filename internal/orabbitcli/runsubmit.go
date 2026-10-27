@@ -274,8 +274,8 @@ func (s *runSubmitFile) validate() error {
 			if s.Job.MaxInFlightTasks < 1 {
 				return invalidRunSubmitf("job.max_in_flight_tasks must be >= 1 when job.auto_tune=false")
 			}
-			if s.Job.PlannedTasks < 1 && s.Job.ChunkSize < 1 {
-				return invalidRunSubmitf("job.planned_tasks or job.chunk_size must be set when job.auto_tune=false")
+			if s.Job.PlannedTasks < 1 && s.Job.TargetRowsPerTask < 1 && s.Job.ChunkSize < 1 {
+				return invalidRunSubmitf("job.planned_tasks or job.target_rows_per_task must be set when job.auto_tune=false")
 			}
 		}
 	default:
@@ -414,8 +414,8 @@ func validateRunConfigForSubmission(cfg ranConfig) error {
 			if cfg.MaxInFlightTasks < 1 {
 				return invalidRunSubmitf("job.max_in_flight_tasks must be >= 1 when job.auto_tune=false")
 			}
-			if cfg.PlannedTasks < 1 && cfg.ChunkSize < 1 {
-				return invalidRunSubmitf("job.planned_tasks or job.chunk_size must be set when job.auto_tune=false")
+			if cfg.PlannedTasks < 1 && cfg.TargetRowsPerTask < 1 && cfg.ChunkSize < 1 {
+				return invalidRunSubmitf("job.planned_tasks or job.target_rows_per_task must be set when job.auto_tune=false")
 			}
 		}
 	default:

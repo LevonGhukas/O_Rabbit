@@ -99,8 +99,9 @@ message HeartbeatResponse {}
 message RequestTaskRequest {
   string worker_id = 1;
   string capabilities_json = 2;
-  // Current value is 6. The master accepts an exact match only. Version 6
-  // moved task secrets from TaskAssignment to GetTaskCredentials.
+  // Current value is 8. The master accepts an exact match only. Version 6
+  // moved task secrets from TaskAssignment to GetTaskCredentials; version 8
+  // added the partition contract (iceberg_partition_spec_json).
   int32 protocol_version = 3;
   string boot_id = 4;
 }
@@ -145,6 +146,13 @@ message TaskAssignment {
   reserved "max_rows_per_file", "fetch_limit_rows";
 
   repeated string partition_keys = 43;
+
+  // The effective Iceberg partition spec of a rest-go registration target, as
+  // the JSON array of the registration option partition_spec. Empty when the
+  // target table is not partitioned. Workers split rows with these transforms
+  // and write one partition tuple per file, so the master can register the
+  // files without rewriting them.
+  string iceberg_partition_spec_json = 44;
 }
 
 message ReportTaskProgressRequest {
@@ -186,6 +194,15 @@ message ReportTaskResultRequest {
   repeated string parquet_object_keys = 30;
   string max_hwm_value = 31; // optional, as string
   repeated ArtifactIntegrity artifacts = 32;
+  // Rows read at the task's largest cursor value, kept or dropped as already
+  // exported. Set only when the partition spec asks to track the boundary.
+  HWMBoundary hwm_boundary = 33;
+}
+
+message HWMBoundary {
+  string cursor_value = 1;
+  map<string, int64> row_hashes = 2; // row hash -> rows with that content
+  bool overflow = 3;                 // too many rows to list; row_hashes is empty
 }
 
 message ArtifactIntegrity {

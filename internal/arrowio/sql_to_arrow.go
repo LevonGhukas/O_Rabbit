@@ -386,6 +386,18 @@ func RowsToRecordBatchesWithOverrides(rows *sql.Rows, cols []string, colTypes []
 }
 
 func RowsToRecordBatchesEngineWithOverrides(engine string, rows *sql.Rows, cols []string, colTypes []*sql.ColumnType, targetTypes map[string]string, batchSize int, alloc memory.Allocator, cursorIdx int, cursorDomain connectors.CursorDomain, onRecord func(schema *arrow.Schema, rec arrow.RecordBatch) error) (int64, string, error) {
+	return RowsToRecordBatchesEngineFiltered(engine, rows, cols, colTypes, targetTypes, batchSize, alloc, cursorIdx, cursorDomain, nil, onRecord)
+}
+
+// RowFilter decides whether a scanned row is exported. cursor is the row's
+// encoded cursor value (cursorOK is false when it is NULL or there is no
+// cursor); vals is only valid during the call. Rejected rows are not counted
+// and do not move the returned max cursor.
+type RowFilter func(cursor string, cursorOK bool, vals []any) bool
+
+// RowsToRecordBatchesEngineFiltered is RowsToRecordBatchesEngineWithOverrides
+// with an optional row filter applied before each row is converted.
+func RowsToRecordBatchesEngineFiltered(engine string, rows *sql.Rows, cols []string, colTypes []*sql.ColumnType, targetTypes map[string]string, batchSize int, alloc memory.Allocator, cursorIdx int, cursorDomain connectors.CursorDomain, keep RowFilter, onRecord func(schema *arrow.Schema, rec arrow.RecordBatch) error) (int64, string, error) {
 	plans, schema, err := PlansFromSQLEngineWithOverrides(engine, cols, colTypes, targetTypes)
 	if err != nil {
 		return 0, "", err
@@ -504,6 +516,13 @@ func RowsToRecordBatchesEngineWithOverrides(engine string, rows *sql.Rows, cols 
 		if err := rows.Scan(scanDests...); err != nil {
 			return rowsTotal, maxCursor, err
 		}
+		cursorVal, cursorOK := "", false
+		if cursorIdx >= 0 && cursorIdx < len(vals) && cursorDomain != connectors.CursorDomainUnknown {
+			cursorVal, cursorOK = connectors.EncodeCursorValue(cursorDomain, vals[cursorIdx])
+		}
+		if keep != nil && !keep(cursorVal, cursorOK, vals) {
+			continue
+		}
 		for i, p := range plans {
 			if vals[i] == nil && !schema.Field(i).Nullable {
 				return rowsTotal, maxCursor, fmt.Errorf("column %q is declared NOT NULL in the target schema but the source returned NULL; mark the column as nullable or filter out NULL rows", p.Name)
@@ -513,12 +532,8 @@ func RowsToRecordBatchesEngineWithOverrides(engine string, rows *sql.Rows, cols 
 			}
 		}
 
-		if cursorIdx >= 0 && cursorIdx < len(vals) && cursorDomain != connectors.CursorDomainUnknown {
-			if v, ok := connectors.EncodeCursorValue(cursorDomain, vals[cursorIdx]); ok {
-				if maxCursor == "" || connectors.CompareCursorValues(cursorDomain, maxCursor, v) < 0 {
-					maxCursor = v
-				}
-			}
+		if cursorOK && (maxCursor == "" || connectors.CompareCursorValues(cursorDomain, maxCursor, cursorVal) < 0) {
+			maxCursor = cursorVal
 		}
 
 		rowsTotal++

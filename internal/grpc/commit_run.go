@@ -20,6 +20,7 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/dataset"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
+	"github.com/LevonGhukas/O_Rabbit/internal/hwmboundary"
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
@@ -273,6 +274,10 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 		}
 	}
 
+	if err := s.reconcileSourceRanges(ctx, resolved, srcConn, tasks, hasPersistedIntent); err != nil {
+		return err
+	}
+
 	existingStateBytes, existingStateFound, err := u.GetObjectBytes(ctx, stateKey)
 	if err != nil {
 		return fmt.Errorf("read dataset state: %w", err)
@@ -300,6 +305,9 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 			connectors.CompareCursorValues(cursorDomain, runMax, existingHWM) > 0) {
 		maxHWM = runMax
 	}
+	// Rows at the committed mark, so the next run can re-read them (>= mark)
+	// and drop the ones already exported.
+	hwmBoundary := hwmboundary.ForState(cursorDomain, maxHWM, parseExistingHWMBoundary(existingStateBytes), reportedHWMBoundaries(s.log, tasks))
 	maxPart := maxInt(maxPartNumber(committedKeys), existingMaxPart)
 
 	// The timestamp and object order are stable so retries reconstruct identical intent.
@@ -373,6 +381,9 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 			"last_run_objects":      committedKeys,
 			"commit_id":             commitID,
 			"manifest_key":          commitKey,
+		}
+		if hwmBoundary != nil {
+			stateObj[hwmboundary.StateKey] = hwmBoundary
 		}
 		b, err = json.Marshal(stateObj)
 		if err != nil {

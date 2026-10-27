@@ -49,17 +49,18 @@ type DiagnosisRegistration struct {
 }
 
 type RunDiagnosis struct {
-	RunID               string                 `json:"run_id"`
-	Status              string                 `json:"status"`
-	CommitPhase         string                 `json:"commit_phase,omitempty"`
-	CommitAgeSeconds    float64                `json:"commit_age_seconds,omitempty"`
-	LastClassifiedError string                 `json:"last_classified_error,omitempty"`
-	TaskCounts          map[string]int         `json:"task_counts"`
-	BlockingTasks       []DiagnosisTask        `json:"blocking_tasks,omitempty"`
-	Registration        *DiagnosisRegistration `json:"registration,omitempty"`
-	OperatorReview      bool                   `json:"operator_review_required"`
-	SuggestedNextAction string                 `json:"suggested_next_action"`
-	GeneratedAt         string                 `json:"generated_at"`
+	RunID                string                       `json:"run_id"`
+	Status               string                       `json:"status"`
+	CommitPhase          string                       `json:"commit_phase,omitempty"`
+	CommitAgeSeconds     float64                      `json:"commit_age_seconds,omitempty"`
+	LastClassifiedError  string                       `json:"last_classified_error,omitempty"`
+	TaskCounts           map[string]int               `json:"task_counts"`
+	BlockingTasks        []DiagnosisTask              `json:"blocking_tasks,omitempty"`
+	Registration         *DiagnosisRegistration       `json:"registration,omitempty"`
+	SourceReconciliation *SourceReconciliationSummary `json:"source_reconciliation,omitempty"`
+	OperatorReview       bool                         `json:"operator_review_required"`
+	SuggestedNextAction  string                       `json:"suggested_next_action"`
+	GeneratedAt          string                       `json:"generated_at"`
 }
 
 func (s *Store) DiagnoseRun(ctx context.Context, runID string, now time.Time, maxAttempts int) (RunDiagnosis, error) {
@@ -155,6 +156,12 @@ func (s *Store) DiagnoseRun(ctx context.Context, runID string, now time.Time, ma
 		}
 	}
 
+	recs, err := s.ListSourceReconciliations(ctx, runID)
+	if err != nil {
+		return RunDiagnosis{}, err
+	}
+	out.SourceReconciliation = SummarizeSourceReconciliations(recs)
+
 	out.OperatorReview, out.SuggestedNextAction = diagnoseNextAction(run, out)
 	return out, nil
 }
@@ -167,6 +174,9 @@ func deadlineExpired(raw string, now time.Time) bool {
 func diagnoseNextAction(run Run, diagnosis RunDiagnosis) (bool, string) {
 	if run.Status == "COMMITTING" {
 		return false, "request commit reconciliation; if it remains stale, verify durable leadership"
+	}
+	if sr := diagnosis.SourceReconciliation; sr != nil && sr.Counts[SourceReconciliationMismatch] > 0 {
+		return true, "source reconciliation found a row-count mismatch between the planned source range and the rows written; nothing was committed. Inspect source_reconciliation.findings, then re-run the job"
 	}
 	for _, task := range diagnosis.BlockingTasks {
 		if task.Status == "QUARANTINED" || task.Status == "FAILED" || (task.Status == "PENDING" && task.AttemptCount >= task.MaxAttempts) {
@@ -214,10 +224,21 @@ type LifecycleMetrics struct {
 	LeadershipActive                int
 	LeadershipEpoch                 int64
 	LeadershipRenewalFailures       int
+	// OldestRegistrationAgeSeconds is, per non-terminal status, how long
+	// the oldest registration has waited: since creation for PENDING, since
+	// its last change for the others. A blocked ordered queue shows as a
+	// growing age without naming any run.
+	OldestRegistrationAgeSeconds map[string]float64
+	// OldestRegistrationAttemptAgeSeconds is the age of the oldest active
+	// catalog attempt; a stuck catalog call keeps it growing.
+	OldestRegistrationAttemptAgeSeconds float64
+	ExpiredRegistrationAttemptLeases    int
+	RunsOperatorActionRequired          int
 }
 
 func (s *Store) LifecycleMetrics(ctx context.Context, now time.Time) (LifecycleMetrics, error) {
 	out := LifecycleMetrics{
+		OldestRegistrationAgeSeconds:    map[string]float64{},
 		RunsByStatus:                    map[string]int{},
 		RunsByCommitPhase:               map[string]int{},
 		TasksByStatus:                   map[string]int{},
@@ -271,7 +292,47 @@ func (s *Store) LifecycleMetrics(ctx context.Context, now time.Time) (LifecycleM
 	if err := s.rdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM master_leadership_history WHERE event_type='MASTER_LEADERSHIP_LOST'`).Scan(&out.LeadershipRenewalFailures); err != nil {
 		return LifecycleMetrics{}, err
 	}
+	rows, err := s.rdb.QueryContext(ctx, `SELECT status,MIN(CASE WHEN status='PENDING' THEN created_at ELSE updated_at END) FROM iceberg_registrations
+		WHERE status IN ('PENDING','REGISTERING','RETRY_REQUIRED','RECONCILING','BLOCKED') GROUP BY status`)
+	if err != nil {
+		return LifecycleMetrics{}, err
+	}
+	for rows.Next() {
+		var status string
+		var since sql.NullString
+		if err := rows.Scan(&status, &since); err != nil {
+			rows.Close()
+			return LifecycleMetrics{}, err
+		}
+		out.OldestRegistrationAgeSeconds[status] = ageSeconds(since, now)
+	}
+	if err := rows.Close(); err != nil {
+		return LifecycleMetrics{}, err
+	}
+	var oldestAttempt sql.NullString
+	if err := s.rdb.QueryRowContext(ctx, `SELECT MIN(started_at) FROM iceberg_registration_attempts WHERE status='ACTIVE'`).Scan(&oldestAttempt); err != nil {
+		return LifecycleMetrics{}, err
+	}
+	out.OldestRegistrationAttemptAgeSeconds = ageSeconds(oldestAttempt, now)
+	if err := s.rdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM iceberg_registration_attempts WHERE status='ACTIVE' AND lease_deadline<=?`, nowS).Scan(&out.ExpiredRegistrationAttemptLeases); err != nil {
+		return LifecycleMetrics{}, err
+	}
+	if err := s.rdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE operator_action_required<>0`).Scan(&out.RunsOperatorActionRequired); err != nil {
+		return LifecycleMetrics{}, err
+	}
 	return out, nil
+}
+
+// ageSeconds is now minus a stored timestamp, or 0 when there is none.
+func ageSeconds(since sql.NullString, now time.Time) float64 {
+	if !since.Valid {
+		return 0
+	}
+	t, err := time.Parse(time.RFC3339Nano, since.String)
+	if err != nil || !now.After(t) {
+		return 0
+	}
+	return now.Sub(t).Seconds()
 }
 
 func scanMetricCounts(ctx context.Context, db *sql.DB, query string, out map[string]int) error {

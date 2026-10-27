@@ -46,58 +46,19 @@ func (m *MariaDB) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []
 		return queryModeCursor(ctx, m.db, "mariadb", q)
 	}
 
-	qt, err := quoteMySQLMultipartIdent(q.Table)
+	rng, err := mariadbRange(q)
 	if err != nil {
 		return nil, nil, nil, -1, err
 	}
-	qc, err := quoteMySQLMultipartIdent(q.CursorColumn)
-	if err != nil {
-		return nil, nil, nil, -1, err
-	}
-	if NormalizeCursorDomain(string(q.CursorDomain)) == CursorDomainUnknown {
-		return nil, nil, nil, -1, fmt.Errorf("cursor domain is required")
-	}
 
-	clauses := make([]string, 0, 3)
-	if strings.TrimSpace(q.WhereClause) != "" {
-		clauses = append(clauses, fmt.Sprintf("(%s)", q.WhereClause))
-	}
-	args := make([]any, 0, 2)
-	if strings.TrimSpace(q.LowerBound) != "" {
-		lowerArg, err := ParseCursorArgument(q.CursorDomain, q.LowerBound)
-		if err != nil {
-			return nil, nil, nil, -1, err
-		}
-		op := ">="
-		if q.LowerExclusive {
-			op = ">"
-		}
-		clauses = append(clauses, fmt.Sprintf("%s %s ?", qc, op))
-		args = append(args, lowerArg)
-	}
-	if strings.TrimSpace(q.UpperBound) != "" {
-		upperArg, err := ParseCursorArgument(q.CursorDomain, q.UpperBound)
-		if err != nil {
-			return nil, nil, nil, -1, err
-		}
-		op := "<"
-		if q.UpperInclusive {
-			op = "<="
-		}
-		clauses = append(clauses, fmt.Sprintf("%s %s ?", qc, op))
-		args = append(args, upperArg)
-	}
-
-	query := fmt.Sprintf("SELECT %s FROM %s", buildMariaDBSelectClause(q.SelectColumns), qt)
-	if len(clauses) > 0 {
-		query += " WHERE " + strings.Join(clauses, " AND ")
-	}
+	query := fmt.Sprintf("SELECT %s FROM %s", buildMariaDBSelectClause(q.SelectColumns), rng.Table)
+	query += rng.whereSQL()
 	if mariadbOrderedRangeReadsEnabled() {
-		query += fmt.Sprintf(" ORDER BY %s ASC", qc)
+		query += fmt.Sprintf(" ORDER BY %s ASC", rng.Cursor)
 	}
 	query += ";"
 
-	rows, err := m.db.QueryContext(ctx, query, args...)
+	rows, err := m.db.QueryContext(ctx, query, rng.Args...)
 	if err != nil {
 		return nil, nil, nil, -1, err
 	}

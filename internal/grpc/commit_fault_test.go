@@ -184,6 +184,13 @@ type commitFixture struct {
 	hwmFailures int
 }
 
+// commitFixtureSettings lets a test change the job options and the task's
+// partition spec the commit fixture is built with.
+type commitFixtureSettings struct {
+	jobOptions    map[string]any
+	partitionSpec string
+}
+
 func newCommitFixture(t *testing.T, suffix string) *commitFixture {
 	return newCommitFixtureWithRegistration(t, suffix, false)
 }
@@ -203,8 +210,22 @@ func newCommitFixtureWithOutput(t *testing.T, suffix string, registrationEnabled
 
 // newCommitFixtureWithChecksum optionally records the object store's
 // checksum on the artifact, as a worker does when the store reports one.
-func newCommitFixtureWithChecksum(t *testing.T, suffix string, registrationEnabled, hasOutput, providerChecksum bool) *commitFixture {
+func newCommitFixtureWithChecksum(t *testing.T, suffix string, registrationEnabled, hasOutput, providerChecksum bool, mods ...func(*commitFixtureSettings)) *commitFixture {
 	t.Helper()
+	return newCommitFixtureWithHWMBoundary(t, suffix, registrationEnabled, hasOutput, providerChecksum, nil, mods...)
+}
+
+// newCommitFixtureWithHWMBoundary completes the task with the given reported
+// high-water-mark boundary JSON (nil when the task did not track one).
+func newCommitFixtureWithHWMBoundary(t *testing.T, suffix string, registrationEnabled, hasOutput, providerChecksum bool, hwmBoundary []byte, mods ...func(*commitFixtureSettings)) *commitFixture {
+	t.Helper()
+	settings := commitFixtureSettings{
+		jobOptions:    map[string]any{"table": "dbo.orders", "partition_strategy": "ordered_cursor", "cursor_column": "id"},
+		partitionSpec: `{"type":"single"}`,
+	}
+	for _, mod := range mods {
+		mod(&settings)
+	}
 	ctx := context.Background()
 	st := openGRPCTestStore(t)
 	runID, jobID := "run-"+suffix, "job-"+suffix
@@ -227,7 +248,7 @@ func newCommitFixtureWithChecksum(t *testing.T, suffix string, registrationEnabl
 		t.Fatal(err)
 	}
 	hwmColumn := "id"
-	if err := st.CreateJob(ctx, db.Job{ID: jobID, Name: jobID, SourceConnectionID: srcID, TargetConnectionID: tgtID, SourceSQL: "select 1", TargetNamespace: "ns", TargetTable: "tbl", WriteMode: "append", Incremental: true, HWMColumn: &hwmColumn, OptionsJSON: mustJSONRaw(t, map[string]any{"table": "dbo.orders", "partition_strategy": "ordered_cursor", "cursor_column": "id"})}); err != nil {
+	if err := st.CreateJob(ctx, db.Job{ID: jobID, Name: jobID, SourceConnectionID: srcID, TargetConnectionID: tgtID, SourceSQL: "select 1", TargetNamespace: "ns", TargetTable: "tbl", WriteMode: "append", Incremental: true, HWMColumn: &hwmColumn, OptionsJSON: mustJSONRaw(t, settings.jobOptions)}); err != nil {
 		t.Fatal(err)
 	}
 	var registrationConfig json.RawMessage
@@ -238,7 +259,7 @@ func newCommitFixtureWithChecksum(t *testing.T, suffix string, registrationEnabl
 		t.Fatal(err)
 	}
 	taskID := "task-" + suffix
-	if err := st.InsertTasks(ctx, []db.TaskInsert{{ID: taskID, RunID: runID, TaskIndex: 1, PartitionSpec: []byte(`{"type":"single"}`), Status: "PENDING"}}); err != nil {
+	if err := st.InsertTasks(ctx, []db.TaskInsert{{ID: taskID, RunID: runID, TaskIndex: 1, PartitionSpec: []byte(settings.partitionSpec), Status: "PENDING"}}); err != nil {
 		t.Fatal(err)
 	}
 	objects := newScriptedCommitStore()
@@ -263,7 +284,7 @@ func newCommitFixtureWithChecksum(t *testing.T, suffix string, registrationEnabl
 		rows = 10
 		written = int64(len(parquetBytes))
 	}
-	if accepted, _, _, err := st.CompleteTaskAttemptWithArtifactsAt(ctx, "", taskID, assigned.AttemptID, assigned.FencingToken, "worker-"+suffix, "SUCCEEDED", nil, records, rows, 0, written, time.Date(2026, 7, 22, 10, 1, 0, 0, time.UTC)); err != nil || !accepted {
+	if accepted, _, _, err := st.CompleteTaskAttemptWithArtifactsAndFailureClassAt(ctx, "", taskID, assigned.AttemptID, assigned.FencingToken, "worker-"+suffix, "SUCCEEDED", nil, "", records, rows, 0, written, time.Date(2026, 7, 22, 10, 1, 0, 0, time.UTC), hwmBoundary); err != nil || !accepted {
 		t.Fatalf("complete accepted=%v err=%v", accepted, err)
 	}
 	if changed, status, err := st.TryFinalizeRun(ctx, runID); err != nil || !changed || status != "COMMITTING" {
