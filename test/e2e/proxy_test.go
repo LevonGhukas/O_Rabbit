@@ -49,6 +49,8 @@ type catalogFault struct {
 	method string
 	path   string
 	hold   time.Duration
+	// hit is closed when a request matches and the fault starts.
+	hit chan struct{}
 	// fired is closed when the fault has been applied once.
 	fired chan struct{}
 	// upstreamStatus is the catalog's real status code for a lost reply.
@@ -79,7 +81,7 @@ func (p *catalogProxy) Close() error {
 // inject arms a one-shot fault for the next request with this method and
 // exact path. It returns the fault so the caller can wait for it to fire.
 func (p *catalogProxy) inject(kind faultKind, method, path string, hold time.Duration) *catalogFault {
-	f := &catalogFault{kind: kind, method: method, path: path, hold: hold, fired: make(chan struct{})}
+	f := &catalogFault{kind: kind, method: method, path: path, hold: hold, hit: make(chan struct{}), fired: make(chan struct{})}
 	p.mu.Lock()
 	p.fault = f
 	p.mu.Unlock()
@@ -113,6 +115,7 @@ func (p *catalogProxy) take(r *http.Request) *catalogFault {
 		return nil
 	}
 	p.fault = nil
+	close(f.hit)
 	if f.kind == faultLoseCommitReply {
 		p.reached[r.Method+" "+r.URL.Path]++
 	}
