@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/connectors"
+	"github.com/LevonGhukas/O_Rabbit/internal/hwmboundary"
 )
 
 // Spec is the decoded partition_spec_json of a task.
@@ -35,6 +36,11 @@ type Spec struct {
 
 	// FetchSize is rows per source round-trip; 0 keeps the engine default.
 	FetchSize int `json:"fetch_size,omitempty"`
+	// HWMBoundarySkip lists rows at the high-water mark already exported by
+	// an earlier run; only the task whose range starts at the mark has it.
+	HWMBoundarySkip *hwmboundary.Skip `json:"hwm_boundary_skip,omitempty"`
+	// TrackHWMBoundary asks the task to report the rows at its largest cursor value.
+	TrackHWMBoundary bool `json:"track_hwm_boundary,omitempty"`
 }
 
 // Normalize fills defaults and maps legacy int-range specs onto cursor bounds.

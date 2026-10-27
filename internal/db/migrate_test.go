@@ -550,3 +550,17 @@ func TestMigrationV31MakesWriteModeExplicitAndKeepsBehavior(t *testing.T) {
 		}
 	}
 }
+
+// Two branches that each add "the next" migration must not both claim one
+// version: the duplicate would silently never run on databases that already
+// applied the other. Released versions must also never be renumbered.
+func TestMigrationVersionsAreUniqueAndConsecutive(t *testing.T) {
+	for i, m := range migrations {
+		if m.version != i+1 {
+			t.Fatalf("migration at position %d has version %d, want %d (versions must be unique and consecutive)", i, m.version, i+1)
+		}
+		if (m.sql == "") == (m.apply == nil) {
+			t.Fatalf("migration %d must have exactly one of sql or apply", m.version)
+		}
+	}
+}
