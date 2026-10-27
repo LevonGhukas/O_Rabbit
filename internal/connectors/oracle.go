@@ -330,60 +330,19 @@ func (o *Oracle) probeOracleAmbiguousNumberCursor(ctx context.Context, table, cu
 }
 
 func buildOracleCursorQuery(q CursorQuery) (string, []any, error) {
-	qt, err := quoteOracleMultipartIdent(q.Table)
+	rng, err := oracleRange(q)
 	if err != nil {
 		return "", nil, err
 	}
-	qc, err := quoteOracleCursorIdent(q.CursorColumn)
-	if err != nil {
-		return "", nil, err
-	}
-	if NormalizeCursorDomain(string(q.CursorDomain)) == CursorDomainUnknown {
-		return "", nil, fmt.Errorf("cursor domain is required")
-	}
 
-	clauses := make([]string, 0, 3)
-	if strings.TrimSpace(q.WhereClause) != "" {
-		clauses = append(clauses, fmt.Sprintf("(%s)", q.WhereClause))
-	}
-	args := make([]any, 0, 2)
-	argPos := 1
-	if strings.TrimSpace(q.LowerBound) != "" {
-		lowerArg, err := ParseCursorArgument(q.CursorDomain, q.LowerBound)
-		if err != nil {
-			return "", nil, err
-		}
-		op := ">="
-		if q.LowerExclusive {
-			op = ">"
-		}
-		clauses = append(clauses, fmt.Sprintf("%s %s :%d", qc, op, argPos))
-		args = append(args, lowerArg)
-		argPos++
-	}
-	if strings.TrimSpace(q.UpperBound) != "" {
-		upperArg, err := ParseCursorArgument(q.CursorDomain, q.UpperBound)
-		if err != nil {
-			return "", nil, err
-		}
-		op := "<"
-		if q.UpperInclusive {
-			op = "<="
-		}
-		clauses = append(clauses, fmt.Sprintf("%s %s :%d", qc, op, argPos))
-		args = append(args, upperArg)
-	}
-
-	query := fmt.Sprintf("SELECT %s FROM %s", buildOracleSelectClause(q.SelectColumns), qt)
+	query := fmt.Sprintf("SELECT %s FROM %s", buildOracleSelectClause(q.SelectColumns), rng.Table)
 	if scn := strings.TrimSpace(q.SnapshotContext); scn != "" {
 		// Optional: Oracle requires AS OF SCN directly after the table identifier.
 		query += fmt.Sprintf(" AS OF SCN %s", scn)
 	}
-	if len(clauses) > 0 {
-		query += " WHERE " + strings.Join(clauses, " AND ")
-	}
-	query += fmt.Sprintf(" ORDER BY %s ASC", qc)
-	return query, args, nil
+	query += rng.whereSQL()
+	query += fmt.Sprintf(" ORDER BY %s ASC", rng.Cursor)
+	return query, rng.Args, nil
 }
 
 func buildOracleAmbiguousNumberProbeQueries(table, cursorColumn string) (string, string, error) {

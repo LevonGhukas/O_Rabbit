@@ -46,6 +46,9 @@ type runSubmitRequest struct {
 	Performance runSubmitPerformanceRequest `json:"performance"`
 	Iceberg     runSubmitIcebergRequest     `json:"iceberg"`
 	Consistency runSubmitConsistencyRequest `json:"consistency"`
+	// Reconciliation optionally compares a source count of the planned range
+	// with the rows written, at commit. Absent means off.
+	Reconciliation *jobopts.Reconciliation `json:"reconciliation,omitempty"`
 	// WorkerPool limits the run's tasks and credentials to workers enrolled
 	// into this pool. Empty means "default".
 	WorkerPool string `json:"worker_pool,omitempty"`
@@ -143,6 +146,7 @@ type validatedRunSubmitSpec struct {
 	IcebergPartitionKeys   []string
 	IcebergRunConfig       icebergreg.RunConfig
 	ConsistencyMode        string
+	Reconciliation         *jobopts.Reconciliation
 	OrderedCursorSupported bool
 	QuerySupported         bool
 	OneShotSubmitSupported bool
@@ -925,6 +929,10 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 		return validatedRunSubmitSpec{}, invalidSubmitField("consistency.mode", jobopts.ErrCDCNotSupported, nil)
 	}
 
+	if err := validateSubmitReconciliation(req, sourceMode, engine); err != nil {
+		return validatedRunSubmitSpec{}, err
+	}
+
 	icebergEnabled := req.Iceberg.Enabled
 	icebergEngine := normalizedIcebergEngine(req.Iceberg.Engine)
 	icebergTable := strings.TrimSpace(req.Iceberg.Table)
@@ -977,6 +985,7 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 		TargetTable:            defaultOneShotTargetTable,
 		WriteMode:              resolveOneShotWriteMode(req.Source.Incremental),
 		ConsistencyMode:        consistencyMode,
+		Reconciliation:         req.Reconciliation,
 		IcebergEnabled:         false,
 		IcebergEngine:          icebergEngine,
 		IcebergTable:           icebergTable,
@@ -1100,6 +1109,9 @@ func buildOneShotJobRequest(spec validatedRunSubmitSpec, sourceConnectionID, tar
 	}
 	if spec.WorkerPool != "" {
 		options["worker_pool"] = spec.WorkerPool
+	}
+	if spec.Reconciliation != nil {
+		options["reconciliation"] = spec.Reconciliation
 	}
 
 	if strings.TrimSpace(spec.RecordPath) != "" {
@@ -1378,4 +1390,26 @@ func (s *Server) upsertJobByName(r *http.Request, req jobCreateRequest) (db.Job,
 		return db.Job{}, err
 	}
 	return s.st.CreateJobAudited(r.Context(), job, audit)
+}
+
+// validateSubmitReconciliation applies the job-option rules to a submit's
+// reconciliation block, which is stored on the one-shot job as an option.
+func validateSubmitReconciliation(req runSubmitRequest, sourceMode, engine string) error {
+	if req.Reconciliation == nil {
+		return nil
+	}
+	opts := jobopts.Options{
+		PartitionStrategy: "ordered_cursor",
+		SourceMode:        sourceMode,
+		WhereClause:       strings.TrimSpace(req.Source.WhereClause),
+		Reconciliation:    req.Reconciliation,
+	}
+	err := opts.ValidateReconciliation()
+	if err == nil {
+		err = jobopts.ValidateReconciliationEngine(opts, engine)
+	}
+	if err != nil {
+		return invalidSubmitField("reconciliation", err.Error(), nil)
+	}
+	return nil
 }

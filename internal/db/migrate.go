@@ -156,6 +156,27 @@ ALTER TABLE iceberg_registrations ADD COLUMN manual_retry_budget INTEGER NOT NUL
 // Incremental jobs with "overwrite" are left as they are (only the spelling is
 // normalized): they replaced the table with each run's new rows, so their
 // owner must choose. Run start rejects them with CONFIGURATION_INVALID.
+// schemaV32 records the optional commit-time source reconciliation, one row per
+// task, upserted because a commit attempt can be retried.
+const schemaV32 = `
+CREATE TABLE IF NOT EXISTS source_reconciliations (
+  run_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  method TEXT NOT NULL,
+  consistency TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  lower_bound TEXT NOT NULL DEFAULT '',
+  lower_exclusive INTEGER NOT NULL DEFAULT 0,
+  upper_bound TEXT NOT NULL DEFAULT '',
+  upper_inclusive INTEGER NOT NULL DEFAULT 0,
+  source_rows INTEGER NOT NULL DEFAULT 0,
+  output_rows INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (run_id, task_id)
+);
+`
+
 const schemaV31 = `
 UPDATE jobs SET write_mode = 'overwrite'
  WHERE incremental = 0 AND write_mode <> 'overwrite';

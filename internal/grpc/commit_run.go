@@ -274,6 +274,10 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 		}
 	}
 
+	if err := s.reconcileSourceRanges(ctx, resolved, srcConn, tasks, hasPersistedIntent); err != nil {
+		return err
+	}
+
 	existingStateBytes, existingStateFound, err := u.GetObjectBytes(ctx, stateKey)
 	if err != nil {
 		return fmt.Errorf("read dataset state: %w", err)
