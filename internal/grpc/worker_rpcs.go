@@ -381,12 +381,17 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *grpcpb.ReportTaskRes
 		}
 	}
 
+	hwmBoundary, err := encodeReportedHWMBoundary(req.HwmBoundary)
+	if err != nil {
+		return nil, grpcstatus.Error(codes.InvalidArgument, err.Error())
+	}
+
 	var accepted bool
 	var msg, finalStatus string
 	if len(records) > 0 {
 		accepted, msg, finalStatus, err = s.st.CompleteTaskAttemptWithArtifactsAndFailureClassAt(
 			ctx, req.BootId, req.TaskId, req.AttemptId, req.FencingToken, req.WorkerId,
-			status, errMsg, req.FailureClass, records, req.RowsRead, req.BytesRead, req.BytesWritten, s.nowFn())
+			status, errMsg, req.FailureClass, records, req.RowsRead, req.BytesRead, req.BytesWritten, s.nowFn(), hwmBoundary)
 	} else {
 		b, errJSON := json.Marshal(req.ParquetObjectKeys)
 		if errJSON != nil {
@@ -394,7 +399,7 @@ func (s *Server) ReportTaskResult(ctx context.Context, req *grpcpb.ReportTaskRes
 		}
 		accepted, msg, finalStatus, err = s.st.CompleteTaskAttemptWithFailureClassAt(
 			ctx, req.BootId, req.TaskId, req.AttemptId, req.FencingToken, req.WorkerId,
-			status, errMsg, req.FailureClass, b, req.RowsRead, req.BytesRead, req.BytesWritten, s.nowFn())
+			status, errMsg, req.FailureClass, b, req.RowsRead, req.BytesRead, req.BytesWritten, s.nowFn(), hwmBoundary)
 	}
 
 	if err != nil {

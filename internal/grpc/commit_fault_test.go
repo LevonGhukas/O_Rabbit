@@ -205,6 +205,13 @@ func newCommitFixtureWithOutput(t *testing.T, suffix string, registrationEnabled
 // checksum on the artifact, as a worker does when the store reports one.
 func newCommitFixtureWithChecksum(t *testing.T, suffix string, registrationEnabled, hasOutput, providerChecksum bool) *commitFixture {
 	t.Helper()
+	return newCommitFixtureWithHWMBoundary(t, suffix, registrationEnabled, hasOutput, providerChecksum, nil)
+}
+
+// newCommitFixtureWithHWMBoundary completes the task with the given reported
+// high-water-mark boundary JSON (nil when the task did not track one).
+func newCommitFixtureWithHWMBoundary(t *testing.T, suffix string, registrationEnabled, hasOutput, providerChecksum bool, hwmBoundary []byte) *commitFixture {
+	t.Helper()
 	ctx := context.Background()
 	st := openGRPCTestStore(t)
 	runID, jobID := "run-"+suffix, "job-"+suffix
@@ -263,7 +270,7 @@ func newCommitFixtureWithChecksum(t *testing.T, suffix string, registrationEnabl
 		rows = 10
 		written = int64(len(parquetBytes))
 	}
-	if accepted, _, _, err := st.CompleteTaskAttemptWithArtifactsAt(ctx, "", taskID, assigned.AttemptID, assigned.FencingToken, "worker-"+suffix, "SUCCEEDED", nil, records, rows, 0, written, time.Date(2026, 7, 22, 10, 1, 0, 0, time.UTC)); err != nil || !accepted {
+	if accepted, _, _, err := st.CompleteTaskAttemptWithArtifactsAndFailureClassAt(ctx, "", taskID, assigned.AttemptID, assigned.FencingToken, "worker-"+suffix, "SUCCEEDED", nil, "", records, rows, 0, written, time.Date(2026, 7, 22, 10, 1, 0, 0, time.UTC), hwmBoundary); err != nil || !accepted {
 		t.Fatalf("complete accepted=%v err=%v", accepted, err)
 	}
 	if changed, status, err := st.TryFinalizeRun(ctx, runID); err != nil || !changed || status != "COMMITTING" {
