@@ -46,6 +46,7 @@ var migrations = []migration{
 	{version: 30, sql: schemaV30},
 	{version: 31, sql: schemaV31},
 	{version: 32, sql: schemaV32},
+	{version: 33, sql: schemaV33},
 }
 
 // normalizeStoredTimestamps rewrites every stored timestamp in
@@ -167,6 +168,25 @@ UPDATE jobs SET write_mode = 'overwrite'
 
 // schemaV32 stores the rows each task read at its largest cursor value, which
 // the commit turns into the dataset's high-water-mark boundary.
+// schemaV33 adds scoped API credentials (only the SHA-256 of each token is
+// stored) and records the acting principal on every audit row.
+const schemaV33 = `
+CREATE TABLE IF NOT EXISTS api_credentials (
+  id TEXT PRIMARY KEY,
+  principal TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  scopes TEXT NOT NULL,
+  token_sha256 TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  created_by TEXT NOT NULL DEFAULT '',
+  expires_at TEXT,
+  revoked_at TEXT,
+  description TEXT NOT NULL DEFAULT ''
+);
+ALTER TABLE audit_log ADD COLUMN principal TEXT NOT NULL DEFAULT '';
+ALTER TABLE audit_log ADD COLUMN credential_id TEXT NOT NULL DEFAULT '';
+`
+
 const schemaV32 = `
 ALTER TABLE tasks ADD COLUMN hwm_boundary_json TEXT NOT NULL DEFAULT '';
 `
