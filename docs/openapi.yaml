@@ -202,7 +202,12 @@ paths:
     get:
       summary: Workers (active only unless all=1)
       parameters: [{ name: all, in: query, schema: { type: string, enum: ["1"] } }]
-      responses: { "200": { description: Workers } }
+      responses:
+        "200":
+          description: Workers
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Worker" } }
   /workers/{worker_id}:
     parameters: [{ name: worker_id, in: path, required: true, schema: { type: string } }]
     get: { summary: Worker identity and enrollment routes (see README), responses: { "200": { description: Worker } } }
@@ -220,6 +225,17 @@ paths:
     get: { summary: "Remote operations: a server", security: [{ remoteOps: [] }], responses: { "200": { description: Server } } }
   /deployments:
     get: { summary: "Remote operations: deployments", security: [{ remoteOps: [] }], responses: { "200": { description: Deployments } } }
+    post:
+      summary: "Remote operations: deploy master, worker or MinIO on a registered server"
+      security: [{ remoteOps: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeploymentRequest" }
+      responses:
+        "202": { description: Deployment started; follow events_stream_url }
+        "400": { $ref: "#/components/responses/Error" }
   /deployments/{deployment_id}:
     parameters: [{ name: deployment_id, in: path, required: true, schema: { type: string } }]
     get: { summary: "Remote operations: a deployment", security: [{ remoteOps: [] }], responses: { "200": { description: Deployment } } }
@@ -386,6 +402,30 @@ components:
         operator_review_required: { type: boolean }
         suggested_next_action: { type: string }
         generated_at: { type: string }
+    Worker:
+      type: object
+      properties:
+        id: { type: string }
+        addr: { type: string }
+        status: { type: string }
+        last_heartbeat: { type: string }
+        capabilities_json: { type: object, description: "Free-form: go, os, arch, num_cpu, memory_bytes, ..." }
+        instances: { type: array, items: { type: object } }
+        running_tasks: { type: integer, description: Tasks this worker currently holds a lease on. }
+    DeploymentRequest:
+      type: object
+      required: [server_id, component]
+      properties:
+        server_id: { type: string }
+        component: { type: string, enum: [master, worker, minio] }
+        params:
+          type: object
+          description: Worker deployments only, except scale which is also worker-only.
+          properties:
+            scale: { type: integer, minimum: 1, maximum: 50, description: Number of worker containers. }
+            name: { type: string, pattern: "^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$", description: "Own Compose project orabbit-worker-<name>; worker IDs <name>-<container id>." }
+            cpus: { type: string, example: "1.5", description: CPU limit per container (0.1-64). }
+            memory: { type: string, example: 2g, description: Memory limit per container (64m-512g). }
     RunSubmitted:
       type: object
       properties:
