@@ -38,13 +38,6 @@ func TestValidateAuthentication(t *testing.T) {
 			insecure:  true,
 		},
 		{
-			name:     "remote http without token",
-			http:     "0.0.0.0:9100",
-			grpc:     "127.0.0.1:9102",
-			insecure: true,
-			wantErr:  "requires ORABBIT_HTTP_AUTH_TOKEN",
-		},
-		{
 			name:     "remote insecure grpc without worker token",
 			http:     "127.0.0.1:9100",
 			grpc:     "0.0.0.0:9102",
@@ -144,5 +137,27 @@ func TestRemoteOpsTokenMustDifferFromAPIToken(t *testing.T) {
 	cfg.RemoteOpsAuthToken = "different"
 	if err := cfg.validateAuthentication(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRemoteHTTPRequiresTokenOrActiveCredential(t *testing.T) {
+	remote := masterConfig{HTTPAddr: "0.0.0.0:9100", GRPCAddr: "127.0.0.1:9102", Insecure: true}
+	if err := remote.validateAuthentication(); err != nil {
+		t.Fatalf("static validation must not need the database: %v", err)
+	}
+	if err := remote.validateHTTPExposure(0); err == nil || !strings.Contains(err.Error(), "requires ORABBIT_HTTP_AUTH_TOKEN") {
+		t.Fatalf("remote without auth: err=%v", err)
+	}
+	if err := remote.validateHTTPExposure(1); err != nil {
+		t.Fatalf("remote with an active credential: %v", err)
+	}
+	withToken := remote
+	withToken.HTTPAuthToken = "secret"
+	if err := withToken.validateHTTPExposure(0); err != nil {
+		t.Fatalf("remote with legacy token: %v", err)
+	}
+	loopback := masterConfig{HTTPAddr: "127.0.0.1:9100"}
+	if err := loopback.validateHTTPExposure(0); err != nil {
+		t.Fatalf("loopback without auth: %v", err)
 	}
 }

@@ -108,6 +108,16 @@ func run() int {
 	}
 	defer st.Close()
 
+	activeCredentials, err := st.CountActiveAPICredentials(ctx)
+	if err != nil {
+		log.Error("count scoped credentials", slog.String("err", err.Error()))
+		return exitFailure
+	}
+	if err := cfg.validateHTTPExposure(activeCredentials); err != nil {
+		log.Error("invalid control-plane authentication configuration", slog.String("err", err.Error()))
+		return exitConfig
+	}
+
 	st.SetMasterKey(k)
 	if err := st.MigrateLegacySecrets(ctx, k); err != nil {
 		log.Error("migrate legacy secrets", slog.String("err", err.Error()))
@@ -297,6 +307,7 @@ func run() int {
 	httpSrv := httpapi.NewServer(log, st, bc, k, httpapi.StatusInfo{PID: os.Getpid(), HTTPAddr: cfg.HTTPAddr, GRPCAddr: cfg.GRPCAddr, DBPath: processLock.Identity}, cfg.HTTPAuthToken)
 	httpSrv.SetLeadershipGuard(leadership)
 	httpSrv.SetRemoteOpsToken(cfg.RemoteOpsAuthToken)
+	httpSrv.SetRemoteOpsEnabled(cfg.RemoteOpsEnabled)
 	httpSrv.SetOperability(cfg.TaskMaxAttempts, grpcSrv)
 	// The servers stop when serveCtx ends: on shutdown, on lost leadership,
 	// or when the other server fails.
@@ -319,7 +330,8 @@ func run() int {
 		slog.Bool("worker_auth", strings.TrimSpace(cfg.WorkerAuthToken) != ""),
 		slog.Bool("insecure", cfg.Insecure),
 		slog.Bool("worker_identity", !cfg.Insecure),
-		slog.Bool("remote_ops", cfg.RemoteOpsAuthToken != ""),
+		slog.Bool("scoped_credentials", activeCredentials > 0),
+		slog.Bool("remote_ops", cfg.RemoteOpsAuthToken != "" || cfg.RemoteOpsEnabled),
 		slog.String("iceberg_registration", "persisted-run-snapshot"),
 		slog.String("ice_binary", cfg.IceBin),
 		slog.String("log_level", cfg.LogLevel),
