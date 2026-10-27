@@ -18,6 +18,7 @@ const (
 	CodeDatasetBusy           Code = "dataset_busy"
 	CodeNotImplemented        Code = "not_implemented"
 	CodeRunPlanningFailed     Code = "run_planning_failed"
+	CodeRateLimited           Code = "rate_limited"
 )
 
 type Response struct {
@@ -69,6 +70,8 @@ func CodeForStatus(status int) Code {
 		return CodeMethodNotAllowed
 	case http.StatusConflict:
 		return CodeConflict
+	case http.StatusTooManyRequests:
+		return CodeRateLimited
 	case http.StatusServiceUnavailable:
 		return CodeDependencyUnavailable
 	default:

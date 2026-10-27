@@ -61,6 +61,7 @@ type Server struct {
 	configs          configService
 	deploy           deployService
 	taskMaxAttempts  int
+	limits           httpLimiters
 	commitReconciler interface {
 		ReconcileCommittingRuns(context.Context) error
 	}
@@ -166,9 +167,9 @@ func (s *Server) Handler() http.Handler {
 	if strings.TrimSpace(s.authToken) != "" {
 		handler = s.withAuth(handler)
 	}
-	// Tracing is outermost so rejected requests are traced too. It is a
-	// no-op unless OTLP tracing is configured.
-	return otelhttp.NewHandler(s.withRecoverer(handler), "orabbit-http",
+	// Rate limits run before authentication. Tracing is outermost so rejected
+	// requests are traced too. It is a no-op unless OTLP tracing is configured.
+	return otelhttp.NewHandler(s.withRecoverer(s.withRateLimit(handler)), "orabbit-http",
 		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 			if r.Pattern != "" {
 				return r.Method + " " + r.Pattern
@@ -231,6 +232,7 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			return
 		}
 		if !constantTimeBearerMatch(r.Header.Get("Authorization"), s.authToken) {
+			s.recordAuthFailure(r, surfaceHTTPAPI)
 			w.Header().Set("WWW-Authenticate", `Bearer realm="orabbit"`)
 			writeUnauthorized(w)
 			return
@@ -310,6 +312,7 @@ func (s *Server) withRemoteOpsGuard(next http.Handler) http.Handler {
 			return
 		}
 		if !constantTimeBearerMatch(r.Header.Get("Authorization"), s.remoteOpsToken) {
+			s.recordAuthFailure(r, surfaceHTTPRemoteOps)
 			w.Header().Set("WWW-Authenticate", `Bearer realm="orabbit-remote-ops"`)
 			writeUnauthorized(w)
 			return

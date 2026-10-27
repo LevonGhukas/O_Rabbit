@@ -68,6 +68,7 @@ type Server struct {
 	newCommitObjectStoreFn     func(context.Context, s3io.Config) (commitObjectStore, error)
 	upsertHWMFn                func(context.Context, string, string) error
 	leasePolicy                db.LeasePolicy
+	limits                     grpcLimiters
 	nowFn                      func() time.Time
 	attemptIDFn                func() (string, error)
 	fencingTokenFn             func() (string, error)
@@ -333,7 +334,7 @@ func serverOptions(cfg Config, srv *Server) []grpc.ServerOption {
 		grpc.ChainUnaryInterceptor(
 			telemetry.UnaryServerInterceptor(),
 			recoveryUnaryServerInterceptor(srv.log),
-			workerAuthUnaryServerInterceptor(cfg.WorkerAuthToken),
+			srv.rateLimitedWorkerAuth(workerAuthUnaryServerInterceptor(cfg.WorkerAuthToken)),
 			srv.workerIdentityUnaryInterceptor(!cfg.Insecure),
 		),
 		grpc.ChainStreamInterceptor(recoveryStreamServerInterceptor(srv.log)),
