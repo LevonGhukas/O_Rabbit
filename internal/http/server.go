@@ -134,9 +134,9 @@ func (s *Server) Handler() http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/ready", s.handleReady)
-	mux.HandleFunc("/metrics", authorized(readWrite(auth.ScopeRead), s.handleMetrics))
+	mux.HandleFunc("/metrics", authorized(readWrite(auth.ScopeJobsWrite), s.handleMetrics))
 
-	mux.HandleFunc("/status", authorized(readWrite(auth.ScopeRead), func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/status", authorized(readWrite(auth.ScopeJobsWrite), func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeMethodNotAllowed(w, r.Method, http.MethodGet)
 			return
