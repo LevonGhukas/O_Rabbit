@@ -55,6 +55,10 @@ func run() int {
 		log.Error("invalid control-plane authentication configuration", slog.String("err", err.Error()))
 		return exitConfig
 	}
+	if err := cfg.RateLimits.validate(); err != nil {
+		log.Error("invalid rate limit configuration", slog.String("err", err.Error()))
+		return exitConfig
+	}
 
 	if cfg.Insecure && cfg.AllowInsecureRemoteGRPC && !isLoopbackListenAddress(cfg.GRPCAddr) {
 		log.Warn("plaintext gRPC is enabled on a non-loopback listener; task credentials are sent unencrypted",
@@ -140,6 +144,7 @@ func run() int {
 		}
 		grpcSrv.SetWorkerIdentity(workerCA, cfg.WorkerCertTTL)
 	}
+	grpcSrv.SetRateLimits(grpcapi.RateLimits{Enroll: cfg.RateLimits.Enroll, AuthFailures: cfg.RateLimits.AuthFailures})
 	grpcSrv.SetLeasePolicy(db.LeasePolicy{Duration: cfg.TaskLeaseDuration, MaxAttempts: cfg.TaskMaxAttempts, MaxActiveTasks: cfg.MaxActiveTasks, BackoffBase: cfg.TaskRetryBackoff, BackoffMax: cfg.TaskRetryBackoffMax})
 	grpcSrv.SetCatalogWorkLimit(cfg.CatalogWorkLimit)
 	commitCatalog := grpcapi.CommitCatalogPolicy{
@@ -294,6 +299,17 @@ func run() int {
 	httpSrv := httpapi.NewServer(log, st, bc, k, httpapi.StatusInfo{PID: os.Getpid(), HTTPAddr: cfg.HTTPAddr, GRPCAddr: cfg.GRPCAddr, DBPath: processLock.Identity}, cfg.HTTPAuthToken)
 	httpSrv.SetLeadershipGuard(leadership)
 	httpSrv.SetRemoteOpsToken(cfg.RemoteOpsAuthToken)
+	trustedProxies, err := cfg.RateLimits.trustedProxies()
+	if err != nil {
+		log.Error("invalid rate limit configuration", slog.String("err", err.Error()))
+		return exitConfig
+	}
+	httpSrv.SetRateLimits(httpapi.RateLimits{
+		Requests:       cfg.RateLimits.HTTP,
+		Sensitive:      cfg.RateLimits.HTTPSensitive,
+		AuthFailures:   cfg.RateLimits.AuthFailures,
+		TrustedProxies: trustedProxies,
+	})
 	httpSrv.SetOperability(cfg.TaskMaxAttempts, grpcSrv)
 	// The servers stop when serveCtx ends: on shutdown, on lost leadership,
 	// or when the other server fails.

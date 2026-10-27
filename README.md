@@ -647,6 +647,35 @@ contract is [proto/controlplane.proto](proto/controlplane.proto).
 - **Scoped S3 access.** With target metadata `"credential_mode": "sts"` and
   `"sts_role_arn"`, workers get temporary credentials limited to the run's
   own prefix (`<dataset prefix>/_runs/run-<run id>/`).
+- **Rate limits.** The master limits requests per client address, in memory
+  (one active master, so no shared store is needed). Limited HTTP requests get
+  `429` with `Retry-After` and error code `rate_limited`; limited worker RPCs get
+  `ResourceExhausted` with a `RetryInfo` delay, which enrolling workers honour.
+  - Every HTTP request except `/healthz` and `/ready` counts against
+    `ORABBIT_HTTP_RATE_LIMIT_*`. Changes to remote operations and worker
+    identities (`POST`/`PUT`/`DELETE` on `/servers`, `/deployments`,
+    `/executions`, `/workers/...`) also count against
+    `ORABBIT_HTTP_SENSITIVE_RATE_LIMIT_*`.
+  - Rejected API and remote-ops tokens, shared worker tokens and enrollment
+    tokens spend `ORABBIT_AUTH_FAILURE_RATE_LIMIT_*`. Once a client's budget is
+    spent it is refused before its credentials are checked, even with a valid
+    token, until the budget refills. Rejected worker certificates (for example
+    an expired one) do not count, so one stale worker cannot lock out others.
+  - `EnrollWorker` calls count against `ORABBIT_ENROLL_RATE_LIMIT_*` before a
+    certificate is issued; the default burst lets 100 workers enroll at once
+    from one address. Reconnecting workers that already hold a certificate are
+    not limited.
+  - Clients sharing an address (NAT, or a proxy that is not listed in
+    `ORABBIT_HTTP_TRUSTED_PROXIES`) share one budget, including the failure
+    budget. IPv6 clients are grouped by /64. Behind a reverse proxy, list it in
+    `ORABBIT_HTTP_TRUSTED_PROXIES` so `X-Forwarded-For` identifies clients; the
+    header is ignored from any other peer. gRPC always keys on the connection
+    peer, so behind a TCP load balancer all workers share its address: raise
+    the enroll and failure bursts accordingly. Workers presenting a verified
+    certificate are never blocked by the failure budget.
+  - Each limit is `<name>_RPS` (sustained events per second; `0` disables it)
+    and `<name>_BURST` (events allowed at once). Invalid values stop the master
+    at startup.
 - **Source safety.** Query mode accepts a single `SELECT`/`WITH` statement;
   `where_clause` must be one boolean expression. A read-only database user is
   still the only control that holds on every engine.
@@ -683,6 +712,11 @@ Flags override environment variables. Example files:
 | `ORABBIT_WORKER_AUTH_TOKEN` | empty | Bearer token for worker RPCs; required for non-loopback gRPC |
 | `ORABBIT_REMOTE_OPS_AUTH_TOKEN` | empty | Enables the remote operations API and is its only token; must differ from the API token |
 | `ORABBIT_TLS_CERT_FILE`, `ORABBIT_TLS_KEY_FILE` | empty | Master gRPC certificate and key |
+| `ORABBIT_HTTP_TRUSTED_PROXIES` | empty | Comma-separated proxy IPs/CIDRs whose `X-Forwarded-For` identifies HTTP clients for rate limiting |
+| `ORABBIT_HTTP_RATE_LIMIT_RPS`, `_BURST` | `50`, `200` | Per-client HTTP request limit (probes excluded); see [Security model](#security-model) |
+| `ORABBIT_HTTP_SENSITIVE_RATE_LIMIT_RPS`, `_BURST` | `1`, `30` | Extra per-client limit on remote-ops and worker-identity changes |
+| `ORABBIT_AUTH_FAILURE_RATE_LIMIT_RPS`, `_BURST` | `0.2`, `20` | Per-client budget of rejected tokens (HTTP and gRPC) |
+| `ORABBIT_ENROLL_RATE_LIMIT_RPS`, `_BURST` | `2`, `100` | Per-peer `EnrollWorker` limit |
 | `ORABBIT_GRPC_INSECURE` | `false` | Disable gRPC TLS (loopback only) |
 | `ORABBIT_GRPC_ALLOW_INSECURE_REMOTE` | `false` | Allow plaintext gRPC on a non-loopback listener (isolated private networks only) |
 | `ORABBIT_WORKER_CERT_TTL` | `24h` | Worker certificate lifetime (1h-720h) |
@@ -885,6 +919,14 @@ docker run --rm -v orabbit-worker_orabbit_worker_identity:/d debian:bookworm-sli
     `orabbit_catalog_work_rejected_total`.
   - `orabbit_runs_operator_action_required` counts runs that wait for an
     operator.
+  - Rate limits: `orabbit_rate_limited_total{surface,reason}` counts rejected
+    requests and `orabbit_auth_failures_total{surface}` rejected credentials
+    (`surface` is `http_api`, `http_remote_ops`, `grpc_enroll` or
+    `grpc_worker`). HTTP `429`s are rejected before routing, so they do not
+    appear in `orabbit_http_requests_total`. A steady rise in
+    `orabbit_auth_failures_total` means guessing or a misconfigured client; a
+    rise in `reason="request_rate"` during normal use means the limit is too
+    low or clients share an address (see `ORABBIT_HTTP_TRUSTED_PROXIES`).
 - **Alerts and dashboard:** [`monitoring/prometheus/orabbit-alerts.yml`](monitoring/prometheus/orabbit-alerts.yml)
   holds Prometheus alert rules; every alert links to its section in
   [docs/runbooks.md](docs/runbooks.md). `severity: critical` is meant to page,
