@@ -13,10 +13,15 @@ info:
     Operational endpoints are not versioned: `/healthz`, `/ready`, `/metrics`,
     `/status`.
 
-    Authentication: when `ORABBIT_HTTP_AUTH_TOKEN` is set, every request needs
-    `Authorization: Bearer <token>`. Remote operations (`/servers`,
-    `/deployments`, `/executions`) are disabled unless enabled, and then accept
-    only their own token, never the API token.
+    Authentication: every request needs `Authorization: Bearer <token>` once
+    `ORABBIT_HTTP_AUTH_TOKEN` is set or any scoped credential exists. A scoped
+    credential (`orb_...`, see `/credentials`) carries scopes; a request whose
+    credential lacks the required scope gets `403` with code `forbidden`.
+    Scopes: `read`, `jobs:write`, `secrets:admin`, `workers:admin`,
+    `remote_ops`, `credentials:admin`; the authorization matrix is in
+    README.md. Remote operations (`/servers`, `/deployments`, `/executions`)
+    are disabled (404) unless enabled, and then need the `remote_ops` scope or
+    the legacy remote-operations token, never the legacy API token.
 
     Bodies of the larger resources (jobs, connections, remote operations) are
     described in README.md; this spec covers their paths and the run API in detail.
@@ -219,6 +224,19 @@ paths:
   /executions/{execution_id}:
     parameters: [{ name: execution_id, in: path, required: true, schema: { type: string } }]
     get: { summary: "Remote operations: an execution", security: [{ remoteOps: [] }], responses: { "200": { description: Execution } } }
+  /credentials:
+    get: { summary: "List scoped credentials (no secrets; scope credentials:admin)", responses: { "200": { description: Credentials } } }
+    post:
+      summary: "Create a scoped credential; the token is returned once (scope credentials:admin)"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateCredentialRequest" }
+      responses: { "201": { description: "{credential, token}" } }
+  /credentials/{credential_id}/revoke:
+    parameters: [{ name: credential_id, in: path, required: true, schema: { type: string } }]
+    post: { summary: "Revoke a credential (scope credentials:admin)", responses: { "200": { description: Credential } } }
 components:
   securitySchemes:
     bearer: { type: http, scheme: bearer, description: ORABBIT_HTTP_AUTH_TOKEN }
@@ -239,6 +257,15 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorEnvelope" }
   schemas:
+    CreateCredentialRequest:
+      type: object
+      required: [principal, kind, scopes]
+      properties:
+        principal: { type: string, description: "Name recorded in the audit log" }
+        kind: { type: string, enum: [human, automation] }
+        scopes: { type: array, items: { type: string, enum: [read, "jobs:write", "secrets:admin", "workers:admin", remote_ops, "credentials:admin"] } }
+        ttl_seconds: { type: integer, description: "60 to 31536000; omit for no expiry" }
+        description: { type: string }
     SourceEngine:
       type: object
       required: [engine, table_mode_supported, ordered_cursor_supported, query_supported]

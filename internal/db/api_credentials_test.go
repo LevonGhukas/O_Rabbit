@@ -118,3 +118,16 @@ func TestAPICredentialsAreLeadershipFenced(t *testing.T) {
 		t.Fatal("api_credentials must be fenced against stale masters")
 	}
 }
+
+func TestHasAPICredentialsCountsRevokedRows(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	if has, err := st.HasAPICredentials(ctx); err != nil || has {
+		t.Fatalf("empty = %v, %v", has, err)
+	}
+	_ = st.CreateAPICredential(ctx, newTestCredential("c1"), nil)
+	_ = st.RevokeAPICredential(ctx, "c1", nil)
+	if has, _ := st.HasAPICredentials(ctx); !has {
+		t.Fatal("revoked credential must still disable anonymous mode")
+	}
+}

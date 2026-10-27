@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGenerateTokenRoundTrip(t *testing.T) {
@@ -86,5 +87,45 @@ func TestFingerprintHidesToken(t *testing.T) {
 	fp := Fingerprint("topsecret")
 	if strings.Contains(fp, "topsecret") || !strings.HasPrefix(fp, "sha256:") {
 		t.Fatalf("fingerprint %q", fp)
+	}
+}
+
+func TestIssueValidatesAndBuildsCredential(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	cred, tok, err := Issue(IssueRequest{Principal: " ci-bot ", Kind: "automation", Scopes: []string{"jobs:write", "read"}, TTL: time.Hour, Description: "ci"}, "cli", now)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if cred.ID != tok.CredentialID || cred.TokenSHA256 != tok.Hash || cred.Principal != "ci-bot" || cred.CreatedBy != "cli" {
+		t.Fatalf("credential = %+v", cred)
+	}
+	if cred.ExpiresAt == "" || cred.Scopes[0] != "jobs:write" {
+		t.Fatalf("expiry/scopes = %+v", cred)
+	}
+	if _, _, err := Issue(IssueRequest{Principal: "x", Kind: "human", Scopes: []string{"read"}}, "cli", now); err != nil {
+		t.Fatalf("no ttl must be allowed: %v", err)
+	}
+}
+
+func TestIssueRejectsInvalidRequests(t *testing.T) {
+	now := time.Now()
+	good := IssueRequest{Principal: "alice", Kind: "human", Scopes: []string{"read"}}
+	bad := map[string]func(*IssueRequest){
+		"empty principal":  func(r *IssueRequest) { r.Principal = " " },
+		"long principal":   func(r *IssueRequest) { r.Principal = strings.Repeat("a", MaxPrincipalLength+1) },
+		"spaces":           func(r *IssueRequest) { r.Principal = "a b" },
+		"bad kind":         func(r *IssueRequest) { r.Kind = "legacy" },
+		"bad scope":        func(r *IssueRequest) { r.Scopes = []string{"root"} },
+		"no scopes":        func(r *IssueRequest) { r.Scopes = nil },
+		"short ttl":        func(r *IssueRequest) { r.TTL = time.Second },
+		"long ttl":         func(r *IssueRequest) { r.TTL = MaxTTL + time.Hour },
+		"long description": func(r *IssueRequest) { r.Description = strings.Repeat("d", MaxDescriptionLength+1) },
+	}
+	for name, mutate := range bad {
+		req := good
+		mutate(&req)
+		if _, _, err := Issue(req, "cli", now); err == nil {
+			t.Errorf("%s accepted", name)
+		}
 	}
 }

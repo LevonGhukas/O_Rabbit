@@ -145,3 +145,13 @@ func insertOptionalAuditTx(ctx context.Context, tx *sql.Tx, audit *AuditRecord) 
 	}
 	return insertAuditRecordTx(ctx, tx, *audit)
 }
+
+// HasAPICredentials reports whether any credential row exists, including
+// revoked or expired ones. Open (anonymous) access is only possible while the
+// table is empty, so revoking or expiring the last credential never silently
+// reopens the API.
+func (s *Store) HasAPICredentials(ctx context.Context) (bool, error) {
+	var exists bool
+	err := s.rdb.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM api_credentials);`).Scan(&exists)
+	return exists, err
+}

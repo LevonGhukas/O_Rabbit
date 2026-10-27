@@ -464,9 +464,12 @@ func TestInternalErrorReturnsGenericStructuredJSON(t *testing.T) {
 	if err := st.Close(); err != nil {
 		t.Fatalf("close store: %v", err)
 	}
-	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
+	// A legacy token authenticates without the (closed) database, so the
+	// failure under test is the handler's.
+	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "api-token")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/connections", nil)
+	req.Header.Set("Authorization", "Bearer api-token")
 
 	srv.Handler().ServeHTTP(rec, req)
 
