@@ -688,6 +688,9 @@ func (s *Server) validateJobRequest(ctx context.Context, req jobCreateRequest) e
 			if err := jobopts.ValidateReconciliationEngine(opts, sourceEngine); errors.As(err, &invalid) {
 				problems = append(problems, invalid.Errors...)
 			}
+			if err := jobopts.ValidateWhereClauseEngine(opts, sourceEngine); errors.As(err, &invalid) {
+				problems = append(problems, invalid.Errors...)
+			}
 		}
 	}
 	if len(problems) == 0 {

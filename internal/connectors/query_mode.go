@@ -166,9 +166,21 @@ func QueryHash(query string) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
+// SupportsQueryModeWhereClause reports whether the engine applies where_clause
+// in query mode. SQL engines wrap the query in a derived table and filter its
+// result columns; CQL and MongoDB queries run as written, so they cannot.
+func SupportsQueryModeWhereClause(engine string) bool {
+	switch NormalizeSourceEngine(engine) {
+	case "postgres", "mysql", "mariadb", "mssql", "oracle", "clickhouse", "trino":
+		return true
+	default:
+		return false
+	}
+}
+
 // queryModeRange resolves the dialect, the wrapped source expression and the
-// bound predicate shared by query-mode row and count statements. Query mode
-// does not apply where_clause (tracked separately), so neither statement does.
+// predicate shared by query-mode row and count statements: where_clause, then
+// the cursor bounds. The filter refers to columns of the query result.
 func queryModeRange(engine string, q CursorQuery) (queryModeDialect, rangeSQL, error) {
 	d, ok := queryModeDialectForEngine(engine)
 	if !ok {
@@ -182,7 +194,7 @@ func queryModeRange(engine string, q CursorQuery) (queryModeDialect, rangeSQL, e
 	if err != nil {
 		return d, rangeSQL{}, err
 	}
-	rng, err := newRangeSQL(q, d.sourceExpr(sourceQuery), qc, false, d.placeholder)
+	rng, err := newRangeSQL(q, d.sourceExpr(sourceQuery), qc, d.placeholder)
 	return d, rng, err
 }
 

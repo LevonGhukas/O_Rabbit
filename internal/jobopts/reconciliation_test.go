@@ -46,7 +46,7 @@ func TestValidateReconciliation(t *testing.T) {
 		{"unknown key", `{"reconciliation":{"modee":"count"}}`, Strict, "unknown field"},
 		{"not an object", `{"reconciliation":"count"}`, Strict, "must be an object"},
 		{"single strategy", `{"partition_strategy":"single","reconciliation":{"mode":"count"}}`, Strict, "ordered_cursor"},
-		{"query mode with where", `{"partition_strategy":"ordered_cursor","source_mode":"query","query":"SELECT 1 AS id","where_clause":"a=1","reconciliation":{"mode":"count"}}`, Strict, "where_clause"},
+		{"query mode with where", `{"partition_strategy":"ordered_cursor","source_mode":"query","query":"SELECT 1 AS id","where_clause":"a=1","reconciliation":{"mode":"count"}}`, Strict, ""},
 		{"query mode without where", `{"partition_strategy":"ordered_cursor","source_mode":"query","query":"SELECT 1 AS id","reconciliation":{"mode":"count"}}`, Strict, ""},
 		{"query mode where but off", `{"source_mode":"query","query":"SELECT 1 AS id","where_clause":"a=1","reconciliation":{"mode":"off"}}`, Strict, ""},
 	}

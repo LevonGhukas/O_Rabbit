@@ -133,6 +133,11 @@ func TestCountRangeSharesPredicateWithQueryCursor(t *testing.T) {
 			q.LowerBound, q.LowerExclusive, q.UpperBound, q.UpperInclusive = "10", true, "20", true
 			return q
 		},
+		"query mode with where clause": func(q CursorQuery) CursorQuery {
+			q.Table, q.SourceQuery, q.WhereClause = "", "SELECT id, status FROM orders", "status = 'open'"
+			q.LowerBound, q.LowerExclusive, q.UpperBound, q.UpperInclusive = "10", true, "20", true
+			return q
+		},
 	}
 	for engine, newReader := range readers {
 		for name, mutate := range cases {
@@ -171,14 +176,33 @@ func TestCountRangeSharesPredicateWithQueryCursor(t *testing.T) {
 	}
 }
 
-func TestQueryModeCountDoesNotApplyWhereClause(t *testing.T) {
-	q := CursorQuery{SourceQuery: "SELECT id FROM orders", CursorColumn: "id", CursorDomain: CursorDomainInt64, WhereClause: "x = 1", LowerBound: "1"}
-	sqlText, _, err := buildQueryModeCountSQL("postgres", q)
-	if err != nil {
-		t.Fatal(err)
+func TestQueryModeAppliesWhereClause(t *testing.T) {
+	q := CursorQuery{SourceQuery: "SELECT id, x FROM orders", CursorColumn: "id", CursorDomain: CursorDomainInt64, WhereClause: "x = 1", LowerBound: "1"}
+	want := `WHERE (x = 1) AND "` + queryModeAlias + `"."id" >= $1`
+	for name, build := range map[string]func(string, CursorQuery) (string, []any, error){
+		"cursor": buildQueryModeCursorSQL,
+		"count":  buildQueryModeCountSQL,
+	} {
+		sqlText, args, err := build("postgres", q)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !strings.Contains(sqlText, want) || len(args) != 1 {
+			t.Fatalf("%s: sql=%s args=%v, want containing %q with one arg", name, sqlText, args, want)
+		}
 	}
-	if strings.Contains(sqlText, "x = 1") {
-		t.Fatalf("query mode count applied where_clause: %s", sqlText)
+}
+
+func TestSupportsQueryModeWhereClause(t *testing.T) {
+	for _, engine := range []string{"postgres", "mysql", "mariadb", "mssql", "oracle", "clickhouse", "trino"} {
+		if !SupportsQueryModeWhereClause(engine) {
+			t.Errorf("%s should apply where_clause in query mode", engine)
+		}
+	}
+	for _, engine := range []string{"mongodb", "cassandra", "s3", "flightsql", "unknown"} {
+		if SupportsQueryModeWhereClause(engine) {
+			t.Errorf("%s cannot apply where_clause in query mode", engine)
+		}
 	}
 }
 
@@ -232,9 +256,10 @@ func TestRangePredicateGolden(t *testing.T) {
 		{"mssql", func(db *sql.DB) parityReader { return &MSSQL{db: db} }, q, `(status = 'open') AND [id] > @p1 AND [id] <= @p2`},
 		{"clickhouse", func(db *sql.DB) parityReader { return &ClickHouse{db: db} }, q, "(status = 'open') AND `id` > ? AND `id` <= ?"},
 		{"trino", func(db *sql.DB) parityReader { return &Trino{db: db} }, q, `(status = 'open') AND "id" > ? AND "id" <= ?`},
-		{"postgres query mode", func(db *sql.DB) parityReader { return &Postgres{db: db} }, queryMode, `"` + alias + `"."id" > $1 AND "` + alias + `"."id" <= $2`},
-		{"mysql query mode", func(db *sql.DB) parityReader { return &MySQL{db: db} }, queryMode, "`" + alias + "`.`id` > ? AND `" + alias + "`.`id` <= ?"},
-		{"mssql query mode", func(db *sql.DB) parityReader { return &MSSQL{db: db} }, queryMode, "[" + alias + "].[id] > @p1 AND [" + alias + "].[id] <= @p2"},
+		{"postgres query mode", func(db *sql.DB) parityReader { return &Postgres{db: db} }, queryMode, `(status = 'open') AND "` + alias + `"."id" > $1 AND "` + alias + `"."id" <= $2`},
+		{"mysql query mode", func(db *sql.DB) parityReader { return &MySQL{db: db} }, queryMode, "(status = 'open') AND `" + alias + "`.`id` > ? AND `" + alias + "`.`id` <= ?"},
+		{"mssql query mode", func(db *sql.DB) parityReader { return &MSSQL{db: db} }, queryMode, "(status = 'open') AND [" + alias + "].[id] > @p1 AND [" + alias + "].[id] <= @p2"},
+		{"oracle query mode", func(db *sql.DB) parityReader { return &Oracle{db: db} }, queryMode, "(status = 'open') AND " + alias + `."id" > :1 AND ` + alias + `."id" <= :2`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
