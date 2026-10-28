@@ -252,7 +252,12 @@ func buildQueryModeDescribeSQL(engine, query string) (string, error) {
 	return fmt.Sprintf("SELECT * FROM %s WHERE 1 = 0%s", d.sourceExpr(sourceQuery), d.terminator), nil
 }
 
-func queryModeCursor(ctx context.Context, db *sql.DB, engine string, q CursorQuery) (*sql.Rows, []string, []*sql.ColumnType, int, error) {
+// rowQuerier is a connection pool or a transaction.
+type rowQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func queryModeCursor(ctx context.Context, db rowQuerier, engine string, q CursorQuery) (*sql.Rows, []string, []*sql.ColumnType, int, error) {
 	query, args, err := buildQueryModeCursorSQL(engine, q)
 	if err != nil {
 		return nil, nil, nil, -1, err

@@ -720,17 +720,9 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 			})
 		}
 
-		var snapshotCtx string
-		if o.ConsistencyMode == "STRONG_SNAPSHOT" {
-			if exporter, ok := reader.(connectors.SnapshotExporter); ok {
-				var err error
-				snapshotCtx, err = exporter.ExportSnapshot(ctx)
-				if err != nil {
-					return db.Run{}, nil, fmt.Errorf("failed to export snapshot for STRONG_SNAPSHOT consistency: %w", err)
-				}
-			} else {
-				return db.Run{}, nil, fmt.Errorf("STRONG_SNAPSHOT consistency mode is not supported for engine %q", srcEngine)
-			}
+		snapshotCtx, err := exportRunSnapshot(ctx, reader, srcEngine, sourceMode, o.ConsistencyMode)
+		if err != nil {
+			return db.Run{}, nil, err
 		}
 
 		// Resume at the high-water mark (dropping rows already exported), or,
