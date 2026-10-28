@@ -40,6 +40,9 @@ const (
 	// docker-compose.yml. Faults hold the catalog longer than this.
 	registrationTimeout = 10 * time.Second
 	faultHold           = registrationTimeout + 5*time.Second
+	// faultSettle is how long past its hold a fault that was hit may take to
+	// finish dropping the connection.
+	faultSettle = 5 * time.Second
 	// runDeadline bounds one run, including a fault and its recovery.
 	runDeadline = 3 * time.Minute
 	bucket      = "e2e-lake"
@@ -251,13 +254,21 @@ func (e *env) runState(ctx context.Context, t *testing.T, runID string) runView 
 	return run
 }
 
+// assertFaultFired fails unless the fault matched a request, then waits for it
+// to finish. The run can recover before the hold ends, so a hit fault may still
+// be holding its connection when the run is already registered.
 func (e *env) assertFaultFired(t *testing.T, f *catalogFault) {
 	t.Helper()
 	select {
-	case <-f.fired:
+	case <-f.hit:
 	default:
 		e.proxy.clear()
 		t.Fatalf("injected catalog fault on %s %s never fired; the scenario did not exercise a timeout", f.method, f.path)
+	}
+	select {
+	case <-f.fired:
+	case <-time.After(f.hold + faultSettle):
+		t.Fatalf("injected catalog fault on %s %s did not finish within %s", f.method, f.path, f.hold+faultSettle)
 	}
 }
 
