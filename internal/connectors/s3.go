@@ -113,28 +113,12 @@ func (r *S3Reader) StreamDocuments(ctx context.Context, collection string, filte
 
 	switch format {
 	case "csv":
-		csvReader := csv.NewReader(out.Body)
-		// For standard CSV uploads, fields might contain quotes or have unequal lengths.
-		csvReader.FieldsPerRecord = -1
-		csvReader.LazyQuotes = true
-
-		headers, err := csvReader.Read()
-		if err != nil {
-			return nil, fmt.Errorf("failed to read csv headers: %w", err)
-		}
-
-		return &s3CSVIterator{
-			reader:  csvReader,
-			headers: headers,
-		}, nil
+		return newS3CSVIterator(out.Body)
 	case "json":
 		recordPath, _ := filter["record_path"].(string)
 		return newS3JSONIterator(out.Body, recordPath), nil
 	case "xml":
-		decoder := xml.NewDecoder(out.Body)
-		return &s3XMLIterator{
-			decoder: decoder,
-		}, nil
+		return newS3XMLIterator(out.Body), nil
 	case "excel":
 		// Cells come back as displayed text. Render Excel's built-in date
 		// formats as ISO so date cells are detected as dates; custom
@@ -263,6 +247,19 @@ func (r *S3Reader) BuildCursorFilter(q CursorQuery) (map[string]any, error) {
 }
 
 // Iterator implementations
+
+func newS3CSVIterator(body io.Reader) (*s3CSVIterator, error) {
+	csvReader := csv.NewReader(body)
+	// For standard CSV uploads, fields might contain quotes or have unequal lengths.
+	csvReader.FieldsPerRecord = -1
+	csvReader.LazyQuotes = true
+
+	headers, err := csvReader.Read()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read csv headers: %w", err)
+	}
+	return &s3CSVIterator{reader: csvReader, headers: headers}, nil
+}
 
 type s3CSVIterator struct {
 	reader     *csv.Reader
@@ -456,27 +453,33 @@ func seekJSONRecordArray(decoder *json.Decoder, path []string, rawPath string) e
 	return fmt.Errorf("JSON record_path %q was not found", rawPath)
 }
 
+// maxJSONNestingDepth matches encoding/json's own limit for Decode. Skipped
+// values are walked token by token, which has no limit of its own.
+const maxJSONNestingDepth = 10000
+
+var errJSONTooDeep = fmt.Errorf("JSON nesting exceeds %d levels", maxJSONNestingDepth)
+
+// skipJSONValue consumes one value. It loops instead of recursing so a deeply
+// nested file is rejected rather than exhausting the goroutine stack.
 func skipJSONValue(decoder *json.Decoder) error {
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delim, ok := token.(json.Delim)
-	if !ok || (delim != '{' && delim != '[') {
-		return nil
-	}
-	for decoder.More() {
-		if delim == '{' {
-			if _, err := decoder.Token(); err != nil {
-				return err
-			}
-		}
-		if err := skipJSONValue(decoder); err != nil {
+	depth := 0
+	for {
+		token, err := decoder.Token()
+		if err != nil {
 			return err
 		}
+		switch token {
+		case json.Delim('{'), json.Delim('['):
+			if depth++; depth > maxJSONNestingDepth {
+				return errJSONTooDeep
+			}
+		case json.Delim('}'), json.Delim(']'):
+			depth--
+		}
+		if depth == 0 {
+			return nil
+		}
 	}
-	_, err = decoder.Token()
-	return err
 }
 
 func (it *s3JSONIterator) Decode() (map[string]any, error) {
@@ -511,6 +514,10 @@ func textCell(val string) any {
 func (it *s3CSVIterator) TextCells() bool   { return true }
 func (it *s3XMLIterator) TextCells() bool   { return true }
 func (it *s3ExcelIterator) TextCells() bool { return true }
+
+func newS3XMLIterator(body io.Reader) *s3XMLIterator {
+	return &s3XMLIterator{decoder: xml.NewDecoder(body)}
+}
 
 type s3XMLIterator struct {
 	decoder *xml.Decoder

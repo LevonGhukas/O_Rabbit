@@ -1,0 +1,51 @@
+name: Fuzz
+
+# The seed corpora (f.Add and testdata/fuzz/) already run in CI's go test.
+# This explores beyond them with coverage-guided fuzzing, which is too slow
+# for every pull request.
+on:
+  schedule:
+    - cron: "0 3 * * *" # daily 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: How long to fuzz each target (Go duration).
+        default: 10m
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { package: ./internal/connectors, target: FuzzNormalizeReadOnlySQLQuery }
+          - { package: ./internal/connectors, target: FuzzValidateWhereClause }
+          - { package: ./internal/connectors, target: FuzzS3CSVReader }
+          - { package: ./internal/connectors, target: FuzzS3JSONReader }
+          - { package: ./internal/connectors, target: FuzzS3XMLReader }
+          - { package: ./internal/connectors, target: FuzzParseJSONRecordPath }
+          - { package: ./internal/icebergreg, target: FuzzValidateTableIdentifier }
+          - { package: ./internal/icebergreg, target: FuzzDefaultTableIsValid }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Fuzz
+        env:
+          FUZZTIME: ${{ inputs.fuzztime || '10m' }}
+        run: go test "${{ matrix.package }}" -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime="$FUZZTIME"
+      # A failing input is written to <package>/testdata/fuzz/<target>/.
+      # Commit it with the fix so it runs as a regression test from then on.
+      - name: Upload failing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: ${{ matrix.package }}/testdata/fuzz/${{ matrix.target }}/
+          if-no-files-found: ignore
