@@ -46,7 +46,7 @@ var migrations = []migration{
 	{version: 30, sql: schemaV30},
 	{version: 31, sql: schemaV31},
 	{version: 32, sql: schemaV32},
-	{version: 33, sql: schemaV33},
+	{version: 34, sql: schemaV34},
 }
 
 // normalizeStoredTimestamps rewrites every stored timestamp in
@@ -166,11 +166,10 @@ UPDATE jobs SET write_mode = 'overwrite'
  WHERE incremental <> 0 AND lower(trim(write_mode)) = 'overwrite' AND write_mode <> 'overwrite';
 `
 
-// schemaV32 stores the rows each task read at its largest cursor value, which
-// the commit turns into the dataset's high-water-mark boundary.
-// schemaV33 adds scoped API credentials (only the SHA-256 of each token is
-// stored) and records the acting principal on every audit row.
-const schemaV33 = `
+// schemaV34 adds scoped API credentials (only the SHA-256 of each token is
+// stored) and records the acting principal on every audit row. Version 33 is
+// main's source reconciliation migration.
+const schemaV34 = `
 CREATE TABLE IF NOT EXISTS api_credentials (
   id TEXT PRIMARY KEY,
   principal TEXT NOT NULL,
@@ -187,6 +186,8 @@ ALTER TABLE audit_log ADD COLUMN principal TEXT NOT NULL DEFAULT '';
 ALTER TABLE audit_log ADD COLUMN credential_id TEXT NOT NULL DEFAULT '';
 `
 
+// schemaV32 stores the rows each task read at its largest cursor value, which
+// the commit turns into the dataset's high-water-mark boundary.
 const schemaV32 = `
 ALTER TABLE tasks ADD COLUMN hwm_boundary_json TEXT NOT NULL DEFAULT '';
 `
