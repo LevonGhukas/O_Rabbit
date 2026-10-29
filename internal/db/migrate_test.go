@@ -551,14 +551,14 @@ func TestMigrationV31MakesWriteModeExplicitAndKeepsBehavior(t *testing.T) {
 	}
 }
 
-// TestMigrationV34AddsCredentialsToDBAtMainV33 upgrades a database whose V33 is
-// main's source reconciliation migration: the credentials migration must still
-// run, not be skipped as already applied.
-func TestMigrationV34AddsCredentialsToDBAtMainV33(t *testing.T) {
+// TestMigrationV35AddsCredentialsToDBAtMainV34 upgrades a database already at
+// main's V33 (source reconciliation) and V34 (Iceberg maintenance): the
+// credentials migration must still run, not be skipped as already applied.
+func TestMigrationV35AddsCredentialsToDBAtMainV34(t *testing.T) {
 	ctx := context.Background()
 	raw := openRawTestDB(t)
 	for _, m := range migrations {
-		if m.version >= 33 {
+		if m.version >= 35 {
 			break
 		}
 		if m.sql != "" {
@@ -574,10 +574,7 @@ func TestMigrationV34AddsCredentialsToDBAtMainV33(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// main's V33, already applied on the database being upgraded.
-	if _, err := raw.ExecContext(ctx, `CREATE TABLE source_reconciliations (run_id TEXT NOT NULL, task_id TEXT NOT NULL, status TEXT NOT NULL, PRIMARY KEY (run_id, task_id));
-INSERT INTO source_reconciliations(run_id,task_id,status) VALUES('run-1','task-1','MATCHED');
-INSERT INTO schema_migrations(version,applied_at) VALUES(33,'2026-10-28T00:00:00Z');`); err != nil {
+	if _, err := raw.ExecContext(ctx, `INSERT INTO source_reconciliations(run_id,task_id,method,consistency,observed_at,status) VALUES('run-1','task-1','count','strong','2026-10-28T00:00:00Z','MATCHED')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := raw.ExecContext(ctx, `INSERT INTO audit_log(id,ts,actor_type,actor_id,action,resource_type,resource_id,metadata_json) VALUES('audit-1','2026-10-28T00:00:00Z','api','','job.create','job','job-1','{}')`); err != nil {
@@ -606,8 +603,26 @@ INSERT INTO schema_migrations(version,applied_at) VALUES(33,'2026-10-28T00:00:00
 	if err := raw.QueryRowContext(ctx, `SELECT status FROM source_reconciliations WHERE run_id='run-1'`).Scan(&status); err != nil || status != "MATCHED" {
 		t.Fatalf("source_reconciliations row lost: status=%q err=%v", status, err)
 	}
-	var v34 int
-	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version=34`).Scan(&v34); err != nil || v34 != 1 {
-		t.Fatalf("V34 recorded %d times, err=%v", v34, err)
+	var maintenance int
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM maintenance_operations`).Scan(&maintenance); err != nil {
+		t.Fatalf("maintenance_operations missing after upgrade: %v", err)
+	}
+	var v35 int
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version=35`).Scan(&v35); err != nil || v35 != 1 {
+		t.Fatalf("V35 recorded %d times, err=%v", v35, err)
+	}
+}
+
+// Two branches that each add "the next" migration must not both claim one
+// version: the duplicate would silently never run on databases that already
+// applied the other. Released versions must also never be renumbered.
+func TestMigrationVersionsAreUniqueAndConsecutive(t *testing.T) {
+	for i, m := range migrations {
+		if m.version != i+1 {
+			t.Fatalf("migration at position %d has version %d, want %d (versions must be unique and consecutive)", i, m.version, i+1)
+		}
+		if (m.sql == "") == (m.apply == nil) {
+			t.Fatalf("migration %d must have exactly one of sql or apply", m.version)
+		}
 	}
 }

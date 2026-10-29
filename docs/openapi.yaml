@@ -212,7 +212,55 @@ paths:
     parameters: [{ name: worker_id, in: path, required: true, schema: { type: string } }]
     get: { summary: Worker identity and enrollment routes (see README), responses: { "200": { description: Worker } } }
   /maintenance/submit:
-    post: { summary: Submit Iceberg maintenance, responses: { "201": { description: Maintenance run } } }
+    post:
+      summary: Start an Iceberg orphan cleanup or compaction for a job's table (dry run by default)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MaintenanceSubmitRequest" }
+      responses:
+        "202":
+          description: Operation created; the active master runs it in the background
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  operation: { $ref: "#/components/schemas/MaintenanceOperation" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /maintenance:
+    get:
+      summary: List maintenance operations (newest first)
+      parameters:
+        - { name: job_id, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000 } }
+      responses:
+        "200":
+          description: Operations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  operations: { type: array, items: { $ref: "#/components/schemas/MaintenanceOperation" } }
+  /maintenance/{maintenance_id}:
+    parameters: [{ name: maintenance_id, in: path, required: true, schema: { type: string } }]
+    get:
+      summary: A maintenance operation and its per-object report
+      responses:
+        "200":
+          description: Operation and report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  operation: { $ref: "#/components/schemas/MaintenanceOperation" }
+                  candidates: { type: array, items: { $ref: "#/components/schemas/MaintenanceCandidate" } }
+        "404": { $ref: "#/components/responses/Error" }
   /sse:
     get:
       summary: Run events as Server-Sent Events (by run_id)
@@ -273,6 +321,61 @@ components:
         scopes: { type: array, items: { type: string, enum: [read, "jobs:write", "secrets:admin", "workers:admin", remote_ops, "credentials:admin"] } }
         ttl_seconds: { type: integer, description: "60 to 31536000; omit for no expiry" }
         description: { type: string }
+    MaintenanceSubmitRequest:
+      type: object
+      required: [job_id, operation]
+      additionalProperties: false
+      properties:
+        job_id: { type: string }
+        operation: { type: string, enum: [orphan_cleanup, compaction, vacuum, compact], description: vacuum and compact are older names. }
+        dry_run: { type: boolean, default: true, description: Only report (cleanup) or only plan (compaction). }
+        orphan_cleanup:
+          type: object
+          properties:
+            min_age_hours: { type: number, minimum: 1, default: 168, description: Files younger than this are never orphans. }
+        compaction:
+          type: object
+          properties:
+            target_file_bytes: { type: integer, description: Output size; defaults to the table or job target, else 256 MiB. }
+            small_file_bytes: { type: integer, description: Rewrite files below this size; defaults to 3/4 of the target. }
+            min_input_files: { type: integer, default: 3 }
+            max_input_files: { type: integer, default: 1000 }
+    MaintenanceOperation:
+      type: object
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [ORPHAN_CLEANUP, COMPACTION] }
+        job_id: { type: string }
+        dry_run: { type: boolean }
+        params: { type: object }
+        status: { type: string, enum: [PENDING, RUNNING, SUBMITTED, SUCCEEDED, FAILED, ABORTED] }
+        source_run_id: { type: string, description: The registered run whose catalog configuration identified the table. }
+        table_identifier: { type: string }
+        table_uuid: { type: string }
+        table_location: { type: string }
+        snapshot_id: { type: string, description: Current snapshot when the operation read the table. }
+        metadata_location: { type: string }
+        run_id: { type: string, description: The compaction run, once submitted. }
+        report: { type: object, description: Counts such as orphan_files, deleted_files, input_files. }
+        error_class: { type: string }
+        error_message: { type: string }
+        attempt_count: { type: integer }
+        created_at: { type: string }
+        updated_at: { type: string }
+        started_at: { type: string }
+        finished_at: { type: string }
+    MaintenanceCandidate:
+      type: object
+      properties:
+        object_key: { type: string }
+        size_bytes: { type: integer }
+        last_modified: { type: string }
+        age_seconds: { type: integer }
+        decision: { type: string, enum: [ORPHAN, RETAINED, COMPACT] }
+        reason: { type: string, description: For example UNREFERENCED_REGISTERED_RUN, YOUNGER_THAN_MIN_AGE, RUN_ACTIVE, SMALL_FILE. }
+        evidence: { type: object, description: Reference evidence such as snapshots_examined, metadata_location and run_state. }
+        status: { type: string, enum: [WOULD_DELETE, RETAINED, DELETED, DELETE_FAILED, CHANGED, PLANNED, COMPACTED] }
+        updated_at: { type: string }
     SourceEngine:
       type: object
       required: [engine, table_mode_supported, ordered_cursor_supported, query_supported]

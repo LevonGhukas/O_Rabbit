@@ -46,6 +46,8 @@ func (s *Server) apiRoutes() []apiRoute {
 		{v1: "/runs/validate", legacy: []string{"/api/runs/validate"}, target: "/api/runs/validate", handler: s.handleRunValidate, policy: validatePolicy},
 		{v1: "/source-engines", legacy: []string{"/api/source-engines"}, target: "/api/source-engines", handler: s.handleSourceEngines, policy: readWrite(auth.ScopeJobsWrite)},
 		{v1: "/maintenance/submit", legacy: []string{"/api/maintenance/submit"}, target: "/api/maintenance/submit", handler: s.handleMaintenanceSubmit, policy: readWrite(auth.ScopeJobsWrite)},
+		{v1: "/maintenance", target: "/maintenance", handler: s.handleMaintenance, policy: readWrite(auth.ScopeJobsWrite)},
+		{v1: "/maintenance/", target: "/maintenance/", handler: s.handleMaintenanceByID, policy: readWrite(auth.ScopeJobsWrite)},
 		{v1: "/credentials", legacy: nil, target: "/credentials", handler: s.handleCredentials, policy: always(auth.ScopeCredentialsAdmin)},
 		{v1: "/credentials/", legacy: nil, target: "/credentials/", handler: s.handleCredentialByID, policy: always(auth.ScopeCredentialsAdmin)},
 		{v1: "/sse", legacy: []string{"/sse"}, target: "/sse", handler: SSEHandler(s.log, s.st, s.bc), policy: readWrite(auth.ScopeJobsWrite)},

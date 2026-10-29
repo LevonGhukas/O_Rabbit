@@ -57,10 +57,11 @@ func (s *Server) withAuthentication(next http.Handler) http.Handler {
 			return
 		}
 		if !ok {
-			realm := realmData
+			realm, surface := realmData, surfaceHTTPAPI
 			if remote {
-				realm = realmRemoteOps
+				realm, surface = realmRemoteOps, surfaceHTTPRemoteOps
 			}
+			s.recordAuthFailure(r, surface)
 			w.Header().Set("WWW-Authenticate", realm)
 			writeUnauthorized(w)
 			return

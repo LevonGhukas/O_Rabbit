@@ -166,9 +166,9 @@ func (s *Server) Handler() http.Handler {
 	// Authentication is outermost (after tracing) so every route, including
 	// unknown ones and /metrics, requires a principal.
 	handler = s.withAuthentication(handler)
-	// Tracing is outermost so rejected requests are traced too. It is a
-	// no-op unless OTLP tracing is configured.
-	return otelhttp.NewHandler(s.withRecoverer(handler), "orabbit-http",
+	// Rate limits run before authentication. Tracing is outermost so rejected
+	// requests are traced too. It is a no-op unless OTLP tracing is configured.
+	return otelhttp.NewHandler(s.withRecoverer(s.withRateLimit(handler)), "orabbit-http",
 		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 			if r.Pattern != "" {
 				return r.Method + " " + r.Pattern
