@@ -47,6 +47,7 @@ var migrations = []migration{
 	{version: 31, sql: schemaV31},
 	{version: 32, sql: schemaV32},
 	{version: 33, sql: schemaV33},
+	{version: 34, sql: schemaV34},
 }
 
 // normalizeStoredTimestamps rewrites every stored timestamp in
@@ -157,10 +158,46 @@ ALTER TABLE iceberg_registrations ADD COLUMN manual_retry_budget INTEGER NOT NUL
 // Incremental jobs with "overwrite" are left as they are (only the spelling is
 // normalized): they replaced the table with each run's new rows, so their
 // owner must choose. Run start rejects them with CONFIGURATION_INVALID.
-// schemaV32 records explicit Iceberg maintenance operations (orphan cleanup
+const schemaV31 = `
+UPDATE jobs SET write_mode = 'overwrite'
+ WHERE incremental = 0 AND write_mode <> 'overwrite';
+UPDATE jobs SET write_mode = 'append'
+ WHERE incremental <> 0 AND lower(trim(write_mode)) <> 'overwrite' AND write_mode <> 'append';
+UPDATE jobs SET write_mode = 'overwrite'
+ WHERE incremental <> 0 AND lower(trim(write_mode)) = 'overwrite' AND write_mode <> 'overwrite';
+`
+
+// schemaV32 stores the rows each task read at its largest cursor value, which
+// the commit turns into the dataset's high-water-mark boundary.
+const schemaV32 = `
+ALTER TABLE tasks ADD COLUMN hwm_boundary_json TEXT NOT NULL DEFAULT '';
+`
+
+// schemaV33 records the optional commit-time source reconciliation, one row per
+// task, upserted because a commit attempt can be retried.
+const schemaV33 = `
+CREATE TABLE IF NOT EXISTS source_reconciliations (
+  run_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  method TEXT NOT NULL,
+  consistency TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  lower_bound TEXT NOT NULL DEFAULT '',
+  lower_exclusive INTEGER NOT NULL DEFAULT 0,
+  upper_bound TEXT NOT NULL DEFAULT '',
+  upper_inclusive INTEGER NOT NULL DEFAULT 0,
+  source_rows INTEGER NOT NULL DEFAULT 0,
+  output_rows INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (run_id, task_id)
+);
+`
+
+// schemaV34 records explicit Iceberg maintenance operations (orphan cleanup
 // and compaction): a leased, fenced claim per operation and the inspectable
 // per-object report. One job has at most one active operation.
-const schemaV32 = `
+const schemaV34 = `
 CREATE TABLE maintenance_operations (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL CHECK(kind IN ('ORPHAN_CLEANUP','COMPACTION')),
@@ -204,42 +241,6 @@ CREATE TABLE maintenance_candidates (
   updated_at TEXT NOT NULL,
   PRIMARY KEY(operation_id, object_key),
   FOREIGN KEY(operation_id) REFERENCES maintenance_operations(id) ON DELETE CASCADE
-);
-`
-
-const schemaV31 = `
-UPDATE jobs SET write_mode = 'overwrite'
- WHERE incremental = 0 AND write_mode <> 'overwrite';
-UPDATE jobs SET write_mode = 'append'
- WHERE incremental <> 0 AND lower(trim(write_mode)) <> 'overwrite' AND write_mode <> 'append';
-UPDATE jobs SET write_mode = 'overwrite'
- WHERE incremental <> 0 AND lower(trim(write_mode)) = 'overwrite' AND write_mode <> 'overwrite';
-`
-
-// schemaV32 stores the rows each task read at its largest cursor value, which
-// the commit turns into the dataset's high-water-mark boundary.
-const schemaV32 = `
-ALTER TABLE tasks ADD COLUMN hwm_boundary_json TEXT NOT NULL DEFAULT '';
-`
-
-// schemaV33 records the optional commit-time source reconciliation, one row per
-// task, upserted because a commit attempt can be retried.
-const schemaV33 = `
-CREATE TABLE IF NOT EXISTS source_reconciliations (
-  run_id TEXT NOT NULL,
-  task_id TEXT NOT NULL,
-  method TEXT NOT NULL,
-  consistency TEXT NOT NULL,
-  observed_at TEXT NOT NULL,
-  lower_bound TEXT NOT NULL DEFAULT '',
-  lower_exclusive INTEGER NOT NULL DEFAULT 0,
-  upper_bound TEXT NOT NULL DEFAULT '',
-  upper_inclusive INTEGER NOT NULL DEFAULT 0,
-  source_rows INTEGER NOT NULL DEFAULT 0,
-  output_rows INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL,
-  detail TEXT NOT NULL DEFAULT '',
-  PRIMARY KEY (run_id, task_id)
 );
 `
 
