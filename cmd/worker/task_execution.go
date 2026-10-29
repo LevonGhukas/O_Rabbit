@@ -214,6 +214,8 @@ func executeTaskBody(ctx context.Context, log *slog.Logger, cp grpcpb.ControlPla
 	var extracted sourceExtract
 	var err error
 	switch {
+	case ps.Type == compactionTaskType:
+		extracted, err = compactIcebergFiles(ctx, log, t, ps, clients)
 	case connectors.SupportsDocumentReader(engine):
 		extracted, err = extractDocumentTask(ctx, log, cp, workerID, t, ps, clients, engine)
 	case connectors.SupportsOrderedCursor(engine):

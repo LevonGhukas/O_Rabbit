@@ -45,6 +45,29 @@ and the repository layout.
 5. Update `README.md`, `docs/openapi.yaml` and examples in the same change when
    an API, flag, environment variable or file format changes.
 
+## Fuzzing untrusted input
+
+Parsers of user-supplied input have Go fuzz targets: the S3 CSV, JSON and XML
+readers and JSON `record_path` (`internal/connectors/s3_fuzz_test.go`), query
+mode SQL and `where_clause` validation
+(`internal/connectors/query_mode_fuzz_test.go`), and Iceberg table identifiers
+(`internal/icebergreg/identifier_fuzz_test.go`).
+
+Their seeds run with every `go test ./...`. To fuzz one target, run:
+
+```sh
+go test ./internal/connectors -run='^$' -fuzz='^FuzzValidateWhereClause$' -fuzztime=5m
+```
+
+`-fuzz` must match exactly one target in one package. A failing input is saved
+under `<package>/testdata/fuzz/<target>/`; commit it with the fix so it stays a
+regression test. The [Fuzz workflow](.github/workflows/fuzz.yml) runs every
+target daily and can be started by hand with a longer `fuzztime`.
+
+The SQL checks do not know the source engine, so `internal/connectors/sql_lexer.go`
+reads the text the way each supported dialect would. A new engine with
+different quoting or comment rules needs a dialect entry there.
+
 ## Contracts that need extra care
 
 - **Worker protocol:** bump `WorkerProtocolVersion` in `internal/grpc/server.go`

@@ -23,6 +23,7 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
 	"github.com/LevonGhukas/O_Rabbit/internal/telemetry"
 	"github.com/LevonGhukas/O_Rabbit/internal/workeridentity"
+	icetable "github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
@@ -60,6 +61,10 @@ type Server struct {
 	k   crypto.Key
 
 	hbInterval time.Duration
+
+	// loadCompactionTableFn replaces the catalog load of a compaction commit
+	// in tests.
+	loadCompactionTableFn func(context.Context) (*icetable.Table, error)
 
 	icebergRegistrar           icebergRegistrationRunner
 	commitRunFn                func(context.Context, string) error
@@ -107,8 +112,9 @@ type canceledObjectCleaner interface {
 // moved multipart lifecycle reports to ReportMultipartLifecycle; version 8
 // sends the Iceberg partition spec so workers write one partition per file;
 // version 9 reports the rows at the high-water mark (hwm_boundary) so the next
-// incremental run can re-read them without duplicates.
-const WorkerProtocolVersion = 9
+// incremental run can re-read them without duplicates; version 10 adds
+// compaction tasks (partition spec type iceberg_compact).
+const WorkerProtocolVersion = 10
 
 const workerProtocolVersion = WorkerProtocolVersion
 

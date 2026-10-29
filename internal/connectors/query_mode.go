@@ -126,6 +126,10 @@ func queryModeDialectForEngine(engine string) (queryModeDialect, bool) {
 }
 
 func (d queryModeDialect) sourceExpr(query string) string {
+	if sqlEndsInLineComment(query) {
+		// Keep the closing parenthesis out of a trailing line comment.
+		query += "\n"
+	}
 	if strings.TrimSpace(d.aliasKeyword) == "" {
 		return fmt.Sprintf("(%s) %s", query, queryModeAlias)
 	}
@@ -431,208 +435,140 @@ func classifyQueryCursorType(engine, dataType string, ct *sql.ColumnType) SQLCur
 	return ClassifySQLCursorType(dataType)
 }
 
+// NormalizeReadOnlySQLQuery checks that raw is one read-only SELECT or WITH
+// statement under every SQL dialect that can lex it and returns it without
+// surrounding whitespace or a final ';'. Like the where-clause check this is a
+// guard against mistakes, not a sandbox: source connections are read-only.
 func NormalizeReadOnlySQLQuery(raw string) (string, error) {
 	query := strings.TrimSpace(raw)
 	if query == "" {
 		return "", fmt.Errorf("query must be non-empty")
 	}
-
-	tokens, finalSemi, err := scanSQLQuery(query)
+	query, err := cutReadOnlySQLStatement(query)
 	if err != nil {
 		return "", err
 	}
-	if len(tokens) == 0 {
-		return "", fmt.Errorf("query must contain a SELECT statement")
+	// Cutting at ';' can turn text a dialect could not lex into text it can,
+	// so the cut statement is checked again and must be stable.
+	again, err := cutReadOnlySQLStatement(query)
+	if err != nil {
+		return "", err
 	}
-	first := strings.ToUpper(tokens[0])
-	if first != "SELECT" && first != "WITH" {
-		return "", fmt.Errorf("query mode only supports read-only SELECT or WITH SELECT queries")
-	}
-	for _, tok := range tokens {
-		if destructiveSQLKeyword(tok) {
-			return "", fmt.Errorf("query mode rejects unsafe SQL keyword %q", tok)
-		}
-	}
-	if finalSemi >= 0 {
-		query = strings.TrimSpace(query[:finalSemi])
+	if again != query {
+		return "", fmt.Errorf("query mode rejects SQL that dialects split into statements differently")
 	}
 	return query, nil
 }
 
-// ValidateWhereClause checks a user-supplied row filter before it is placed
-// inside "WHERE (<clause>) AND <cursor range>". It must be a single boolean
-// expression: no statement separators, no comments (which could remove the
-// cursor range that follows), balanced parentheses (so it cannot close the
-// surrounding group), and none of the keywords rejected in query mode. Like
-// query mode this is a guard against mistakes, not a sandbox: source
-// connections must use a read-only database user.
-func ValidateWhereClause(clause string) error {
-	depth := 0
-	for i := 0; i < len(clause); {
-		c := clause[i]
-		switch {
-		case c == '-' && i+1 < len(clause) && clause[i+1] == '-',
-			c == '/' && i+1 < len(clause) && clause[i+1] == '*':
-			return fmt.Errorf("where_clause must not contain comments")
-		case c == ';':
-			return fmt.Errorf("where_clause must be a single expression without ';'")
-		case c == '\'', c == '"', c == '`':
-			next, ok := skipSQLQuoted(clause, i+1, c)
-			if !ok {
-				return fmt.Errorf("where_clause contains an unterminated quoted value")
+func cutReadOnlySQLStatement(query string) (string, error) {
+	end, lexed := -1, false
+	var lexErr error
+	for _, dialect := range sqlDialects {
+		res, err := lexSQL(query, dialect)
+		if verr := checkReadOnlySQLShape(res, err); verr != nil {
+			return "", verr
+		}
+		if err != nil {
+			if lexErr == nil {
+				lexErr = fmt.Errorf("query contains an %w", err)
 			}
-			i = next
-			continue
-		case c == '(':
-			depth++
-		case c == ')':
-			if depth--; depth < 0 {
-				return fmt.Errorf("where_clause has unbalanced parentheses")
-			}
-		case isSQLIdentStart(c):
-			j := i + 1
-			for j < len(clause) && isSQLIdentPart(clause[j]) {
-				j++
-			}
-			if tok := strings.ToUpper(clause[i:j]); destructiveSQLKeyword(tok) {
-				return fmt.Errorf("where_clause rejects SQL keyword %q", tok)
-			}
-			i = j
 			continue
 		}
-		i++
+		if lexed && res.statementEnd != end {
+			return "", fmt.Errorf("query mode rejects SQL that dialects split into statements differently")
+		}
+		end, lexed = res.statementEnd, true
 	}
-	if depth != 0 {
-		return fmt.Errorf("where_clause has unbalanced parentheses")
+	if !lexed {
+		return "", lexErr
+	}
+	if end >= 0 {
+		query = strings.TrimSpace(query[:end])
+	}
+	return query, nil
+}
+
+// checkReadOnlySQLShape rejects what one dialect would run as more than a
+// single read-only statement. A dialect that cannot lex the text would fail
+// to parse it, so only a statement separator before the error matters there.
+func checkReadOnlySQLShape(res sqlLexResult, lexErr error) error {
+	switch {
+	case res.forbidden != "":
+		return fmt.Errorf("query mode rejects %s", res.forbidden)
+	case res.statementEnd >= 0 && (res.trailing || lexErr != nil):
+		return fmt.Errorf("query mode rejects multiple statements")
+	case lexErr != nil && !sqlLexErrorIsSkippable(lexErr):
+		return fmt.Errorf("query contains an %w", lexErr)
+	case lexErr != nil:
+		return nil
+	case res.firstWord == "":
+		return fmt.Errorf("query must contain a SELECT statement")
+	case !strings.EqualFold(res.firstWord, "SELECT") && !strings.EqualFold(res.firstWord, "WITH"):
+		return fmt.Errorf("query mode only supports read-only SELECT or WITH SELECT queries")
+	case res.unbalanced:
+		return fmt.Errorf("query has unbalanced parentheses or brackets")
+	case res.keyword != "":
+		return fmt.Errorf("query mode rejects unsafe SQL keyword %q", res.keyword)
 	}
 	return nil
 }
 
-func scanSQLQuery(s string) ([]string, int, error) {
-	tokens := make([]string, 0, 16)
-	for i := 0; i < len(s); {
-		c := s[i]
+// ValidateWhereClause checks a user-supplied row filter before it is placed
+// inside "WHERE (<clause>) AND <cursor range>". It must be a single boolean
+// expression under every SQL dialect that can lex it: no statement
+// separators, no comments (which could remove the cursor range that follows),
+// balanced parentheses (so it cannot close the surrounding group), and none of
+// the keywords rejected in query mode. Like query mode this is a guard against
+// mistakes, not a sandbox: source connections must use a read-only database
+// user.
+func ValidateWhereClause(clause string) error {
+	lexed := false
+	var lexErr error
+	for _, dialect := range sqlDialects {
+		res, err := lexSQL(clause, dialect)
 		switch {
-		case isSQLSpace(c):
-			i++
-		case c == '-' && i+1 < len(s) && s[i+1] == '-':
-			i += 2
-			for i < len(s) && s[i] != '\n' && s[i] != '\r' {
-				i++
+		case res.forbidden != "":
+			return fmt.Errorf("where_clause rejects %s", res.forbidden)
+		case res.statementEnd >= 0:
+			return fmt.Errorf("where_clause must be a single expression without ';'")
+		case res.comments:
+			return fmt.Errorf("where_clause must not contain comments")
+		case err != nil && !sqlLexErrorIsSkippable(err):
+			return fmt.Errorf("where_clause contains an %w", err)
+		case err != nil:
+			if lexErr == nil {
+				lexErr = fmt.Errorf("where_clause contains an %w", err)
 			}
-		case c == '/' && i+1 < len(s) && s[i+1] == '*':
-			next, ok := skipSQLBlockComment(s, i+2)
-			if !ok {
-				return nil, -1, fmt.Errorf("query contains an unterminated block comment")
-			}
-			i = next
-		case c == '\'':
-			next, ok := skipSQLQuoted(s, i+1, '\'')
-			if !ok {
-				return nil, -1, fmt.Errorf("query contains an unterminated string literal")
-			}
-			i = next
-		case c == '"':
-			next, ok := skipSQLQuoted(s, i+1, '"')
-			if !ok {
-				return nil, -1, fmt.Errorf("query contains an unterminated quoted identifier")
-			}
-			i = next
-		case c == '`':
-			next, ok := skipSQLQuoted(s, i+1, '`')
-			if !ok {
-				return nil, -1, fmt.Errorf("query contains an unterminated quoted identifier")
-			}
-			i = next
-		case c == '[':
-			next := strings.IndexByte(s[i+1:], ']')
-			if next < 0 {
-				return nil, -1, fmt.Errorf("query contains an unterminated bracket identifier")
-			}
-			i += next + 2
-		case c == ';':
-			if !sqlTrailingOnly(s[i+1:]) {
-				return nil, -1, fmt.Errorf("query mode rejects multiple statements")
-			}
-			return tokens, i, nil
-		case isSQLIdentStart(c):
-			j := i + 1
-			for j < len(s) && isSQLIdentPart(s[j]) {
-				j++
-			}
-			tokens = append(tokens, strings.ToUpper(s[i:j]))
-			i = j
-		default:
-			i++
+			continue
+		case res.unbalanced:
+			return fmt.Errorf("where_clause has unbalanced parentheses or brackets")
+		case res.keyword != "":
+			return fmt.Errorf("where_clause rejects SQL keyword %q", res.keyword)
 		}
+		lexed = true
 	}
-	return tokens, -1, nil
+	if !lexed {
+		return lexErr
+	}
+	return nil
 }
 
+var destructiveSQLKeywords = []string{
+	"INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE",
+	"GRANT", "REVOKE", "MERGE", "CALL", "EXEC", "EXECUTE", "COPY", "LOAD",
+	"UNLOAD", "REPLACE", "INTO",
+}
+
+// destructiveSQLKeyword compares without allocating: it runs for every word
+// of every dialect's reading of a query.
 func destructiveSQLKeyword(token string) bool {
-	switch strings.ToUpper(strings.TrimSpace(token)) {
-	case "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE",
-		"GRANT", "REVOKE", "MERGE", "CALL", "EXEC", "EXECUTE", "COPY", "LOAD",
-		"UNLOAD", "REPLACE", "INTO":
-		return true
-	default:
-		return false
-	}
-}
-
-func sqlTrailingOnly(s string) bool {
-	for i := 0; i < len(s); {
-		switch {
-		case isSQLSpace(s[i]):
-			i++
-		case s[i] == '-' && i+1 < len(s) && s[i+1] == '-':
-			i += 2
-			for i < len(s) && s[i] != '\n' && s[i] != '\r' {
-				i++
-			}
-		case s[i] == '/' && i+1 < len(s) && s[i+1] == '*':
-			next, ok := skipSQLBlockComment(s, i+2)
-			if !ok {
-				return false
-			}
-			i = next
-		default:
-			return false
+	token = strings.TrimSpace(token)
+	for _, keyword := range destructiveSQLKeywords {
+		if len(token) == len(keyword) && strings.EqualFold(token, keyword) {
+			return true
 		}
 	}
-	return true
-}
-
-func skipSQLBlockComment(s string, i int) (int, bool) {
-	for i+1 < len(s) {
-		if s[i] == '*' && s[i+1] == '/' {
-			return i + 2, true
-		}
-		i++
-	}
-	return len(s), false
-}
-
-func skipSQLQuoted(s string, i int, quote byte) (int, bool) {
-	for i < len(s) {
-		switch s[i] {
-		case '\\':
-			if i+1 < len(s) {
-				i += 2
-			} else {
-				i++
-			}
-		case quote:
-			if i+1 < len(s) && s[i+1] == quote {
-				i += 2
-				continue
-			}
-			return i + 1, true
-		default:
-			i++
-		}
-	}
-	return len(s), false
+	return false
 }
 
 func isSQLSpace(c byte) bool {

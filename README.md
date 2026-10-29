@@ -518,6 +518,49 @@ credential_vending:
 
 </details>
 
+### Table maintenance
+
+Two explicit operations keep a `rest-go` table's storage in check. Both are
+**dry runs by default**, run in the background on the active master, and allow
+one active operation per job. They work on the table of the job's newest
+registered run.
+
+```sh
+# Report orphans (nothing is deleted), then inspect the report.
+orabbit-client maintenance submit --job <job-id> --operation orphan_cleanup
+orabbit-client maintenance show <operation-id>
+
+# Delete them, or compact small files.
+orabbit-client maintenance submit --job <job-id> --operation orphan_cleanup --execute
+orabbit-client maintenance submit --job <job-id> --operation compaction --execute
+```
+
+- **Orphan cleanup** lists the table location and subtracts every file that
+  any retained snapshot references (not only the current one, so files a full
+  refresh replaced stay until their snapshots expire). A Parquet file is an
+  orphan only if it is also older than `min_age_hours` (default 168, minimum
+  1) and the run that wrote it no longer needs it: runs that are active, wait
+  for registration, were published without Iceberg, were canceled (the
+  canceled-object cleanup owns those) or are unknown keep their files. The
+  report lists every candidate with its reason, age and reference evidence.
+  Files under `metadata/` and non-Parquet objects are never candidates.
+- When executed, it deletes only if the table metadata is unchanged since the
+  listing and the dataset has no active run or unfinished registration;
+  otherwise it stops as `ABORTED` without deleting. Each delete re-checks the
+  object and the operation's lease first.
+- **Compaction** groups files below `small_file_bytes` (default 3/4 of the
+  target size) by partition and schema, and workers rewrite each group into
+  files of about `target_file_bytes`. The run's commit verifies the new files
+  like any export and swaps them in with one snapshot; history is kept, and
+  the replaced files become orphans only after their snapshots expire. If a
+  concurrent commit removed an input, nothing is committed and the operation
+  ends `ABORTED`. Only files O_Rabbit wrote are compacted, and tables with
+  delete files are refused (a full refresh clears them).
+- Compaction does not change the dataset's high-water mark or `_state.json`,
+  and a compaction run blocks exports into the same dataset while it runs.
+- Manifest rewriting is not included; a table that has many manifests after
+  many small commits is a candidate for a later operation.
+
 ## HTTP API
 
 The API listens on port `9100` and is described in
@@ -571,7 +614,8 @@ curl -sS -H "Authorization: Bearer $ORABBIT_HTTP_AUTH_TOKEN" http://127.0.0.1:91
 | `POST` | `/workers/enrollment-tokens` | Create a worker enrollment token |
 | `GET` | `/workers/identities` | List worker identities |
 | `POST` | `/workers/identities/{id}/revoke` | Revoke a worker identity |
-| `POST` | `/maintenance/submit` | Submit a maintenance operation |
+| `POST` | `/maintenance/submit` | Start an orphan cleanup or compaction (`job_id`, `operation`, `dry_run`) |
+| `GET` | `/maintenance`, `/maintenance/{id}` | List operations, or read one with its per-object report |
 
 </details>
 
@@ -749,7 +793,6 @@ Flags override environment variables. Example files:
 | `ORABBIT_CANCELED_OBJECT_CLEANUP_SCAN_INTERVAL` | `5m` | Canceled-object scan cadence |
 | `ORABBIT_CANCELED_OBJECT_RETENTION` | `168h` | Quarantine before deletion |
 | `ORABBIT_CANCELED_OBJECT_CLEANUP_MAX_ATTEMPTS` | `5` | Object cleanup retries |
-| `ORABBIT_FULL_RUN_RETAIN_COUNT` | `1` | Full-refresh datasets kept after Iceberg publication |
 | `ORABBIT_HISTORY_RETENTION` | `720h` | Prune history of finished runs older than this; `0` disables |
 | `ORABBIT_HISTORY_PRUNE_INTERVAL` | `1h` | History pruning cadence |
 | `ORABBIT_DB_READ_CONNS` | `4` | Read-only SQLite connections for lists, metrics and SSE |
@@ -881,6 +924,13 @@ network-level restrictions.
 > 30 minutes, checked by a weekly restore drill; restore with
 > `scripts/master-restore.sh`. See
 > [docs/master-backup-restore.md](docs/master-backup-restore.md).
+
+> [!NOTE]
+> **Scaling limits.** One master was measured responsive with up to 128
+> running tasks, tasks of a few seconds, under ~10,000 pending tasks and about
+> two runs finishing per second. See
+> [docs/master-scaling.md](docs/master-scaling.md) for the tested envelope,
+> what limits it first and the recommended settings.
 
 > [!NOTE]
 > **MinIO.** Upstream MinIO no longer publishes images and its repository is
@@ -1064,6 +1114,11 @@ debugging. Without `ORABBIT_E2E=1`, `go test ./...` skips these tests.
 runs the restore drill described in
 [docs/master-backup-restore.md](docs/master-backup-restore.md#restore-drill).
 
+The master load harness (`ORABBIT_LOAD=1 go test ./internal/grpc -run
+TestMasterLoad`) and the SQLite benchmarks (`go test ./internal/db -run '^$'
+-bench Hotpath`) are described in
+[docs/master-scaling.md](docs/master-scaling.md#running-it).
+
 ### CI
 
 | Workflow | Runs on | Does |
@@ -1071,6 +1126,7 @@ runs the restore drill described in
 | [CI](.github/workflows/ci.yml) | Pull requests; reused by Release images | Unit tests (race detector), integration tests against PostgreSQL, MySQL, MariaDB and ClickHouse, the end-to-end test (`scripts/e2e.sh`), `golangci-lint`, `shellcheck`, Compose validation, vulnerability check, and an image build, smoke test and Trivy scan |
 | [Release images](.github/workflows/release.yml) | Push to `main` | Runs CI, then pushes `latest-master` and `latest-worker` |
 | [Restore drill](.github/workflows/dr-drill.yml) | Every Monday, and on demand | Loses and restores the master in the end-to-end stack (`ORABBIT_E2E_DR=1 scripts/e2e.sh`) and keeps the measured RTO/RPO report |
+| [Load test](.github/workflows/load.yml) | On demand | Runs the master load harness and SQLite benchmarks (`docs/master-scaling.md`) and keeps the report |
 | [Vulnerability check](.github/workflows/vulncheck.yml) | Within CI, and every Monday | `scripts/vulncheck.sh`: fails on reachable Go vulnerabilities not reviewed in `.govulncheck-allow` |
 | [MinIO images](.github/workflows/minio-images.yml) | Changes under `docker/minio/` | Builds, tests, scans and publishes the MinIO images |
 

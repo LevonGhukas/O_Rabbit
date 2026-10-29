@@ -44,6 +44,17 @@ type Spec struct {
 	// SnapshotContext is the source snapshot a STRONG_SNAPSHOT run exported at
 	// planning (Postgres snapshot ID, Oracle SCN); every task reads from it.
 	SnapshotContext string `json:"snapshot_context,omitempty"`
+
+	// Compaction tasks (type iceberg_compact) rewrite these table files.
+	Inputs          []CompactionInput `json:"inputs,omitempty"`
+	TargetFileBytes int64             `json:"target_file_bytes,omitempty"`
+}
+
+// CompactionInput is one table data file a compaction task rewrites.
+type CompactionInput struct {
+	Key     string `json:"key"`
+	Size    int64  `json:"size"`
+	Records int64  `json:"records"`
 }
 
 // Normalize fills defaults and maps legacy int-range specs onto cursor bounds.
