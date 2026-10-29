@@ -112,8 +112,9 @@ type canceledObjectCleaner interface {
 // moved multipart lifecycle reports to ReportMultipartLifecycle; version 8
 // sends the Iceberg partition spec so workers write one partition per file;
 // version 9 reports the rows at the high-water mark (hwm_boundary) so the next
-// incremental run can re-read them without duplicates.
-const WorkerProtocolVersion = 9
+// incremental run can re-read them without duplicates; version 10 adds
+// compaction tasks (partition spec type iceberg_compact).
+const WorkerProtocolVersion = 10
 
 const workerProtocolVersion = WorkerProtocolVersion
 
