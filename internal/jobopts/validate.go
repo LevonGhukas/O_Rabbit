@@ -109,6 +109,8 @@ func Validate(raw json.RawMessage, sourceSQL string, mode ValidateMode) error {
 		if t, ok := optionFieldTypes[name]; ok {
 			if err := json.Unmarshal(value, reflect.New(t).Interface()); err != nil {
 				add("."+name, "must be %s", typeDescription(t))
+			} else if name == reconciliationKey {
+				checkReconciliationKeys(value, add)
 			}
 			continue
 		}
@@ -189,6 +191,7 @@ func Validate(raw json.RawMessage, sourceSQL string, mode ValidateMode) error {
 			add(".format", "%v", err)
 		}
 	}
+	o.validateReconciliation(add)
 	if mode == Strict {
 		// Older versions accepted these and fell back to defaults at run
 		// time, so stored jobs relying on that keep running.
@@ -288,6 +291,8 @@ func typeDescription(t reflect.Type) string {
 		return "an array of strings"
 	case reflect.Map:
 		return "an object of strings"
+	case reflect.Pointer, reflect.Struct:
+		return "an object"
 	default:
 		return "a " + t.String()
 	}

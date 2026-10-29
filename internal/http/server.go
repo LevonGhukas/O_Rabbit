@@ -60,6 +60,7 @@ type Server struct {
 	configs          configService
 	deploy           deployService
 	taskMaxAttempts  int
+	limits           httpLimiters
 	commitReconciler interface {
 		ReconcileCommittingRuns(context.Context) error
 	}
@@ -599,6 +600,7 @@ func (s *Server) validateJobRequest(ctx context.Context, req jobCreateRequest) e
 	if strings.TrimSpace(req.Name) == "" {
 		add("name", "is required")
 	}
+	var sourceEngine string
 	for _, ref := range []struct{ field, id, kind string }{
 		{"source_connection_id", req.SourceConnectionID, "source"},
 		{"target_connection_id", req.TargetConnectionID, "target"},
@@ -615,6 +617,8 @@ func (s *Server) validateJobRequest(ctx context.Context, req jobCreateRequest) e
 			return err
 		case conn.Kind != ref.kind:
 			add(ref.field, fmt.Sprintf("connection %q is a %s connection, not a %s connection", ref.id, conn.Kind, ref.kind))
+		case ref.kind == "source":
+			sourceEngine = conn.Engine
 		}
 	}
 	if err := jobopts.ValidateWriteMode(req.WriteMode, req.Incremental); err != nil {
@@ -623,6 +627,13 @@ func (s *Server) validateJobRequest(ctx context.Context, req jobCreateRequest) e
 	var invalid *jobopts.ValidationError
 	if err := jobopts.Validate(req.OptionsJSON, req.SourceSQL, jobopts.Strict); errors.As(err, &invalid) {
 		problems = append(problems, invalid.Errors...)
+	}
+	if sourceEngine != "" {
+		if opts, err := jobopts.Parse(req.OptionsJSON); err == nil {
+			if err := jobopts.ValidateReconciliationEngine(opts, sourceEngine); errors.As(err, &invalid) {
+				problems = append(problems, invalid.Errors...)
+			}
+		}
 	}
 	if len(problems) == 0 {
 		return nil

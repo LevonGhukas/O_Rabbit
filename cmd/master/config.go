@@ -172,6 +172,7 @@ type masterConfig struct {
 	RegistrationMaxAttempts           int
 	ReconciliationLeaseDuration       time.Duration
 	ReconciliationMaxAttempts         int
+	RateLimits                        rateLimitConfig
 }
 
 func loadMasterConfigFromEnv() masterConfig {
@@ -220,6 +221,7 @@ func loadMasterConfigFromEnv() masterConfig {
 		RegistrationMaxAttempts:           envPositiveIntDefault("ORABBIT_REGISTRATION_MAX_ATTEMPTS", 5),
 		ReconciliationLeaseDuration:       envDurationDefault("ORABBIT_RECONCILIATION_LEASE_DURATION", 30*time.Second),
 		ReconciliationMaxAttempts:         envPositiveIntDefault("ORABBIT_RECONCILIATION_MAX_ATTEMPTS", 5),
+		RateLimits:                        loadRateLimitConfigFromEnv(),
 	}
 }
 
@@ -229,6 +231,7 @@ func bindMasterFlags(cfg *masterConfig) {
 	flag.StringVar(&cfg.HTTPAddr, "http-addr", cfg.HTTPAddr, "HTTP listen address")
 	flag.StringVar(&cfg.HTTPAuthToken, "http-auth-token", cfg.HTTPAuthToken, "HTTP bearer token for API/SSE (required for non-loopback HTTP)")
 	flag.StringVar(&cfg.WorkerAuthToken, "worker-auth-token", cfg.WorkerAuthToken, "Bearer token required on worker gRPC calls (required for non-loopback gRPC)")
+	flag.StringVar(&cfg.RateLimits.TrustedProxies, "http-trusted-proxies", cfg.RateLimits.TrustedProxies, "Comma-separated reverse proxy IPs/CIDRs whose X-Forwarded-For identifies HTTP clients for rate limiting")
 	flag.StringVar(&cfg.IceBin, "ice-bin", cfg.IceBin, "Ice CLI binary path for master-owned engine=ice registration")
 	flag.BoolVar(&cfg.Insecure, "insecure", cfg.Insecure, "Disable gRPC TLS (dev)")
 	flag.BoolVar(&cfg.AllowInsecureRemoteGRPC, "allow-insecure-remote-grpc", cfg.AllowInsecureRemoteGRPC, "Permit plaintext gRPC on a non-loopback listener (isolated private networks only)")

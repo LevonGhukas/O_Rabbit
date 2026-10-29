@@ -278,8 +278,11 @@ func ResolveRunConfig(enabled bool, engine, table string, baseS3 s3io.Config, ic
 	return cfg.Normalize()
 }
 
+// DefaultTable derives the Iceberg table for a run without iceberg.table. A
+// storage prefix whose segments do not form a valid identifier (such as "."
+// or a control character) falls back to the sanitized source table name.
 func DefaultTable(sourceEngine, sourceTable string) string {
-	if table, ok := dataset.IcebergTableFromStoragePrefix(sourceTable); ok {
+	if table, ok := dataset.IcebergTableFromStoragePrefix(sourceTable); ok && validateTableIdentifier(table) == nil {
 		return table
 	}
 

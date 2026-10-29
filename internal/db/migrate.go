@@ -192,6 +192,27 @@ const schemaV32 = `
 ALTER TABLE tasks ADD COLUMN hwm_boundary_json TEXT NOT NULL DEFAULT '';
 `
 
+// schemaV33 records the optional commit-time source reconciliation, one row per
+// task, upserted because a commit attempt can be retried.
+const schemaV33 = `
+CREATE TABLE IF NOT EXISTS source_reconciliations (
+  run_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  method TEXT NOT NULL,
+  consistency TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  lower_bound TEXT NOT NULL DEFAULT '',
+  lower_exclusive INTEGER NOT NULL DEFAULT 0,
+  upper_bound TEXT NOT NULL DEFAULT '',
+  upper_inclusive INTEGER NOT NULL DEFAULT 0,
+  source_rows INTEGER NOT NULL DEFAULT 0,
+  output_rows INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (run_id, task_id)
+);
+`
+
 const schemaV30 = `
 CREATE INDEX IF NOT EXISTS idx_jobs_name_created ON jobs(name, created_at);
 `
