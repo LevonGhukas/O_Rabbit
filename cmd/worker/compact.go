@@ -10,6 +10,7 @@ import (
 
 	"github.com/LevonGhukas/O_Rabbit/internal/artifact"
 	"github.com/LevonGhukas/O_Rabbit/internal/grpcpb"
+	"github.com/LevonGhukas/O_Rabbit/internal/partitionspec"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -25,12 +26,8 @@ import (
 const compactionTaskType = "iceberg_compact"
 
 // compactionInput is one file a compaction task rewrites, with the size and
-// row count the table records for it.
-type compactionInput struct {
-	Key     string `json:"key"`
-	Size    int64  `json:"size"`
-	Records int64  `json:"records"`
-}
+// row count the table records for it. It is part of the shared partition spec.
+type compactionInput = partitionspec.CompactionInput
 
 type objectOpener interface {
 	OpenObject(ctx context.Context, key string) (io.ReadCloser, bool, error)
