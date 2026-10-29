@@ -47,6 +47,7 @@ var migrations = []migration{
 	{version: 31, sql: schemaV31},
 	{version: 32, sql: schemaV32},
 	{version: 33, sql: schemaV33},
+	{version: 34, sql: schemaV34},
 }
 
 // normalizeStoredTimestamps rewrites every stored timestamp in
@@ -190,6 +191,56 @@ CREATE TABLE IF NOT EXISTS source_reconciliations (
   status TEXT NOT NULL,
   detail TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (run_id, task_id)
+);
+`
+
+// schemaV34 records explicit Iceberg maintenance operations (orphan cleanup
+// and compaction): a leased, fenced claim per operation and the inspectable
+// per-object report. One job has at most one active operation.
+const schemaV34 = `
+CREATE TABLE maintenance_operations (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK(kind IN ('ORPHAN_CLEANUP','COMPACTION')),
+  job_id TEXT NOT NULL,
+  dry_run INTEGER NOT NULL DEFAULT 1,
+  params_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL CHECK(status IN ('PENDING','RUNNING','SUBMITTED','SUCCEEDED','FAILED','ABORTED')),
+  source_run_id TEXT NOT NULL DEFAULT '',
+  table_identifier TEXT NOT NULL DEFAULT '',
+  table_uuid TEXT NOT NULL DEFAULT '',
+  table_location TEXT NOT NULL DEFAULT '',
+  snapshot_id TEXT NOT NULL DEFAULT '',
+  metadata_location TEXT NOT NULL DEFAULT '',
+  run_id TEXT NOT NULL DEFAULT '',
+  report_json TEXT NOT NULL DEFAULT '{}',
+  error_class TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  leader_epoch INTEGER,
+  lease_token TEXT NOT NULL DEFAULT '',
+  lease_deadline TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX idx_maintenance_one_active_per_job ON maintenance_operations(job_id) WHERE status IN ('PENDING','RUNNING','SUBMITTED');
+CREATE INDEX idx_maintenance_operations_status ON maintenance_operations(status,created_at);
+CREATE INDEX idx_maintenance_operations_run ON maintenance_operations(run_id) WHERE run_id<>'';
+CREATE TABLE maintenance_candidates (
+  operation_id TEXT NOT NULL,
+  object_key TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  last_modified TEXT NOT NULL DEFAULT '',
+  age_seconds INTEGER NOT NULL DEFAULT 0,
+  decision TEXT NOT NULL CHECK(decision IN ('ORPHAN','RETAINED','COMPACT')),
+  reason TEXT NOT NULL,
+  evidence_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL CHECK(status IN ('WOULD_DELETE','RETAINED','DELETED','DELETE_FAILED','CHANGED','PLANNED','COMPACTED')),
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(operation_id, object_key),
+  FOREIGN KEY(operation_id) REFERENCES maintenance_operations(id) ON DELETE CASCADE
 );
 `
 

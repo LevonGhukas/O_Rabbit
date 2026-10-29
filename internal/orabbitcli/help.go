@@ -20,6 +20,7 @@ func usage(w io.Writer) {
 	tw.section("Commands")
 	tw.item("stack", "Manage local master/worker processes")
 	tw.item("run", "Interactive and non-interactive run operations")
+	tw.item("maintenance", "Iceberg orphan cleanup and compaction")
 	tw.item("help", "Show help for commands and subcommands")
 	tw.blank()
 	tw.section("Examples")

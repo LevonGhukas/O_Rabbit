@@ -41,6 +41,17 @@ type Spec struct {
 	HWMBoundarySkip *hwmboundary.Skip `json:"hwm_boundary_skip,omitempty"`
 	// TrackHWMBoundary asks the task to report the rows at its largest cursor value.
 	TrackHWMBoundary bool `json:"track_hwm_boundary,omitempty"`
+
+	// Compaction tasks (type iceberg_compact) rewrite these table files.
+	Inputs          []CompactionInput `json:"inputs,omitempty"`
+	TargetFileBytes int64             `json:"target_file_bytes,omitempty"`
+}
+
+// CompactionInput is one table data file a compaction task rewrites.
+type CompactionInput struct {
+	Key     string `json:"key"`
+	Size    int64  `json:"size"`
+	Records int64  `json:"records"`
 }
 
 // Normalize fills defaults and maps legacy int-range specs onto cursor bounds.

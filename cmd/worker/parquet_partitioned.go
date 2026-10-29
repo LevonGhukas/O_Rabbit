@@ -33,14 +33,18 @@ const maxOpenPartitionWriters = 32
 // newTaskParquetWriter returns the writer for t's output. A task for a
 // partitioned Iceberg table writes one partition tuple per file.
 func newTaskParquetWriter(ctx context.Context, t *grpcpb.TaskAssignment) (parquetOutputWriter, error) {
-	spec, err := icebergpart.ParseSpecJSON(t.GetIcebergPartitionSpecJson())
+	return newParquetOutputWriter(ctx, t.GetIcebergPartitionSpecJson(), t.TargetFileBytes)
+}
+
+func newParquetOutputWriter(ctx context.Context, partitionSpecJSON string, targetFileBytes int64) (parquetOutputWriter, error) {
+	spec, err := icebergpart.ParseSpecJSON(partitionSpecJSON)
 	if err != nil {
 		return nil, err
 	}
 	if len(spec) == 0 {
-		return newParquetRollingWriterWithContext(ctx, t.TargetFileBytes), nil
+		return newParquetRollingWriterWithContext(ctx, targetFileBytes), nil
 	}
-	return newPartitionedParquetWriter(ctx, t.TargetFileBytes, spec, maxOpenPartitionWriters)
+	return newPartitionedParquetWriter(ctx, targetFileBytes, spec, maxOpenPartitionWriters)
 }
 
 type partitionedParquetWriter struct {
