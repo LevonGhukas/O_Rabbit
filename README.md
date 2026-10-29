@@ -926,6 +926,13 @@ network-level restrictions.
 > [docs/master-backup-restore.md](docs/master-backup-restore.md).
 
 > [!NOTE]
+> **Scaling limits.** One master was measured responsive with up to 128
+> running tasks, tasks of a few seconds, under ~10,000 pending tasks and about
+> two runs finishing per second. See
+> [docs/master-scaling.md](docs/master-scaling.md) for the tested envelope,
+> what limits it first and the recommended settings.
+
+> [!NOTE]
 > **MinIO.** Upstream MinIO no longer publishes images and its repository is
 > archived. The Compose files use `levonghukas/minio` and `levonghukas/mc`,
 > built from pinned upstream releases with patched dependencies by
@@ -1107,6 +1114,11 @@ debugging. Without `ORABBIT_E2E=1`, `go test ./...` skips these tests.
 runs the restore drill described in
 [docs/master-backup-restore.md](docs/master-backup-restore.md#restore-drill).
 
+The master load harness (`ORABBIT_LOAD=1 go test ./internal/grpc -run
+TestMasterLoad`) and the SQLite benchmarks (`go test ./internal/db -run '^$'
+-bench Hotpath`) are described in
+[docs/master-scaling.md](docs/master-scaling.md#running-it).
+
 ### CI
 
 | Workflow | Runs on | Does |
@@ -1114,6 +1126,7 @@ runs the restore drill described in
 | [CI](.github/workflows/ci.yml) | Pull requests; reused by Release images | Unit tests (race detector), integration tests against PostgreSQL, MySQL, MariaDB and ClickHouse, the end-to-end test (`scripts/e2e.sh`), `golangci-lint`, `shellcheck`, Compose validation, vulnerability check, and an image build, smoke test and Trivy scan |
 | [Release images](.github/workflows/release.yml) | Push to `main` | Runs CI, then pushes `latest-master` and `latest-worker` |
 | [Restore drill](.github/workflows/dr-drill.yml) | Every Monday, and on demand | Loses and restores the master in the end-to-end stack (`ORABBIT_E2E_DR=1 scripts/e2e.sh`) and keeps the measured RTO/RPO report |
+| [Load test](.github/workflows/load.yml) | On demand | Runs the master load harness and SQLite benchmarks (`docs/master-scaling.md`) and keeps the report |
 | [Vulnerability check](.github/workflows/vulncheck.yml) | Within CI, and every Monday | `scripts/vulncheck.sh`: fails on reachable Go vulnerabilities not reviewed in `.govulncheck-allow` |
 | [MinIO images](.github/workflows/minio-images.yml) | Changes under `docker/minio/` | Builds, tests, scans and publishes the MinIO images |
 
