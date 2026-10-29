@@ -284,6 +284,7 @@ func executeTaskBody(ctx context.Context, log *slog.Logger, cp grpcpb.ControlPla
 			BytesRead:         0,
 			BytesWritten:      0,
 			UncompressedBytes: 0,
+			HwmBoundary:       hwmBoundaryProto(extracted.HWMBoundary),
 		})
 	}
 	defer func() {
@@ -504,6 +505,7 @@ func executeTaskBody(ctx context.Context, log *slog.Logger, cp grpcpb.ControlPla
 		ParquetObjectKeys: objectKeys,
 		Artifacts:         artifactRecords,
 		MaxHwmValue:       extracted.MaxCursor,
+		HwmBoundary:       hwmBoundaryProto(extracted.HWMBoundary),
 	})
 	if err != nil {
 		return err

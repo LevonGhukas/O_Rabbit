@@ -285,10 +285,32 @@ the engine default. The job value wins over the same setting in the DSN.
 
 ### Incremental exports and late-arriving rows
 
-An incremental run resumes strictly after the dataset's high-water mark, the
-largest cursor value committed so far. Rows that become visible later with a
-smaller cursor value are missed, for example an `updated_at` set when a
-transaction starts but committed after a run has read past it.
+An incremental run resumes at the dataset's high-water mark, the largest
+cursor value committed so far, and reads `cursor >= mark`. Rows committed
+later with the same cursor value as the mark are therefore exported by the
+next run. To avoid exporting the rows at the mark twice, each commit stores
+the hashes of the rows sitting exactly at the new mark in `_state.json`
+(`hwm_boundary`), and the next run drops boundary rows whose hash is stored.
+Rows with identical content are counted, so a new identical row is still
+exported.
+
+- A dataset whose `_state.json` predates the boundary is seeded by its next
+  run: rows at the mark are treated as already exported and their hashes are
+  recorded. Late rows that arrived before that run cannot be told apart from
+  exported ones and are not recovered.
+- At most 10,000 distinct rows are kept per mark. Above that (typical for
+  coarse cursors such as a `date` column) the run logs a `WARN`
+  `hwm boundary resume` event and resumes strictly after the mark, so late
+  rows with the mark's value can be missed.
+- Cursors of unknown type always resume strictly after the mark.
+- Only SQL sources track the boundary; MongoDB and file sources are unchanged.
+- A row's hash covers every selected column, so changing the selected
+  columns, their types, or a query whose result is not repeatable (for
+  example one selecting `now()`) exports the rows at the mark once more.
+
+Rows that become visible later with a *smaller* cursor value are still
+missed, for example an `updated_at` set when a transaction starts but
+committed after a run has read past it.
 
 Set the job option `cursor_lookback` to re-read a window below the mark on
 every run: a count for integer cursors (`"1000"`) or a duration for date and
@@ -296,6 +318,104 @@ timestamp cursors (`"30m"`, `"48h"`). Re-read rows are exported again, so
 deduplicate downstream, for example with Iceberg upsert on the table's key.
 String, UUID and decimal cursors do not support a look-back, and the
 high-water mark never moves backwards.
+
+### Deleted source rows
+
+Incremental runs export rows whose cursor is above the high-water mark, so
+they capture inserts and updates that move the cursor. **They do not
+propagate deletes:** a row deleted at the source leaves nothing to read, and
+its earlier copy stays in the exported Parquet files and the Iceberg table.
+
+- `cursor_lookback` does not help: it re-reads rows that still exist.
+- Iceberg upsert replaces the target row of every key that appears in a run.
+  It never removes a key that is absent from the run, so it does not
+  propagate deletes either.
+- Change data capture is not supported: the job options
+  `partition_strategy: cdc_stream` and `consistency_mode: STRONG_CDC`, and
+  `consistency.mode: STRONG_CDC` on `/runs/submit`, are rejected. The
+  proposed design is in [docs/cdc-design.md](docs/cdc-design.md).
+
+Safe ways to remove deleted rows today:
+
+- **Full refresh.** A run with `incremental: false` and `write_mode: overwrite`
+  re-reads the whole source. With Iceberg registration it replaces the
+  table's files in one snapshot, so readers never see a half-replaced table.
+  Run one as often as deleted rows must disappear; between refreshes they
+  stay visible.
+- **Soft deletes.** Mark rows as deleted at the source (for example a
+  `deleted_at` column) and move the cursor column when you do. The next
+  incremental run exports the marked row, which replaces the old one under
+  upsert; readers filter marked rows out. Remove rows physically only after a
+  full refresh has run.
+- Many teams combine both: incremental runs for freshness and a scheduled
+  full refresh to drop deleted rows.
+
+### Source reconciliation
+
+An artifact checksum and the worker's row count prove that what was written is
+intact, not that the worker read every row of its range. An optional check
+closes that gap: at commit, after the artifacts verify and before anything is
+published, the master runs `SELECT COUNT(*)` on the source for each task's
+planned range and compares it with the rows the task wrote.
+
+```json
+"partition_strategy": "ordered_cursor",
+"reconciliation": {"mode": "count", "consistency": "immutable", "on_mismatch": "review"}
+```
+
+| Key | Values (default first) | Meaning |
+| --- | --- | --- |
+| `mode` | `off`, `count` | `count` turns the check on. Absent means off. |
+| `consistency` | `none`, `immutable` | `immutable` asserts that the rows of the planned range do not change while the run is in flight. |
+| `on_mismatch` | `fail`, `review` | What a proven mismatch does. |
+
+The count uses the same table or query, where clause, bounds and inclusivity as
+extraction, taken from the task's planned range, never from the worker-reported
+high-water mark. With `count`, the planner pins a single-task run to the maximum
+cursor value it saw at plan time (an inclusive upper bound), so rows inserted
+afterwards fall outside both the extraction and the count. Range-split runs
+already carry plan-time upper bounds. Where no plan-time maximum is known
+(cursors that cannot be range-split, or an empty source at plan time) the task
+stays unbounded above, so rows added to the source during the run count as a
+difference: with `consistency: immutable` that is a mismatch.
+
+Each task ends as:
+
+- `match`: source and output counts are equal.
+- `mismatch`: they differ and `consistency` is `immutable`. This is proven data
+  loss. `on_mismatch: fail` fails the run terminally; `review` fails it with
+  `operator_action_required` and failure class `OPERATOR_ACTION_REQUIRED`. Either
+  way nothing is committed, so the dataset state and the high-water mark do not
+  move; investigate and re-run. There is no action to force-commit a held run.
+- `indeterminate`: they differ and `consistency` is `none`. A mutable source may
+  have changed, so this is recorded as a warning and the commit proceeds.
+- `error`: the count query failed. The commit is retried; an error is never a
+  mismatch.
+
+Results are stored per task and appear in `GET /runs/{id}/diagnosis` as
+`source_reconciliation` (counts per status and every task that did not match,
+with bounds, source rows, output rows and detail).
+
+Limits and cost:
+
+- Needs `partition_strategy: ordered_cursor` and a source of postgres, mysql,
+  mariadb, mssql, oracle, clickhouse or trino. Other engines are rejected when
+  the job is saved.
+- In query mode the job cannot also set `where_clause` (it is ignored in query
+  mode today, see TID-982); put the filter in the query.
+- One extra `COUNT(*)` per task on the source at commit time, so keep an index on
+  the cursor column. The counts run inside the commit timeout
+  (`ORABBIT_COMMIT_TIMEOUT`); a commit that exceeds it is interrupted and retried
+  without recording a failure, so keep the total count time well below it. Pool jobs are counted from the master, which must reach the
+  source (it already does for ordered-cursor planning).
+- `consistency_mode: STRONG_SNAPSHOT` is not applied by the worker yet (TID-981),
+  so it does not make a source immutable; only `reconciliation.consistency`
+  controls how a difference is classified.
+- Rows with a NULL cursor value are outside every bounded range: both extraction
+  and the count exclude them, so reconciliation cannot detect them. The planner
+  rejects cursors it knows are nullable; nullability the catalog does not report
+  is not caught.
+- It is not run again when a commit is retried after its manifest was written.
 
 ### Column types
 
@@ -571,6 +691,35 @@ contract is [proto/controlplane.proto](proto/controlplane.proto).
 - **Scoped S3 access.** With target metadata `"credential_mode": "sts"` and
   `"sts_role_arn"`, workers get temporary credentials limited to the run's
   own prefix (`<dataset prefix>/_runs/run-<run id>/`).
+- **Rate limits.** The master limits requests per client address, in memory
+  (one active master, so no shared store is needed). Limited HTTP requests get
+  `429` with `Retry-After` and error code `rate_limited`; limited worker RPCs get
+  `ResourceExhausted` with a `RetryInfo` delay, which enrolling workers honour.
+  - Every HTTP request except `/healthz` and `/ready` counts against
+    `ORABBIT_HTTP_RATE_LIMIT_*`. Changes to remote operations and worker
+    identities (`POST`/`PUT`/`DELETE` on `/servers`, `/deployments`,
+    `/executions`, `/workers/...`) also count against
+    `ORABBIT_HTTP_SENSITIVE_RATE_LIMIT_*`.
+  - Rejected API and remote-ops tokens, shared worker tokens and enrollment
+    tokens spend `ORABBIT_AUTH_FAILURE_RATE_LIMIT_*`. Once a client's budget is
+    spent it is refused before its credentials are checked, even with a valid
+    token, until the budget refills. Rejected worker certificates (for example
+    an expired one) do not count, so one stale worker cannot lock out others.
+  - `EnrollWorker` calls count against `ORABBIT_ENROLL_RATE_LIMIT_*` before a
+    certificate is issued; the default burst lets 100 workers enroll at once
+    from one address. Reconnecting workers that already hold a certificate are
+    not limited.
+  - Clients sharing an address (NAT, or a proxy that is not listed in
+    `ORABBIT_HTTP_TRUSTED_PROXIES`) share one budget, including the failure
+    budget. IPv6 clients are grouped by /64. Behind a reverse proxy, list it in
+    `ORABBIT_HTTP_TRUSTED_PROXIES` so `X-Forwarded-For` identifies clients; the
+    header is ignored from any other peer. gRPC always keys on the connection
+    peer, so behind a TCP load balancer all workers share its address: raise
+    the enroll and failure bursts accordingly. Workers presenting a verified
+    certificate are never blocked by the failure budget.
+  - Each limit is `<name>_RPS` (sustained events per second; `0` disables it)
+    and `<name>_BURST` (events allowed at once). Invalid values stop the master
+    at startup.
 - **Source safety.** Query mode accepts a single `SELECT`/`WITH` statement;
   `where_clause` must be one boolean expression. A read-only database user is
   still the only control that holds on every engine.
@@ -607,6 +756,11 @@ Flags override environment variables. Example files:
 | `ORABBIT_WORKER_AUTH_TOKEN` | empty | Bearer token for worker RPCs; required for non-loopback gRPC |
 | `ORABBIT_REMOTE_OPS_AUTH_TOKEN` | empty | Enables the remote operations API and is its only token; must differ from the API token |
 | `ORABBIT_TLS_CERT_FILE`, `ORABBIT_TLS_KEY_FILE` | empty | Master gRPC certificate and key |
+| `ORABBIT_HTTP_TRUSTED_PROXIES` | empty | Comma-separated proxy IPs/CIDRs whose `X-Forwarded-For` identifies HTTP clients for rate limiting |
+| `ORABBIT_HTTP_RATE_LIMIT_RPS`, `_BURST` | `50`, `200` | Per-client HTTP request limit (probes excluded); see [Security model](#security-model) |
+| `ORABBIT_HTTP_SENSITIVE_RATE_LIMIT_RPS`, `_BURST` | `1`, `30` | Extra per-client limit on remote-ops and worker-identity changes |
+| `ORABBIT_AUTH_FAILURE_RATE_LIMIT_RPS`, `_BURST` | `0.2`, `20` | Per-client budget of rejected tokens (HTTP and gRPC) |
+| `ORABBIT_ENROLL_RATE_LIMIT_RPS`, `_BURST` | `2`, `100` | Per-peer `EnrollWorker` limit |
 | `ORABBIT_GRPC_INSECURE` | `false` | Disable gRPC TLS (loopback only) |
 | `ORABBIT_GRPC_ALLOW_INSECURE_REMOTE` | `false` | Allow plaintext gRPC on a non-loopback listener (isolated private networks only) |
 | `ORABBIT_WORKER_CERT_TTL` | `24h` | Worker certificate lifetime (1h-720h) |
@@ -756,7 +910,7 @@ network-level restrictions.
 - gRPC TLS with enrolled worker identities for any cross-host worker
 - Ports 9100/9102, source databases and object storage restricted at the network layer
 - Read-only users for every source connection
-- Master SQLite backed up (Litestream or `sqlite3 .backup`), and `ORABBIT_MASTER_KEY` stored separately
+- Master SQLite backed up (Litestream or `sqlite3 .backup`), verified regularly with `scripts/verify-master-backup.sh`, and `ORABBIT_MASTER_KEY` stored separately
 - All example MinIO and catalog credentials replaced
 - Cleanup dry-run and retention settings reviewed before enabling deletion
 - Mounted TLS files readable by uid `10001`
@@ -765,7 +919,10 @@ network-level restrictions.
 
 > [!NOTE]
 > **The master is a single point of failure**: there is no automatic failover.
-> Run it under a supervisor that restarts it, and back up its database. See
+> Run it under a supervisor that restarts it, and back up its database. With
+> the Litestream backup the targets are an RPO of 1 minute and an RTO of
+> 30 minutes, checked by a weekly restore drill; restore with
+> `scripts/master-restore.sh`. See
 > [docs/master-backup-restore.md](docs/master-backup-restore.md).
 
 > [!NOTE]
@@ -794,7 +951,42 @@ docker run --rm -v orabbit-worker_orabbit_worker_identity:/d debian:bookworm-sli
   run, task, lease, registration and leadership gauges, gRPC and HTTP request
   counts and latencies (`orabbit_grpc_server_*`, `orabbit_http_*`), task
   throughput (`orabbit_task_*`), commit latency
-  (`orabbit_run_commit_duration_seconds`) and Go runtime metrics.
+  (`orabbit_run_commit_duration_seconds`) and Go runtime metrics. Labels are
+  bounded (statuses, phases); no metric names a run, task or worker.
+  - Queue health: `orabbit_oldest_registration_age_seconds{status}`
+    (PENDING from creation, other statuses from their last change),
+    `orabbit_oldest_registration_attempt_age_seconds` (the oldest active
+    catalog call) and `orabbit_registration_attempt_leases_expired`.
+  - Catalog capacity: `orabbit_catalog_work_slots_in_use`,
+    `orabbit_catalog_work_slots_capacity` and
+    `orabbit_catalog_work_rejected_total`.
+  - `orabbit_runs_operator_action_required` counts runs that wait for an
+    operator.
+  - Rate limits: `orabbit_rate_limited_total{surface,reason}` counts rejected
+    requests and `orabbit_auth_failures_total{surface}` rejected credentials
+    (`surface` is `http_api`, `http_remote_ops`, `grpc_enroll` or
+    `grpc_worker`). HTTP `429`s are rejected before routing, so they do not
+    appear in `orabbit_http_requests_total`. A steady rise in
+    `orabbit_auth_failures_total` means guessing or a misconfigured client; a
+    rise in `reason="request_rate"` during normal use means the limit is too
+    low or clients share an address (see `ORABBIT_HTTP_TRUSTED_PROXIES`).
+- **Alerts and dashboard:** [`monitoring/prometheus/orabbit-alerts.yml`](monitoring/prometheus/orabbit-alerts.yml)
+  holds Prometheus alert rules; every alert links to its section in
+  [docs/runbooks.md](docs/runbooks.md). `severity: critical` is meant to page,
+  `warning` to open a ticket. Durations wait out normal retries and lease
+  scans, so brief retries do not alert. The rules' unit tests
+  (`orabbit-alerts.test.yml`) run in CI with `promtool`. Import
+  [`monitoring/grafana/orabbit-lifecycle.json`](monitoring/grafana/orabbit-lifecycle.json)
+  into Grafana and pick the Prometheus data source. Only the leader serves
+  `/metrics`, so scrape every master; the rules aggregate with `max()`.
+
+  ```yaml
+  scrape_configs:
+    - job_name: orabbit-master
+      authorization: { credentials_file: /etc/prometheus/orabbit-token }  # ORABBIT_HTTP_AUTH_TOKEN
+      static_configs: [{ targets: ["master:9100"] }]
+  rule_files: [orabbit-alerts.yml]
+  ```
 - **Tracing:** off by default. Set the standard OpenTelemetry variables on the
   master and workers, for example
   `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317` (OTLP/gRPC). Trace
@@ -851,7 +1043,8 @@ internal/
 proto/                 Control-plane protobuf source
 docs/                  OpenAPI spec, backup runbook, design review
 docker/minio/          Patched MinIO image build
-scripts/               CI helpers (vulnerability check)
+scripts/               CI helpers (vulnerability check, end-to-end test), master restore and backup verification
+test/e2e/              End-to-end stack and tests
 ```
 
 </details>
@@ -893,12 +1086,34 @@ go test -count=1 -run Integration ./internal/planner ./cmd/worker
 
 </details>
 
+The end-to-end test runs the real master and worker images against
+PostgreSQL, MinIO and an Iceberg REST catalog, then reads the result back
+through the catalog: full and incremental exports, snapshot history, data
+files against the accepted worker files, and two catalog faults on the commit
+(a timeout before the catalog applies it, and a lost reply after it did). It
+needs Docker, Go and `openssl`, and uses ports 15001, 15432, 18181, 19000 and
+19100 on the host:
+
+```sh
+./scripts/e2e.sh
+```
+
+The script builds the images, starts the isolated `orabbit-e2e` stack from
+[`test/e2e/docker-compose.yml`](test/e2e/docker-compose.yml), runs
+`go test ./test/e2e`, saves container logs to `e2e-artifacts/` on failure and
+removes the stack. `ORABBIT_E2E_KEEP=1` leaves the stack running for
+debugging. Without `ORABBIT_E2E=1`, `go test ./...` skips these tests.
+`ORABBIT_E2E_DR=1 ./scripts/e2e.sh` adds the master's Litestream backup and
+runs the restore drill described in
+[docs/master-backup-restore.md](docs/master-backup-restore.md#restore-drill).
+
 ### CI
 
 | Workflow | Runs on | Does |
 |---|---|---|
-| [CI](.github/workflows/ci.yml) | Pull requests; reused by Release images | Unit tests (race detector), integration tests against PostgreSQL, MySQL, MariaDB and ClickHouse, `golangci-lint`, `shellcheck`, Compose validation, vulnerability check, and an image build, smoke test and Trivy scan |
+| [CI](.github/workflows/ci.yml) | Pull requests; reused by Release images | Unit tests (race detector), integration tests against PostgreSQL, MySQL, MariaDB and ClickHouse, the end-to-end test (`scripts/e2e.sh`), `golangci-lint`, `shellcheck`, Compose validation, vulnerability check, and an image build, smoke test and Trivy scan |
 | [Release images](.github/workflows/release.yml) | Push to `main` | Runs CI, then pushes `latest-master` and `latest-worker` |
+| [Restore drill](.github/workflows/dr-drill.yml) | Every Monday, and on demand | Loses and restores the master in the end-to-end stack (`ORABBIT_E2E_DR=1 scripts/e2e.sh`) and keeps the measured RTO/RPO report |
 | [Vulnerability check](.github/workflows/vulncheck.yml) | Within CI, and every Monday | `scripts/vulncheck.sh`: fails on reachable Go vulnerabilities not reviewed in `.govulncheck-allow` |
 | [MinIO images](.github/workflows/minio-images.yml) | Changes under `docker/minio/` | Builds, tests, scans and publishes the MinIO images |
 
@@ -987,7 +1202,9 @@ crash is marked `FAILED` at the next start.
 <summary><b>The master cannot decrypt stored secrets</b></summary>
 
 Restore the exact `ORABBIT_MASTER_KEY` that wrote them. A new key cannot read
-old values; use key rotation to change it.
+old values; use key rotation to change it. `orabbit-master check-db -db
+<path>` checks a database against the key in `ORABBIT_MASTER_KEY` without
+starting a master or changing the file (it also runs SQLite's integrity check).
 
 </details>
 

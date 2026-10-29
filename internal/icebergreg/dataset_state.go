@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -126,6 +127,32 @@ func (s datasetState) commitCheckpoint() commitCheckpoint {
 		RunID:       strings.TrimSpace(s.LastCommittedRun),
 		CommittedAt: strings.TrimSpace(s.CommittedAt),
 	}
+}
+
+// verifyIceStateReceipt checks the catalog receipt already stored in
+// _ice_state.json before a registration writes its own. The file keeps the
+// receipt of the last registration that finished on the dataset, so a receipt
+// from an earlier registration is expected and is replaced. Only a different
+// receipt for this same registration is a conflict: it means the durable
+// record and the dataset state disagree about one catalog commit.
+func verifyIceStateReceipt(stored json.RawMessage, receipt string) error {
+	if len(stored) == 0 || strings.TrimSpace(receipt) == "" {
+		return nil
+	}
+	var expected, actual map[string]any
+	if err := json.Unmarshal([]byte(receipt), &expected); err != nil {
+		return fmt.Errorf("decode catalog receipt: %w", err)
+	}
+	if err := json.Unmarshal(stored, &actual); err != nil {
+		return fmt.Errorf("decode _ice_state.json catalog receipt: %w", err)
+	}
+	if actual["registration_id"] != expected["registration_id"] {
+		return nil
+	}
+	if !reflect.DeepEqual(expected, actual) {
+		return fmt.Errorf("conflicting _ice_state.json catalog receipt")
+	}
+	return nil
 }
 
 func nextIceState(prev iceState, cp commitCheckpoint, fallbackRunID string, lastInsertedPart int) iceState {

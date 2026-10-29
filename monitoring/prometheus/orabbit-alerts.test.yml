@@ -1,0 +1,351 @@
+# promtool unit tests for orabbit-alerts.yml:
+#   promtool test rules orabbit-alerts.test.yml
+# Generated from the rule annotations; keep the expected annotations in sync.
+rule_files:
+  - orabbit-alerts.yml
+evaluation_interval: 1m
+tests:
+  - name: stuck catalog attempt
+    interval: 1m
+    input_series:
+      - series: orabbit_oldest_registration_attempt_age_seconds
+        values: '0+60x80'
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: OrabbitCatalogAttemptStuck
+        exp_alerts: []
+      - eval_time: 52m
+        alertname: OrabbitCatalogAttemptStuck
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "A catalog registration attempt is stuck"
+              description: "The oldest active Iceberg registration attempt has run for more than 45 minutes; later registrations of its dataset cannot proceed."
+              runbook_url: "https://github.com/LevonGhukas/O_Rabbit/blob/main/docs/runbooks.md#orabbitcatalogattemptstuck"
+  - name: normal retries do not alert
+    interval: 1m
+    input_series:
+      - series: orabbit_oldest_registration_attempt_age_seconds
+        values: '0+60x10 0+60x10 0+60x10 0+60x10 0+60x10 0+60x10 0+60x10 0+60x10 0+60x10 0+60x10 0+60x10 0+60x10 0+60x10 0+60x10 0+60x10'
+      - series: orabbit_oldest_registration_age_seconds{status="RETRY_REQUIRED"}
+        values: '0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2'
+      - series: orabbit_oldest_registration_age_seconds{status="PENDING"}
+        values: '0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2'
+      - series: orabbit_oldest_registration_age_seconds{status="RECONCILING"}
+        values: '0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2 0+300x2'
+      - series: orabbit_commit_reconciliation_runs{outcome="retry_required"}
+        values: '0x30 1x10 0x80'
+      - series: orabbit_registration_attempt_leases_expired
+        values: '0x30 1x2 0x88'
+      - series: orabbit_task_leases_expired
+        values: '0x60 1x2 0x58'
+      - series: orabbit_catalog_work_slots_in_use
+        values: '0x30 2x8 0x82'
+      - series: orabbit_catalog_work_slots_capacity
+        values: '2x120'
+      - series: orabbit_leadership_active
+        values: '1x120'
+      - series: orabbit_leadership_epoch
+        values: '3x60 4x60'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: OrabbitCatalogAttemptStuck
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: OrabbitRegistrationRetrySustained
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: OrabbitRegistrationQueueStalled
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: OrabbitRegistrationReconcilingSustained
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: OrabbitCommitRetrySustained
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: OrabbitRegistrationLeaseExpired
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: OrabbitTaskLeaseExpired
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: OrabbitCatalogCapacityFull
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: OrabbitNoActiveLeader
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: OrabbitLeadershipFlapping
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: OrabbitCatalogAttemptStuck
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: OrabbitRegistrationRetrySustained
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: OrabbitRegistrationQueueStalled
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: OrabbitRegistrationReconcilingSustained
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: OrabbitCommitRetrySustained
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: OrabbitRegistrationLeaseExpired
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: OrabbitTaskLeaseExpired
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: OrabbitCatalogCapacityFull
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: OrabbitNoActiveLeader
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: OrabbitLeadershipFlapping
+        exp_alerts: []
+      - eval_time: 115m
+        alertname: OrabbitCatalogAttemptStuck
+        exp_alerts: []
+      - eval_time: 115m
+        alertname: OrabbitRegistrationRetrySustained
+        exp_alerts: []
+      - eval_time: 115m
+        alertname: OrabbitRegistrationQueueStalled
+        exp_alerts: []
+      - eval_time: 115m
+        alertname: OrabbitRegistrationReconcilingSustained
+        exp_alerts: []
+      - eval_time: 115m
+        alertname: OrabbitCommitRetrySustained
+        exp_alerts: []
+      - eval_time: 115m
+        alertname: OrabbitRegistrationLeaseExpired
+        exp_alerts: []
+      - eval_time: 115m
+        alertname: OrabbitTaskLeaseExpired
+        exp_alerts: []
+      - eval_time: 115m
+        alertname: OrabbitCatalogCapacityFull
+        exp_alerts: []
+      - eval_time: 115m
+        alertname: OrabbitNoActiveLeader
+        exp_alerts: []
+      - eval_time: 115m
+        alertname: OrabbitLeadershipFlapping
+        exp_alerts: []
+  - name: blocked ordered queue
+    interval: 1m
+    input_series:
+      - series: orabbit_oldest_registration_age_seconds{status="PENDING"}
+        values: '0+60x200'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: OrabbitRegistrationQueueStalled
+        exp_alerts: []
+      - eval_time: 47m
+        alertname: OrabbitRegistrationQueueStalled
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Registrations are waiting too long"
+              description: "A registration has been PENDING for more than 30 minutes."
+              runbook_url: "https://github.com/LevonGhukas/O_Rabbit/blob/main/docs/runbooks.md#orabbitregistrationqueuestalled"
+      - eval_time: 47m
+        alertname: OrabbitRegistrationQueueBlocked
+        exp_alerts: []
+      - eval_time: 137m
+        alertname: OrabbitRegistrationQueueBlocked
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "The registration queue is blocked"
+              description: "A registration has been PENDING for more than 2 hours; new data is not reaching the Iceberg tables."
+              runbook_url: "https://github.com/LevonGhukas/O_Rabbit/blob/main/docs/runbooks.md#orabbitregistrationqueueblocked"
+  - name: sustained registration problems
+    interval: 1m
+    input_series:
+      - series: orabbit_oldest_registration_age_seconds{status="RECONCILING"}
+        values: '0+60x100'
+      - series: orabbit_oldest_registration_age_seconds{status="RETRY_REQUIRED"}
+        values: '0+60x100'
+      - series: orabbit_registrations_blocked
+        values: '1x100'
+      - series: orabbit_registration_attempt_leases_expired
+        values: '1x100'
+      - series: orabbit_task_leases_expired
+        values: '1x100'
+      - series: orabbit_runs_operator_action_required
+        values: '1x100'
+      - series: orabbit_commit_reconciliation_runs{outcome="retry_required"}
+        values: '1x100'
+      - series: orabbit_oldest_committing_run_age_seconds
+        values: '20000+60x100'
+    alert_rule_test:
+      - eval_time: 47m
+        alertname: OrabbitRegistrationReconcilingSustained
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "A registration has been reconciling for too long"
+              description: "A registration has been RECONCILING for more than 30 minutes; the catalog outcome of an earlier attempt is still unknown."
+              runbook_url: "https://github.com/LevonGhukas/O_Rabbit/blob/main/docs/runbooks.md#orabbitregistrationreconcilingsustained"
+      - eval_time: 75m
+        alertname: OrabbitRegistrationRetrySustained
+        exp_alerts: []
+      - eval_time: 77m
+        alertname: OrabbitRegistrationRetrySustained
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "A registration keeps retrying"
+              description: "A registration has been waiting to retry for more than an hour."
+              runbook_url: "https://github.com/LevonGhukas/O_Rabbit/blob/main/docs/runbooks.md#orabbitregistrationretrysustained"
+      - eval_time: 14m
+        alertname: OrabbitRegistrationBlocked
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: OrabbitRegistrationBlocked
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Registrations are blocked behind an earlier failure"
+              description: "At least one registration is BLOCKED by an earlier registration of the same dataset that needs operator action."
+              runbook_url: "https://github.com/LevonGhukas/O_Rabbit/blob/main/docs/runbooks.md#orabbitregistrationblocked"
+      - eval_time: 6m
+        alertname: OrabbitRegistrationLeaseExpired
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Expired registration leases are not being cleared"
+              description: "An active registration attempt has an expired lease for more than 5 minutes."
+              runbook_url: "https://github.com/LevonGhukas/O_Rabbit/blob/main/docs/runbooks.md#orabbitregistrationleaseexpired"
+      - eval_time: 6m
+        alertname: OrabbitTaskLeaseExpired
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Expired task leases are not being cleared"
+              description: "An active task attempt has had an expired lease for more than 5 minutes."
+              runbook_url: "https://github.com/LevonGhukas/O_Rabbit/blob/main/docs/runbooks.md#orabbittaskleaseexpired"
+      - eval_time: 6m
+        alertname: OrabbitOperatorActionRequired
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "A run needs operator action"
+              description: "At least one run is flagged operator_action_required."
+              runbook_url: "https://github.com/LevonGhukas/O_Rabbit/blob/main/docs/runbooks.md#orabbitoperatoractionrequired"
+      - eval_time: 31m
+        alertname: OrabbitCommitRetrySustained
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Run commits keep retrying"
+              description: "At least one run has needed a commit retry for 30 minutes."
+              runbook_url: "https://github.com/LevonGhukas/O_Rabbit/blob/main/docs/runbooks.md#orabbitcommitretrysustained"
+      - eval_time: 60m
+        alertname: OrabbitCommittingRunTooOld
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "A run has been committing for too long"
+              description: "The oldest COMMITTING run started more than 6 hours ago and has not finished publishing."
+              runbook_url: "https://github.com/LevonGhukas/O_Rabbit/blob/main/docs/runbooks.md#orabbitcommittingruntooold"
+  - name: new failures
+    interval: 1m
+    input_series:
+      - series: orabbit_registrations{status="FAILED"}
+        values: '0x10 1x50'
+      - series: orabbit_reconciliations_by_classification{classification="RETRY_LIMIT_EXHAUSTED"}
+        values: '2x10 3x50'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: OrabbitRegistrationFailures
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: OrabbitRegistrationFailures
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Registrations failed recently"
+              description: "At least one Iceberg registration became FAILED or QUARANTINED in the last 30 minutes."
+              runbook_url: "https://github.com/LevonGhukas/O_Rabbit/blob/main/docs/runbooks.md#orabbitregistrationfailures"
+      - eval_time: 55m
+        alertname: OrabbitRegistrationFailures
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: OrabbitReconciliationRetryExhausted
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "A catalog reconciliation ran out of retries"
+              description: "At least one reconciliation reached RETRY_LIMIT_EXHAUSTED in the last 30 minutes."
+              runbook_url: "https://github.com/LevonGhukas/O_Rabbit/blob/main/docs/runbooks.md#orabbitreconciliationretryexhausted"
+      - eval_time: 55m
+        alertname: OrabbitReconciliationRetryExhausted
+        exp_alerts: []
+  - name: catalog capacity full
+    interval: 1m
+    input_series:
+      - series: orabbit_catalog_work_slots_in_use
+        values: '2x30'
+      - series: orabbit_catalog_work_slots_capacity
+        values: '2x30'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: OrabbitCatalogCapacityFull
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: OrabbitCatalogCapacityFull
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Every catalog work slot has been busy for 15 minutes"
+              description: "Registrations and reconciliations are waiting for catalog work slots."
+              runbook_url: "https://github.com/LevonGhukas/O_Rabbit/blob/main/docs/runbooks.md#orabbitcatalogcapacityfull"
+  - name: no leader metrics at all
+    interval: 1m
+    input_series:
+      - series: orabbit_tasks{status="RUNNING"}
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: OrabbitNoActiveLeader
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "No O_Rabbit master is the active leader"
+              description: "No scraped master reports active leadership; runs, commits and registrations are stopped."
+              runbook_url: "https://github.com/LevonGhukas/O_Rabbit/blob/main/docs/runbooks.md#orabbitnoactiveleader"
+  - name: leadership lost and flapping
+    interval: 1m
+    input_series:
+      - series: orabbit_leadership_active
+        values: '1x5 0x10'
+      - series: orabbit_leadership_epoch
+        values: '1 1 2 2 3 3 4 4 4 4 4 4 4 4 4 4'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: OrabbitNoActiveLeader
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: OrabbitNoActiveLeader
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "No O_Rabbit master is the active leader"
+              description: "No scraped master reports active leadership; runs, commits and registrations are stopped."
+              runbook_url: "https://github.com/LevonGhukas/O_Rabbit/blob/main/docs/runbooks.md#orabbitnoactiveleader"
+      - eval_time: 9m
+        alertname: OrabbitLeadershipFlapping
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Master leadership keeps changing"
+              description: "Leadership changed more than twice in 30 minutes."
+              runbook_url: "https://github.com/LevonGhukas/O_Rabbit/blob/main/docs/runbooks.md#orabbitleadershipflapping"

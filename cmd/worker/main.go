@@ -18,10 +18,10 @@ import (
 	"time"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/artifact"
-	"github.com/LevonGhukas/O_Rabbit/internal/connectors"
 	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 	grpcapi "github.com/LevonGhukas/O_Rabbit/internal/grpc"
 	"github.com/LevonGhukas/O_Rabbit/internal/grpcpb"
+	"github.com/LevonGhukas/O_Rabbit/internal/partitionspec"
 	"github.com/LevonGhukas/O_Rabbit/internal/sysinfo"
 	"github.com/LevonGhukas/O_Rabbit/internal/telemetry"
 	"github.com/LevonGhukas/O_Rabbit/internal/workerworkspace"
@@ -33,34 +33,9 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-type partitionSpec struct {
-	Type           string            `json:"type"`
-	SourceMode     string            `json:"source_mode"`
-	QueryHash      string            `json:"query_hash"`
-	Table          string            `json:"table"`
-	CursorColumn   string            `json:"cursor_column"`
-	CursorDomain   string            `json:"cursor_domain"`
-	Lower          string            `json:"lower"`
-	Upper          string            `json:"upper"`
-	LowerExclusive bool              `json:"lower_exclusive"`
-	UpperInclusive bool              `json:"upper_inclusive"`
-	OutputPart     int64             `json:"output_part"`
-	WhereClause    string            `json:"where_clause,omitempty"`
-	SelectColumns  []string          `json:"select_columns,omitempty"`
-	ColumnTypes    map[string]string `json:"column_types,omitempty"`
-	RecordPath     string            `json:"record_path,omitempty"`
-	FileFormat     string            `json:"format,omitempty"`
-	IDColumn       string            `json:"id_column"` // legacy alias
-	From           int64             `json:"from"`      // legacy alias
-	To             int64             `json:"to"`        // legacy alias
-
-	// FetchSize is rows per source round-trip; 0 keeps the engine default.
-	FetchSize int `json:"fetch_size,omitempty"`
-
-	// Compaction tasks (type iceberg_compact) rewrite these table files.
-	Inputs          []compactionInput `json:"inputs,omitempty"`
-	TargetFileBytes int64             `json:"target_file_bytes,omitempty"`
-}
+// partitionSpec is the task partition spec, shared with the master so the
+// commit-time source reconciliation reads the same bounds the worker does.
+type partitionSpec = partitionspec.Spec
 
 func main() {
 	cfg := loadWorkerConfigFromEnv()
@@ -501,27 +476,4 @@ func normalizePollInterval(poll time.Duration) time.Duration {
 	return poll
 }
 
-func normalizePartitionSpec(ps partitionSpec) partitionSpec {
-	ps.SourceMode = strings.ToLower(strings.TrimSpace(ps.SourceMode))
-	if ps.SourceMode == "" {
-		ps.SourceMode = "table"
-	}
-	if strings.TrimSpace(ps.CursorColumn) == "" {
-		ps.CursorColumn = strings.TrimSpace(ps.IDColumn)
-	}
-	if strings.TrimSpace(ps.CursorDomain) == "" {
-		switch ps.Type {
-		case "sql_int_range", "mssql_int_range":
-			ps.CursorDomain = string(connectors.CursorDomainInt64)
-		}
-	}
-	if strings.TrimSpace(ps.Lower) == "" && (ps.Type == "sql_int_range" || ps.Type == "mssql_int_range") {
-		ps.Lower = fmt.Sprintf("%d", ps.From)
-		ps.LowerExclusive = true
-	}
-	if strings.TrimSpace(ps.Upper) == "" && (ps.Type == "sql_int_range" || ps.Type == "mssql_int_range") {
-		ps.Upper = fmt.Sprintf("%d", ps.To)
-		ps.UpperInclusive = true
-	}
-	return ps
-}
+func normalizePartitionSpec(ps partitionSpec) partitionSpec { return partitionspec.Normalize(ps) }

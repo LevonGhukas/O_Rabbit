@@ -138,15 +138,24 @@ func TestCommitRecoveryEndpointRechecksStateAndAudits(t *testing.T) {
 
 func TestLifecycleMetricsUseOnlyBoundedLabels(t *testing.T) {
 	body := renderLifecycleMetrics(db.LifecycleMetrics{
-		RunsByStatus:                    map[string]int{"COMMITTING": 2, "run-user-input": 99},
-		RunsByCommitPhase:               map[string]int{"INTENT": 1},
-		TasksByStatus:                   map[string]int{"QUARANTINED": 3},
-		RegistrationsByStatus:           map[string]int{"RETRY_REQUIRED": 1},
-		RegistrationAttemptsByPhase:     map[string]int{"CATALOG_COMMITTED": 1},
-		ReconciliationsByStatus:         map[string]int{"FAILED": 1},
-		ReconciliationsByClassification: map[string]int{"unbounded-error-message": 5},
+		RunsByStatus:                        map[string]int{"COMMITTING": 2, "run-user-input": 99},
+		RunsByCommitPhase:                   map[string]int{"INTENT": 1},
+		TasksByStatus:                       map[string]int{"QUARANTINED": 3},
+		RegistrationsByStatus:               map[string]int{"RETRY_REQUIRED": 1},
+		RegistrationAttemptsByPhase:         map[string]int{"CATALOG_COMMITTED": 1},
+		ReconciliationsByStatus:             map[string]int{"FAILED": 1},
+		ReconciliationsByClassification:     map[string]int{"unbounded-error-message": 5},
+		OldestRegistrationAgeSeconds:        map[string]float64{"PENDING": 120, "run-user-input": 9},
+		OldestRegistrationAttemptAgeSeconds: 3600,
+		ExpiredRegistrationAttemptLeases:    1,
+		RunsOperatorActionRequired:          2,
 	})
 	for _, want := range []string{
+		`orabbit_oldest_registration_age_seconds{status="PENDING"} 120`,
+		`orabbit_oldest_registration_age_seconds{status="BLOCKED"} 0`,
+		`orabbit_oldest_registration_attempt_age_seconds 3600`,
+		`orabbit_registration_attempt_leases_expired 1`,
+		`orabbit_runs_operator_action_required 2`,
 		`orabbit_runs{status="COMMITTING"} 2`,
 		`orabbit_tasks_quarantined 3`,
 		`orabbit_reconciliations_by_classification{classification="OTHER"} 5`,

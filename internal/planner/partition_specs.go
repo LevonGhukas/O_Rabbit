@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/connectors"
+	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 )
 
 // PartitionSpecSingleWithRecordPath constructs a single-task partition
@@ -36,19 +37,6 @@ func PartitionSpecSingleWithFileOptions(table, sourceMode, queryHash, recordPath
 	}
 	b, _ := json.Marshal(part)
 	return json.RawMessage(b)
-}
-
-func PartitionSpecCDCStream(table, sourceMode, queryHash string) json.RawMessage {
-	part := map[string]any{
-		"type":        "cdc_stream",
-		"source_mode": sourceMode,
-		"table":       table,
-	}
-	if strings.TrimSpace(queryHash) != "" {
-		part["query_hash"] = strings.TrimSpace(queryHash)
-	}
-	b, _ := json.Marshal(part)
-	return b
 }
 
 func partitionSpecSQLCursorRange(table, sourceMode, queryHash, whereClause string, selectColumns []string, columnTypes map[string]string, column string, domain connectors.CursorDomain, lower string, lowerExclusive bool, upper string, upperInclusive bool, outputPart int, snapshotCtx string) json.RawMessage {
@@ -116,4 +104,21 @@ func partitionSpecSQLCursorSingle(table, sourceMode, queryHash, whereClause stri
 	}
 	b, _ := json.Marshal(part)
 	return b
+}
+
+// singleCursorSpecWithUpper pins a single-task cursor spec to the plan-time
+// maximum as an inclusive upper bound when source reconciliation is enabled.
+// Extraction and the commit-time count then select the same rows; without a
+// bound the count would also cover rows inserted after planning.
+func singleCursorSpecWithUpper(o jobopts.Options, spec json.RawMessage, maxValue string) (json.RawMessage, error) {
+	if !o.EffectiveReconciliation().Enabled() || strings.TrimSpace(maxValue) == "" {
+		return spec, nil
+	}
+	var part map[string]any
+	if err := json.Unmarshal(spec, &part); err != nil {
+		return nil, err
+	}
+	part["upper"] = strings.TrimSpace(maxValue)
+	part["upper_inclusive"] = true
+	return json.Marshal(part)
 }

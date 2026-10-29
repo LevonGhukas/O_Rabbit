@@ -62,6 +62,28 @@ var (
 		Help:    "Duration of one run publication attempt, by outcome.",
 		Buckets: prometheus.ExponentialBuckets(0.1, 3, 10), // 100ms .. ~33m
 	}, []string{"outcome"})
+
+	catalogSlotsCapacity = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "orabbit_catalog_work_slots_capacity",
+		Help: "Catalog work slots: registrations and reconciliations the master runs at once.",
+	})
+	catalogSlotsInUse = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "orabbit_catalog_work_slots_in_use",
+		Help: "Catalog work slots held by running registrations and reconciliations.",
+	})
+	catalogWorkRejected = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "orabbit_catalog_work_rejected_total",
+		Help: "Registration or reconciliation attempts deferred because every catalog work slot was busy.",
+	})
+
+	rateLimited = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "orabbit_rate_limited_total",
+		Help: "Requests rejected by a rate limit (HTTP 429 or gRPC ResourceExhausted), by surface and reason.",
+	}, []string{"surface", "reason"})
+	authFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "orabbit_auth_failures_total",
+		Help: "Rejected credentials counted against a client's failed-authentication budget, by surface.",
+	}, []string{"surface"})
 )
 
 func init() {
@@ -70,6 +92,8 @@ func init() {
 		httpHandled, httpLatency,
 		taskResults, taskRows, taskBytesRead, taskBytesWritten,
 		commitLatency,
+		catalogSlotsCapacity, catalogSlotsInUse, catalogWorkRejected,
+		rateLimited, authFailures,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
@@ -152,6 +176,29 @@ func ObserveTaskResult(status string, rowsRead, bytesRead, bytesWritten int64) {
 func ObserveCommit(outcome string, d time.Duration) {
 	commitLatency.WithLabelValues(outcome).Observe(d.Seconds())
 }
+
+// SetCatalogWorkCapacity records how many catalog work slots exist.
+func SetCatalogWorkCapacity(n int) { catalogSlotsCapacity.Set(float64(n)) }
+
+// ObserveCatalogWork records a catalog slot taken (acquired) or not.
+func ObserveCatalogWork(acquired bool) {
+	if acquired {
+		catalogSlotsInUse.Inc()
+		return
+	}
+	catalogWorkRejected.Inc()
+}
+
+// ReleaseCatalogWork records a catalog slot given back.
+func ReleaseCatalogWork() { catalogSlotsInUse.Dec() }
+
+// ObserveRateLimited records one request rejected by a rate limit. Callers
+// pass fixed surface and reason names, never client data, so cardinality
+// stays bounded.
+func ObserveRateLimited(surface, reason string) { rateLimited.WithLabelValues(surface, reason).Inc() }
+
+// ObserveAuthFailure records one rejected credential on surface.
+func ObserveAuthFailure(surface string) { authFailures.WithLabelValues(surface).Inc() }
 
 // WriteText appends every registered metric in Prometheus text format.
 func WriteText(w http.ResponseWriter) error {

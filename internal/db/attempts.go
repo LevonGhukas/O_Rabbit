@@ -307,9 +307,15 @@ func (s *Store) InsertAttemptRejectionEvent(ctx context.Context, taskID, attempt
 	})
 }
 
-func resultDigest(status string, objects []byte, rows, bytesRead, bytesWritten int64, message string) string {
+// resultDigest identifies a task result so an identical retry is accepted and
+// a different one conflicts. hwmBoundary is appended only when present, which
+// keeps the digest of results without one unchanged.
+func resultDigest(status string, objects []byte, rows, bytesRead, bytesWritten int64, message string, hwmBoundary []byte) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\x00%s\x00%d\x00%d\x00%d\x00%s", status, objects, rows, bytesRead, bytesWritten, message)
+	if len(hwmBoundary) > 0 {
+		fmt.Fprintf(h, "\x00%s", hwmBoundary)
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -318,18 +324,24 @@ func (s *Store) CompleteTaskAttempt(ctx context.Context, bootID, taskID, attempt
 }
 
 func (s *Store) CompleteTaskAttemptAt(ctx context.Context, bootID, taskID, attemptID, token, workerID, status string, errMsg *string, objects []byte, rows, bytesRead, bytesWritten int64, masterNow time.Time) (bool, string, string, error) {
-	return s.completeTaskAttemptAt(ctx, bootID, taskID, attemptID, token, workerID, status, errMsg, objects, rows, bytesRead, bytesWritten, masterNow, nil, false, "")
+	return s.completeTaskAttemptAt(ctx, bootID, taskID, attemptID, token, workerID, status, errMsg, objects, rows, bytesRead, bytesWritten, masterNow, nil, false, "", nil)
 }
 
-func (s *Store) CompleteTaskAttemptWithFailureClassAt(ctx context.Context, bootID, taskID, attemptID, token, workerID, status string, errMsg *string, failureClass string, objects []byte, rows, bytesRead, bytesWritten int64, masterNow time.Time) (bool, string, string, error) {
-	return s.completeTaskAttemptAt(ctx, bootID, taskID, attemptID, token, workerID, status, errMsg, objects, rows, bytesRead, bytesWritten, masterNow, nil, false, failureClass)
+// CompleteTaskAttemptWithFailureClassAt records a result without artifact
+// records. hwmBoundary is the task's reported high-water-mark boundary JSON,
+// or nil when the task did not track one.
+func (s *Store) CompleteTaskAttemptWithFailureClassAt(ctx context.Context, bootID, taskID, attemptID, token, workerID, status string, errMsg *string, failureClass string, objects []byte, rows, bytesRead, bytesWritten int64, masterNow time.Time, hwmBoundary []byte) (bool, string, string, error) {
+	return s.completeTaskAttemptAt(ctx, bootID, taskID, attemptID, token, workerID, status, errMsg, objects, rows, bytesRead, bytesWritten, masterNow, nil, false, failureClass, hwmBoundary)
 }
 
 func (s *Store) CompleteTaskAttemptWithArtifactsAt(ctx context.Context, bootID, taskID, attemptID, token, workerID, status string, errMsg *string, records []artifact.Record, rows, bytesRead, bytesWritten int64, masterNow time.Time) (bool, string, string, error) {
-	return s.CompleteTaskAttemptWithArtifactsAndFailureClassAt(ctx, bootID, taskID, attemptID, token, workerID, status, errMsg, "", records, rows, bytesRead, bytesWritten, masterNow)
+	return s.CompleteTaskAttemptWithArtifactsAndFailureClassAt(ctx, bootID, taskID, attemptID, token, workerID, status, errMsg, "", records, rows, bytesRead, bytesWritten, masterNow, nil)
 }
 
-func (s *Store) CompleteTaskAttemptWithArtifactsAndFailureClassAt(ctx context.Context, bootID, taskID, attemptID, token, workerID, status string, errMsg *string, failureClass string, records []artifact.Record, rows, bytesRead, bytesWritten int64, masterNow time.Time) (bool, string, string, error) {
+// CompleteTaskAttemptWithArtifactsAndFailureClassAt records a result with
+// verified artifact records; hwmBoundary is as in
+// CompleteTaskAttemptWithFailureClassAt.
+func (s *Store) CompleteTaskAttemptWithArtifactsAndFailureClassAt(ctx context.Context, bootID, taskID, attemptID, token, workerID, status string, errMsg *string, failureClass string, records []artifact.Record, rows, bytesRead, bytesWritten int64, masterNow time.Time, hwmBoundary []byte) (bool, string, string, error) {
 	sort.Slice(records, func(i, j int) bool {
 		if records[i].FileIndex != records[j].FileIndex {
 			return records[i].FileIndex < records[j].FileIndex
@@ -348,16 +360,16 @@ func (s *Store) CompleteTaskAttemptWithArtifactsAndFailureClassAt(ctx context.Co
 	if err != nil {
 		return false, "", "", err
 	}
-	return s.completeTaskAttemptAt(ctx, bootID, taskID, attemptID, token, workerID, status, errMsg, objects, rows, bytesRead, bytesWritten, masterNow, records, true, failureClass)
+	return s.completeTaskAttemptAt(ctx, bootID, taskID, attemptID, token, workerID, status, errMsg, objects, rows, bytesRead, bytesWritten, masterNow, records, true, failureClass, hwmBoundary)
 }
 
-func (s *Store) completeTaskAttemptAt(ctx context.Context, bootID, taskID, attemptID, token, workerID, status string, errMsg *string, objects []byte, rows, bytesRead, bytesWritten int64, masterNow time.Time, records []artifact.Record, strict bool, failureClassOverride string) (bool, string, string, error) {
+func (s *Store) completeTaskAttemptAt(ctx context.Context, bootID, taskID, attemptID, token, workerID, status string, errMsg *string, objects []byte, rows, bytesRead, bytesWritten int64, masterNow time.Time, records []artifact.Record, strict bool, failureClassOverride string, hwmBoundary []byte) (bool, string, string, error) {
 	digest := resultDigest(status, objects, rows, bytesRead, bytesWritten, func() string {
 		if errMsg != nil {
 			return *errMsg
 		}
 		return ""
-	}())
+	}(), hwmBoundary)
 	now := nowUTC()
 	var accepted bool
 	var msg, final string
@@ -439,7 +451,7 @@ func (s *Store) completeTaskAttemptAt(ctx context.Context, bootID, taskID, attem
 		if n, _ := res.RowsAffected(); n != 1 {
 			return ErrAttemptFenced
 		}
-		res, err = tx.ExecContext(ctx, `UPDATE tasks SET status=?,error_message=?,parquet_objects_json=?,rows_read=?,bytes_read=?,bytes_written=?,finished_at=?,current_attempt_id=NULL WHERE id=? AND status='RUNNING' AND current_attempt_id=?`, status, errMsg, string(objects), rows, bytesRead, bytesWritten, now, taskID, attemptID)
+		res, err = tx.ExecContext(ctx, `UPDATE tasks SET status=?,error_message=?,parquet_objects_json=?,hwm_boundary_json=?,rows_read=?,bytes_read=?,bytes_written=?,finished_at=?,current_attempt_id=NULL WHERE id=? AND status='RUNNING' AND current_attempt_id=?`, status, errMsg, string(objects), string(hwmBoundary), rows, bytesRead, bytesWritten, now, taskID, attemptID)
 		if err != nil {
 			return err
 		}
