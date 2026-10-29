@@ -291,13 +291,29 @@ func OpenCursorReader(ctx context.Context, engine, dsn string) (TableReader, err
 	if err != nil {
 		return nil, ClassifyConnectorError(err)
 	}
-	if sqr, ok := r.(SourceQueryReader); ok {
-		return &errorWrappedSourceQueryReader{
-			errorWrappedTableReader: errorWrappedTableReader{inner: r},
-			innerQueryReader:        sqr,
-		}, nil
+	return wrapCursorReader(r), nil
+}
+
+// wrapCursorReader classifies the reader's errors while keeping the optional
+// capabilities the planner detects by type assertion (query mode, snapshot
+// export) exactly as the underlying connector provides them.
+func wrapCursorReader(r TableReader) TableReader {
+	base := errorWrappedTableReader{inner: r}
+	exporter, canExport := r.(SnapshotExporter)
+	sqr, canQuery := r.(SourceQueryReader)
+	switch {
+	case canQuery && canExport:
+		return &errorWrappedSnapshotSourceQueryReader{
+			errorWrappedSourceQueryReader: errorWrappedSourceQueryReader{errorWrappedTableReader: base, innerQueryReader: sqr},
+			innerExporter:                 exporter,
+		}
+	case canQuery:
+		return &errorWrappedSourceQueryReader{errorWrappedTableReader: base, innerQueryReader: sqr}
+	case canExport:
+		return &errorWrappedSnapshotTableReader{errorWrappedTableReader: base, innerExporter: exporter}
+	default:
+		return &base
 	}
-	return &errorWrappedTableReader{inner: r}, nil
 }
 
 // OpenIntRangeReader is a backwards-compatible alias for the old int-range reader API.
@@ -380,6 +396,26 @@ func (w *errorWrappedSourceQueryReader) DescribeQueryNotNull(ctx context.Context
 	}
 	r, err := d.DescribeQueryNotNull(ctx, query)
 	return r, ClassifyConnectorError(err)
+}
+
+type errorWrappedSnapshotTableReader struct {
+	errorWrappedTableReader
+	innerExporter SnapshotExporter
+}
+
+func (w *errorWrappedSnapshotTableReader) ExportSnapshot(ctx context.Context) (string, error) {
+	s, err := w.innerExporter.ExportSnapshot(ctx)
+	return s, ClassifyConnectorError(err)
+}
+
+type errorWrappedSnapshotSourceQueryReader struct {
+	errorWrappedSourceQueryReader
+	innerExporter SnapshotExporter
+}
+
+func (w *errorWrappedSnapshotSourceQueryReader) ExportSnapshot(ctx context.Context) (string, error) {
+	s, err := w.innerExporter.ExportSnapshot(ctx)
+	return s, ClassifyConnectorError(err)
 }
 
 type errorWrappedDocumentReader struct {

@@ -72,7 +72,10 @@ func (p *Postgres) ExportSnapshot(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("failed to acquire snapshot conn: %w", err)
 	}
 
-	tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	// database/sql rolls a transaction back when its context ends, and the
+	// planning context ends as soon as the run is planned, long before workers
+	// import the snapshot. The background hold below bounds its lifetime instead.
+	tx, err := conn.BeginTx(context.WithoutCancel(ctx), &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		conn.Close()
 		detachedDB.Close()
