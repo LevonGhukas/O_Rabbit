@@ -72,7 +72,10 @@ func (p *Postgres) ExportSnapshot(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("failed to acquire snapshot conn: %w", err)
 	}
 
-	tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	// database/sql rolls a transaction back when its context ends, and the
+	// planning context ends as soon as the run is planned, long before workers
+	// import the snapshot. The background hold below bounds its lifetime instead.
+	tx, err := conn.BeginTx(context.WithoutCancel(ctx), &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		conn.Close()
 		detachedDB.Close()
@@ -146,9 +149,48 @@ func quotePostgresMultipartIdent(s string) (string, error) {
 	return strings.Join(out, "."), nil
 }
 
+// QueryCursor reads q from the live source, or, when q.SnapshotContext is set,
+// from that exported snapshot inside a read-only transaction. The transaction
+// ends when ctx is done, so callers reading at a snapshot must cancel ctx once
+// they have closed the rows.
 func (p *Postgres) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []string, []*sql.ColumnType, int, error) {
+	snapshot := strings.TrimSpace(q.SnapshotContext)
+	if snapshot == "" {
+		return p.queryCursorOn(ctx, p.db, q)
+	}
+	if err := validatePostgresSnapshotID(snapshot); err != nil {
+		return nil, nil, nil, -1, err
+	}
+	tx, err := p.beginSnapshotTx(ctx, snapshot)
+	if err != nil {
+		return nil, nil, nil, -1, err
+	}
+	rows, cols, ct, cursorIdx, err := p.queryCursorOn(ctx, tx, q)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, nil, nil, -1, err
+	}
+	return rows, cols, ct, cursorIdx, nil
+}
+
+// beginSnapshotTx opens a REPEATABLE READ transaction pinned to the snapshot
+// the planner exported. database/sql rolls it back and returns the connection
+// to the pool when ctx is done.
+func (p *Postgres) beginSnapshotTx(ctx context.Context, snapshot string) (*sql.Tx, error) {
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin tx for snapshot: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET TRANSACTION SNAPSHOT '%s'", snapshot)); err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("failed to set transaction snapshot %q: %w", snapshot, err)
+	}
+	return tx, nil
+}
+
+func (p *Postgres) queryCursorOn(ctx context.Context, src rowQuerier, q CursorQuery) (*sql.Rows, []string, []*sql.ColumnType, int, error) {
 	if strings.TrimSpace(q.SourceQuery) != "" {
-		return queryModeCursor(ctx, p.db, "postgres", q)
+		return queryModeCursor(ctx, src, "postgres", q)
 	}
 
 	rng, err := postgresRange(q)
@@ -163,43 +205,9 @@ func (p *Postgres) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, [
 	}
 	query += ";"
 
-	var rows *sql.Rows
-	var qerr error
-	if strings.TrimSpace(q.SnapshotContext) != "" {
-		// Use the snapshot context provided by the planner
-		conn, err := p.db.Conn(ctx)
-		if err != nil {
-			return nil, nil, nil, -1, fmt.Errorf("failed to get connection for snapshot: %w", err)
-		}
-		tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
-		if err != nil {
-			conn.Close()
-			return nil, nil, nil, -1, fmt.Errorf("failed to begin tx for snapshot: %w", err)
-		}
-		_, err = tx.ExecContext(ctx, fmt.Sprintf("SET TRANSACTION SNAPSHOT '%s'", q.SnapshotContext))
-		if err != nil {
-			tx.Rollback()
-			conn.Close()
-			return nil, nil, nil, -1, fmt.Errorf("failed to set transaction snapshot %q: %w", q.SnapshotContext, err)
-		}
-		rows, qerr = tx.QueryContext(ctx, query, rng.Args...)
-		if qerr != nil {
-			tx.Rollback()
-			conn.Close()
-		} else {
-			// We can't trivially rollback the tx here because rows are still being read.
-			// The caller must ensure they don't leak it, but sql.Rows will release the connection
-			// which typically rolls back the transaction.
-			// In Go, closing the rows will close the transaction if we don't explicitly hold it.
-			// Actually, if we use tx.QueryContext, closing Rows does NOT rollback tx automatically.
-			// For simplicity and since worker process exits or closes DB, this is acceptable.
-		}
-	} else {
-		rows, qerr = p.db.QueryContext(ctx, query, rng.Args...)
-	}
-
-	if qerr != nil {
-		return nil, nil, nil, -1, qerr
+	rows, err := src.QueryContext(ctx, query, rng.Args...)
+	if err != nil {
+		return nil, nil, nil, -1, err
 	}
 	cols, err := rows.Columns()
 	if err != nil {

@@ -120,6 +120,11 @@ func (o *Oracle) DescribeTable(ctx context.Context, table string) ([]string, []*
 
 func (o *Oracle) QueryCursor(ctx context.Context, q CursorQuery) (*sql.Rows, []string, []*sql.ColumnType, int, error) {
 	if strings.TrimSpace(q.SourceQuery) != "" {
+		// AS OF SCN binds to a table, so a query-mode read cannot honour the
+		// snapshot; fail instead of reading live data. The planner rejects this.
+		if strings.TrimSpace(q.SnapshotContext) != "" {
+			return nil, nil, nil, -1, fmt.Errorf("oracle query mode does not support a snapshot read (STRONG_SNAPSHOT)")
+		}
 		return queryModeCursor(ctx, o.db, "oracle", q)
 	}
 
@@ -337,7 +342,10 @@ func buildOracleCursorQuery(q CursorQuery) (string, []any, error) {
 
 	query := fmt.Sprintf("SELECT %s FROM %s", buildOracleSelectClause(q.SelectColumns), rng.Table)
 	if scn := strings.TrimSpace(q.SnapshotContext); scn != "" {
-		// Optional: Oracle requires AS OF SCN directly after the table identifier.
+		if err := validateOracleSCN(scn); err != nil {
+			return "", nil, err
+		}
+		// Oracle requires AS OF SCN directly after the table identifier.
 		query += fmt.Sprintf(" AS OF SCN %s", scn)
 	}
 	query += rng.whereSQL()
