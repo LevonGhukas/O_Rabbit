@@ -261,6 +261,9 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 	if err := jobopts.ValidateReconciliationEngine(o, srcEngine); err != nil {
 		return db.Run{}, nil, failure.NewFailure(failure.FailureConfigurationInvalid, false, true, err)
 	}
+	if err := jobopts.ValidateWhereClauseEngine(o, srcEngine); err != nil {
+		return db.Run{}, nil, failure.NewFailure(failure.FailureConfigurationInvalid, false, true, err)
+	}
 	if strings.TrimSpace(o.WhereClause) != "" {
 		if err := connectors.ValidateWhereClause(o.WhereClause); err != nil {
 			return db.Run{}, nil, failure.NewFailure(failure.FailureConfigurationInvalid, false, true, fmt.Errorf("options_json.where_clause is invalid: %w", err))

@@ -401,8 +401,8 @@ Limits and cost:
 - Needs `partition_strategy: ordered_cursor` and a source of postgres, mysql,
   mariadb, mssql, oracle, clickhouse or trino. Other engines are rejected when
   the job is saved.
-- In query mode the job cannot also set `where_clause` (it is ignored in query
-  mode today, see TID-982); put the filter in the query.
+- In query mode `where_clause` filters the query result and the count applies
+  the same filter.
 - One extra `COUNT(*)` per task on the source at commit time, so keep an index on
   the cursor column. The counts run inside the commit timeout
   (`ORABBIT_COMMIT_TIMEOUT`); a commit that exceeds it is interrupted and retried
@@ -721,8 +721,10 @@ contract is [proto/controlplane.proto](proto/controlplane.proto).
     and `<name>_BURST` (events allowed at once). Invalid values stop the master
     at startup.
 - **Source safety.** Query mode accepts a single `SELECT`/`WITH` statement;
-  `where_clause` must be one boolean expression. A read-only database user is
-  still the only control that holds on every engine.
+  `where_clause` must be one boolean expression. In query mode it filters the
+  query result, so it names result columns (not the inner query's table
+  aliases); Cassandra and MongoDB query mode reject it. A read-only database
+  user is still the only control that holds on every engine.
 
 Generate secrets without writing them to files under version control:
 
