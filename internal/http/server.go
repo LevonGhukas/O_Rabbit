@@ -9,8 +9,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -24,9 +22,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/auth"
 	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
-	"github.com/LevonGhukas/O_Rabbit/internal/httperr"
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
 	sshops "github.com/LevonGhukas/O_Rabbit/internal/ops/ssh"
@@ -52,6 +50,7 @@ type Server struct {
 	k                crypto.Key
 	authToken        string
 	remoteOpsToken   string
+	remoteOpsOptIn   bool
 	status           StatusInfo
 	streams          *StreamHub
 	runPlanner       runPlannerFunc
@@ -136,9 +135,9 @@ func (s *Server) Handler() http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/ready", s.handleReady)
-	mux.HandleFunc("/metrics", s.handleMetrics)
+	mux.HandleFunc("/metrics", authorized(readWrite(auth.ScopeJobsWrite), s.handleMetrics))
 
-	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/status", authorized(readWrite(auth.ScopeJobsWrite), func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeMethodNotAllowed(w, r.Method, http.MethodGet)
 			return
@@ -151,7 +150,7 @@ func (s *Server) Handler() http.Handler {
 			StatusInfo
 			Leadership db.Leadership `json:"leadership"`
 		}{s.status, s.leadership.Status()})
-	})
+	}))
 
 	s.registerAPIRoutes(mux)
 
@@ -160,13 +159,13 @@ func (s *Server) Handler() http.Handler {
 	})
 
 	// Metrics wrap the mux directly so they see the matched route pattern.
-	handler := s.withRemoteOpsGuard(withBodyLimit(telemetry.HTTPMiddleware(mux)))
+	handler := withBodyLimit(telemetry.HTTPMiddleware(mux))
 	if s.leadership != nil {
 		handler = s.withLeadership(handler)
 	}
-	if strings.TrimSpace(s.authToken) != "" {
-		handler = s.withAuth(handler)
-	}
+	// Authentication is outermost (after tracing) so every route, including
+	// unknown ones and /metrics, requires a principal.
+	handler = s.withAuthentication(handler)
 	// Rate limits run before authentication. Tracing is outermost so rejected
 	// requests are traced too. It is a no-op unless OTLP tracing is configured.
 	return otelhttp.NewHandler(s.withRecoverer(s.withRateLimit(handler)), "orabbit-http",
@@ -221,24 +220,6 @@ func (s *Server) Serve(ctx context.Context, addr string) error {
 		}
 		return err
 	}
-}
-
-func (s *Server) withAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Remote operations are authenticated by their own token in
-		// withRemoteOpsGuard, never by the API token.
-		if r.URL.Path == "/healthz" || r.URL.Path == "/ready" || isRemoteOpsPath(r.URL.Path) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if !constantTimeBearerMatch(r.Header.Get("Authorization"), s.authToken) {
-			s.recordAuthFailure(r, surfaceHTTPAPI)
-			w.Header().Set("WWW-Authenticate", `Bearer realm="orabbit"`)
-			writeUnauthorized(w)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 // maxRequestBodyBytes bounds every request body; the largest legitimate
@@ -296,42 +277,6 @@ func isRemoteOpsPath(path string) bool {
 		}
 	}
 	return false
-}
-
-// withRemoteOpsGuard keeps remote operations separate from the data API: they
-// are unavailable unless enabled, and then accept only their own token, so a
-// leaked API token cannot execute commands on remote hosts.
-func (s *Server) withRemoteOpsGuard(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isRemoteOpsPath(r.URL.Path) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if s.remoteOpsToken == "" {
-			writeAPIError(w, http.StatusNotFound, httperr.CodeNotFound, "remote operations are disabled; set ORABBIT_REMOTE_OPS_AUTH_TOKEN to enable them", nil)
-			return
-		}
-		if !constantTimeBearerMatch(r.Header.Get("Authorization"), s.remoteOpsToken) {
-			s.recordAuthFailure(r, surfaceHTTPRemoteOps)
-			w.Header().Set("WWW-Authenticate", `Bearer realm="orabbit-remote-ops"`)
-			writeUnauthorized(w)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-func constantTimeBearerMatch(header, expectedToken string) bool {
-	const prefix = "Bearer "
-	header = strings.TrimSpace(header)
-	validScheme := strings.HasPrefix(header, prefix)
-	presented := header
-	if validScheme {
-		presented = strings.TrimPrefix(header, prefix)
-	}
-	presentedDigest := sha256.Sum256([]byte(presented))
-	expectedDigest := sha256.Sum256([]byte(expectedToken))
-	return validScheme && subtle.ConstantTimeCompare(presentedDigest[:], expectedDigest[:]) == 1
 }
 
 // handleWorkers handles the /workers endpoint, which returns a list of workers that have heartbeated recently.

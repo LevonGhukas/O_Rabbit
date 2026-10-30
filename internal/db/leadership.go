@@ -117,8 +117,13 @@ func (s *Store) RecordLeadershipEvent(ctx context.Context, instanceID string, ep
 	_, _ = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO master_leadership_history(id,instance_id,epoch,event_type,occurred_at_ms,metadata_json) VALUES(?,?,?,?,`+sqliteNowMS()+`,?)`, id, instanceID, epoch, eventType, string(body))
 }
 
+// fencedTables are guarded by TEMP triggers, which exist only on this
+// process's writer connection. Writes from a separate process (the
+// `orabbit-master credentials` CLI, which must work while a master runs) are
+// therefore never fenced, while a stale master writing credentials or audit
+// rows through the HTTP API is rejected like any other mutation.
 var fencedTables = []string{
-	"connections", "jobs", "runs", "tasks", "events", "hwm", "workers", "audit_log",
+	"connections", "jobs", "runs", "tasks", "events", "hwm", "workers", "audit_log", "api_credentials",
 	"servers", "server_credentials", "command_executions", "deployments", "config_versions",
 	"task_attempts", "task_artifacts", "iceberg_registrations", "iceberg_registration_attempts",
 	"iceberg_reconciliation_attempts",

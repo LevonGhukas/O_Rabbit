@@ -551,6 +551,68 @@ func TestMigrationV31MakesWriteModeExplicitAndKeepsBehavior(t *testing.T) {
 	}
 }
 
+// TestMigrationV35AddsCredentialsToDBAtMainV34 upgrades a database already at
+// main's V33 (source reconciliation) and V34 (Iceberg maintenance): the
+// credentials migration must still run, not be skipped as already applied.
+func TestMigrationV35AddsCredentialsToDBAtMainV34(t *testing.T) {
+	ctx := context.Background()
+	raw := openRawTestDB(t)
+	for _, m := range migrations {
+		if m.version >= 35 {
+			break
+		}
+		if m.sql != "" {
+			if _, err := raw.ExecContext(ctx, m.sql); err != nil {
+				t.Fatal(err)
+			}
+		} else if m.apply != nil {
+			if err := m.apply(ctx, raw); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := raw.ExecContext(ctx, `INSERT INTO schema_migrations(version,applied_at) VALUES(?,'2026-10-28T00:00:00Z')`, m.version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO source_reconciliations(run_id,task_id,method,consistency,observed_at,status) VALUES('run-1','task-1','count','strong','2026-10-28T00:00:00Z','MATCHED')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO audit_log(id,ts,actor_type,actor_id,action,resource_type,resource_id,metadata_json) VALUES('audit-1','2026-10-28T00:00:00Z','api','','job.create','job','job-1','{}')`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Migrate(ctx, raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, raw); err != nil { // idempotent
+		t.Fatal(err)
+	}
+
+	var credentials int
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM api_credentials`).Scan(&credentials); err != nil {
+		t.Fatalf("api_credentials missing after upgrade: %v", err)
+	}
+	var principal, credentialID string
+	if err := raw.QueryRowContext(ctx, `SELECT principal, credential_id FROM audit_log WHERE id='audit-1'`).Scan(&principal, &credentialID); err != nil {
+		t.Fatalf("audit_log row or principal columns missing after upgrade: %v", err)
+	}
+	if principal != "" || credentialID != "" {
+		t.Errorf("principal=%q credential_id=%q, want empty defaults", principal, credentialID)
+	}
+	var status string
+	if err := raw.QueryRowContext(ctx, `SELECT status FROM source_reconciliations WHERE run_id='run-1'`).Scan(&status); err != nil || status != "MATCHED" {
+		t.Fatalf("source_reconciliations row lost: status=%q err=%v", status, err)
+	}
+	var maintenance int
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM maintenance_operations`).Scan(&maintenance); err != nil {
+		t.Fatalf("maintenance_operations missing after upgrade: %v", err)
+	}
+	var v35 int
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version=35`).Scan(&v35); err != nil || v35 != 1 {
+		t.Fatalf("V35 recorded %d times, err=%v", v35, err)
+	}
+}
+
 // Two branches that each add "the next" migration must not both claim one
 // version: the duplicate would silently never run on databases that already
 // applied the other. Released versions must also never be renumbered.

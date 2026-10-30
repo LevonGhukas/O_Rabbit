@@ -44,6 +44,7 @@ incremental exports from where the last run stopped.
 - [Iceberg registration](#iceberg-registration)
 - [HTTP API](#http-api)
 - [Security model](#security-model)
+- [Scoped credentials and RBAC](#scoped-credentials-and-rbac)
 - [Configuration](#configuration)
 - [Deployment](#deployment)
 - [Observability](#observability)
@@ -646,8 +647,10 @@ The master can manage registered SSH servers: system info, Docker containers
 and logs, configuration files and deployments (`/servers`, `/deployments`,
 `/executions` under `/api/v1`). These routes are separate from the data API:
 
-- They return 404 unless `ORABBIT_REMOTE_OPS_AUTH_TOKEN` is set, and accept only
-  that token. The API token cannot reach them and vice versa.
+- They return 404 unless `ORABBIT_REMOTE_OPS_AUTH_TOKEN` is set or
+  `ORABBIT_REMOTE_OPS_ENABLED=true`. They accept only the remote-ops token or a
+  scoped credential with the `remote_ops` scope. The legacy API token cannot
+  reach them and vice versa.
 - Every server needs a pinned SSH host key (`host_key_fingerprint`, such as
   `SHA256:...`). Verify it out of band with `ssh-keyscan <host> | ssh-keygen -lf -`.
 
@@ -671,7 +674,8 @@ contract is [proto/controlplane.proto](proto/controlplane.proto).
   Losing or replacing it makes them unreadable, so back it up separately and
   use key rotation (see [Troubleshooting](#troubleshooting)) to change it.
 - **Network defaults.** HTTP and gRPC bind to `127.0.0.1`. A non-loopback HTTP
-  listener requires `ORABBIT_HTTP_AUTH_TOKEN` and must sit behind a
+  listener requires `ORABBIT_HTTP_AUTH_TOKEN` or an active scoped credential
+  (see [Scoped credentials and RBAC](#scoped-credentials-and-rbac)) and must sit behind a
   TLS-terminating proxy. A non-loopback gRPC listener requires
   `ORABBIT_WORKER_AUTH_TOKEN` and gRPC TLS.
 - **Worker identity.** With gRPC TLS, every worker holds a master-issued
@@ -736,6 +740,83 @@ openssl rand -base64 32    # ORABBIT_MASTER_KEY
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
+## Scoped credentials and RBAC
+
+Every API caller is a named principal with scopes. Two principals can hold
+different permissions on the same API, and the audit log records which one acted.
+
+| Scope | Grants |
+|---|---|
+| `read` | All GET/HEAD on runs, jobs, connections (secrets redacted), workers, source engines, SSE, `/metrics`, `/status`; `POST /runs/validate` (dry run) |
+| `jobs:write` | Create, update, delete jobs; submit, cancel, recover and retry runs; maintenance submit |
+| `secrets:admin` | Create, update, delete connections (they hold encrypted secrets) |
+| `workers:admin` | Worker enrollment tokens, worker identity list and revoke (all methods under `/workers/...` except `GET /workers`) |
+| `remote_ops` | Every method on `/servers`, `/deployments`, `/executions` |
+| `credentials:admin` | Every method on `/credentials` |
+
+Authorization matrix (paths are under `/api/v1`; the deprecated aliases share the same policy):
+
+| Route | GET/HEAD | POST/PUT/PATCH/DELETE/OPTIONS |
+|---|---|---|
+| `/jobs`, `/jobs/{id}`, `/jobs/{id}/runs` | `read` | `jobs:write` |
+| `/runs`, `/runs/{id}/...` (cancel, recover, registration retry/cancel) | `read` | `jobs:write` |
+| `/runs/submit`, `/maintenance/submit` | `read` | `jobs:write` |
+| `/runs/validate` | `read` | `read` |
+| `/connections`, `/connections/{id}` | `read` | `secrets:admin` |
+| `/workers` | `read` | `workers:admin` |
+| `/workers/enrollment-tokens`, `/workers/identities...` | `workers:admin` | `workers:admin` |
+| `/servers`, `/deployments`, `/executions` | `remote_ops` | `remote_ops` |
+| `/credentials`, `/credentials/{id}/revoke` | `credentials:admin` | `credentials:admin` |
+| `/source-engines`, `/sse`, `/metrics`, `/status` | `read` | `jobs:write` (these are read-only; other methods return 405 once authorized) |
+| `/healthz`, `/ready` | none | none |
+
+A missing, malformed, expired or revoked credential returns `401`. A valid
+credential without the needed scope returns `403` with code `forbidden` and
+the required scope in the message. Unknown routes need any valid credential.
+
+**Bootstrap.** Create the first admin offline; the command works while the
+master runs and does not take its singleton lock:
+
+```bash
+orabbit-master credentials create --principal alice --kind human \
+  --scopes read,jobs:write,secrets:admin,workers:admin,credentials:admin --ttl 720h
+# prints the token once (orb_<id>_<secret>); only its SHA-256 is stored
+orabbit-master credentials list
+orabbit-master credentials revoke <credential-id>
+```
+
+After that, manage credentials over HTTP with `credentials:admin`:
+`POST /api/v1/credentials` (`{"principal","kind","scopes","ttl_seconds","description"}`),
+`GET /api/v1/credentials`, `POST /api/v1/credentials/{id}/revoke`. A caller can
+only grant scopes it holds, so `remote_ops` credentials are created with the CLI
+unless the caller already has it. Clients keep sending the token as
+`Authorization: Bearer ...` (the CLI reads it from `ORABBIT_HTTP_AUTH_TOKEN`).
+
+**Migrating from shared tokens.** Existing deployments keep working unchanged:
+`ORABBIT_HTTP_AUTH_TOKEN` becomes the principal `legacy-http-token` (all scopes
+except `remote_ops`) and `ORABBIT_REMOTE_OPS_AUTH_TOKEN` becomes
+`legacy-remote-ops-token` (`remote_ops` only). To migrate:
+
+1. Upgrade; the schema migration adds `api_credentials` and the audit columns.
+2. Create a named credential per person and per automation with the least scopes it needs.
+3. Switch each client to its credential (for example set `ORABBIT_HTTP_AUTH_TOKEN` to the new token on the CLI host).
+4. Check `audit_log` (`principal`, `credential_id`) shows no remaining `legacy-*` actors, then remove the legacy environment variables and restart.
+
+**Notes.**
+
+- With no legacy token and no credential row, the API stays open on loopback
+  as before (principal `anonymous`). Once any credential exists, even a revoked
+  one, requests without a valid token get `401`, so revoking the last
+  credential never reopens the API. A non-loopback listener needs the legacy
+  token or at least one active credential at startup.
+- Audit rows carry `actor_type` (`human`, `automation`, `legacy`, `anonymous`,
+  `cli`), `actor_id`/`principal` (the principal name) and `credential_id` (a
+  credential ID or a legacy-token fingerprint). Raw tokens are never stored or logged.
+- Expiry and revocation apply to the next request. Streams already open
+  (SSE) are not cut when their credential is revoked or expires.
+- `last_used_at` is not tracked: it would turn reads into writes and fail on standby masters.
+- OIDC / external identity providers are future work; the principal model is designed to accept them.
+
 ## Configuration
 
 Flags override environment variables. Example files:
@@ -756,7 +837,8 @@ Flags override environment variables. Example files:
 | `ORABBIT_GRPC_ADDR` | `127.0.0.1:9102` | gRPC listen address |
 | `ORABBIT_HTTP_AUTH_TOKEN` | empty | Bearer token for the HTTP API and SSE |
 | `ORABBIT_WORKER_AUTH_TOKEN` | empty | Bearer token for worker RPCs; required for non-loopback gRPC |
-| `ORABBIT_REMOTE_OPS_AUTH_TOKEN` | empty | Enables the remote operations API and is its only token; must differ from the API token |
+| `ORABBIT_REMOTE_OPS_AUTH_TOKEN` | empty | Legacy shared token that enables the remote operations API; must differ from the API token |
+| `ORABBIT_REMOTE_OPS_ENABLED` | `false` | Enables the remote operations API for scoped credentials with the `remote_ops` scope, without a shared token |
 | `ORABBIT_TLS_CERT_FILE`, `ORABBIT_TLS_KEY_FILE` | empty | Master gRPC certificate and key |
 | `ORABBIT_HTTP_TRUSTED_PROXIES` | empty | Comma-separated proxy IPs/CIDRs whose `X-Forwarded-For` identifies HTTP clients for rate limiting |
 | `ORABBIT_HTTP_RATE_LIMIT_RPS`, `_BURST` | `50`, `200` | Per-client HTTP request limit (probes excluded); see [Security model](#security-model) |

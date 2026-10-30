@@ -11,10 +11,14 @@ import (
 )
 
 type AuditRecord struct {
-	ID           string          `json:"id"`
-	TS           string          `json:"ts"`
-	ActorType    string          `json:"actor_type"`
-	ActorID      string          `json:"actor_id,omitempty"`
+	ID        string `json:"id"`
+	TS        string `json:"ts"`
+	ActorType string `json:"actor_type"`
+	ActorID   string `json:"actor_id,omitempty"`
+	// Principal and CredentialID identify the acting caller. CredentialID is
+	// a credential ID or a legacy-token fingerprint, never a secret.
+	Principal    string          `json:"principal,omitempty"`
+	CredentialID string          `json:"credential_id,omitempty"`
 	Action       string          `json:"action"`
 	ResourceType string          `json:"resource_type"`
 	ResourceID   string          `json:"resource_id"`
@@ -35,7 +39,7 @@ func (s *Store) ListAuditRecords(ctx context.Context, limit int) ([]AuditRecord,
 		limit = 100
 	}
 	rows, err := s.rdb.QueryContext(ctx, `
-		SELECT id, ts, actor_type, actor_id, action, resource_type, resource_id, request_id, before_json, after_json, metadata_json
+		SELECT id, ts, actor_type, actor_id, action, resource_type, resource_id, request_id, before_json, after_json, metadata_json, principal, credential_id
 		FROM audit_log
 		ORDER BY ts DESC, id DESC
 		LIMIT ?;`, limit)
@@ -64,6 +68,8 @@ func (s *Store) ListAuditRecords(ctx context.Context, limit int) ([]AuditRecord,
 			&beforeJSON,
 			&afterJSON,
 			&metaJSON,
+			&rec.Principal,
+			&rec.CredentialID,
 		); err != nil {
 			return nil, err
 		}
@@ -247,8 +253,8 @@ func insertAuditRecordTx(ctx context.Context, tx *sql.Tx, rec AuditRecord) error
 		after = string(rec.AfterJSON)
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO audit_log(id, ts, actor_type, actor_id, action, resource_type, resource_id, request_id, before_json, after_json, metadata_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+		INSERT INTO audit_log(id, ts, actor_type, actor_id, action, resource_type, resource_id, request_id, before_json, after_json, metadata_json, principal, credential_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 		rec.ID,
 		rec.TS,
 		rec.ActorType,
@@ -260,6 +266,8 @@ func insertAuditRecordTx(ctx context.Context, tx *sql.Tx, rec AuditRecord) error
 		before,
 		after,
 		string(rec.MetadataJSON),
+		rec.Principal,
+		rec.CredentialID,
 	)
 	return err
 }

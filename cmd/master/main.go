@@ -30,6 +30,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "rotate-master-key" {
 		os.Exit(runRotateMasterKey(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "credentials" {
+		os.Exit(runCredentials(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "check-db" {
 		os.Exit(runCheckDB(os.Args[2:]))
 	}
@@ -108,6 +111,16 @@ func run() int {
 		return exitFailure
 	}
 	defer st.Close()
+
+	activeCredentials, err := st.CountActiveAPICredentials(ctx)
+	if err != nil {
+		log.Error("count scoped credentials", slog.String("err", err.Error()))
+		return exitFailure
+	}
+	if err := cfg.validateHTTPExposure(activeCredentials); err != nil {
+		log.Error("invalid control-plane authentication configuration", slog.String("err", err.Error()))
+		return exitConfig
+	}
 
 	st.SetMasterKey(k)
 	if err := st.MigrateLegacySecrets(ctx, k); err != nil {
@@ -317,6 +330,7 @@ func run() int {
 	httpSrv := httpapi.NewServer(log, st, bc, k, httpapi.StatusInfo{PID: os.Getpid(), HTTPAddr: cfg.HTTPAddr, GRPCAddr: cfg.GRPCAddr, DBPath: processLock.Identity}, cfg.HTTPAuthToken)
 	httpSrv.SetLeadershipGuard(leadership)
 	httpSrv.SetRemoteOpsToken(cfg.RemoteOpsAuthToken)
+	httpSrv.SetRemoteOpsEnabled(cfg.RemoteOpsEnabled)
 	trustedProxies, err := cfg.RateLimits.trustedProxies()
 	if err != nil {
 		log.Error("invalid rate limit configuration", slog.String("err", err.Error()))
@@ -350,7 +364,8 @@ func run() int {
 		slog.Bool("worker_auth", strings.TrimSpace(cfg.WorkerAuthToken) != ""),
 		slog.Bool("insecure", cfg.Insecure),
 		slog.Bool("worker_identity", !cfg.Insecure),
-		slog.Bool("remote_ops", cfg.RemoteOpsAuthToken != ""),
+		slog.Bool("scoped_credentials", activeCredentials > 0),
+		slog.Bool("remote_ops", cfg.RemoteOpsAuthToken != "" || cfg.RemoteOpsEnabled),
 		slog.String("iceberg_registration", "persisted-run-snapshot"),
 		slog.String("ice_binary", cfg.IceBin),
 		slog.String("log_level", cfg.LogLevel),
