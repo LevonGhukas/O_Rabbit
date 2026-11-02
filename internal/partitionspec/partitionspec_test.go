@@ -33,3 +33,23 @@ func TestParseRejectsMalformedSpec(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestCursorQueryCarriesPlannedSnapshotContext(t *testing.T) {
+	ps, err := Parse([]byte(`{"type":"sql_cursor_range","cursor_column":"id","lower":"0","upper":"9","snapshot_context":"00000003-0000001B-1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ps.CursorQuery("").SnapshotContext; got != "00000003-0000001B-1" {
+		t.Fatalf("SnapshotContext=%q", got)
+	}
+}
+
+func TestCursorQueryWithoutSnapshotContextReadsLive(t *testing.T) {
+	ps, err := Parse([]byte(`{"type":"sql_cursor_range","cursor_column":"id","lower":"0","upper":"9"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ps.CursorQuery("").SnapshotContext; got != "" {
+		t.Fatalf("SnapshotContext=%q", got)
+	}
+}

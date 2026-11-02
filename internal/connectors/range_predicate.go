@@ -48,14 +48,14 @@ func (r rangeSQL) whereSQL() string {
 	return " WHERE " + r.Where
 }
 
-// newRangeSQL builds the predicate for q: the optional where clause first
-// (when honorWhere is set), then the lower bound, then the upper bound.
-func newRangeSQL(q CursorQuery, table, cursor string, honorWhere bool, placeholder func(pos int) string) (rangeSQL, error) {
+// newRangeSQL builds the predicate for q: the optional where clause first,
+// then the lower bound, then the upper bound.
+func newRangeSQL(q CursorQuery, table, cursor string, placeholder func(pos int) string) (rangeSQL, error) {
 	if NormalizeCursorDomain(string(q.CursorDomain)) == CursorDomainUnknown {
 		return rangeSQL{}, fmt.Errorf("cursor domain is required")
 	}
 	clauses := make([]string, 0, 3)
-	if honorWhere && strings.TrimSpace(q.WhereClause) != "" {
+	if strings.TrimSpace(q.WhereClause) != "" {
 		clauses = append(clauses, fmt.Sprintf("(%s)", q.WhereClause))
 	}
 	args := make([]any, 0, 2)

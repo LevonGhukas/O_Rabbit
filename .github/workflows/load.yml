@@ -1,0 +1,42 @@
+name: Load test
+
+# Runs the master load harness (docs/master-scaling.md) on demand. It takes
+# about 25 minutes for all profiles, so it is not part of pull-request CI.
+on:
+  workflow_dispatch:
+    inputs:
+      profiles:
+        description: Comma-separated profile names (empty runs all)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  load:
+    name: Master load harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Run load profiles
+        env:
+          ORABBIT_LOAD: "1"
+          ORABBIT_LOAD_PROFILES: ${{ inputs.profiles }}
+          ORABBIT_LOAD_REPORT: load-report.json
+        run: go test ./internal/grpc -run TestMasterLoad -count=1 -timeout 70m -v
+      - name: SQLite hot-path benchmarks
+        run: go test ./internal/db -run '^$' -bench Hotpath -benchtime 2000x | tee benchmarks.txt
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-report
+          path: |
+            load-report.json
+            benchmarks.txt
+          retention-days: 90

@@ -64,20 +64,28 @@ func (s *Server) taskCredentials(ctx context.Context, runID, attemptID string) (
 	if err != nil {
 		return nil, "", err
 	}
-	srcConn, err := s.st.GetConnection(ctx, r.config.Job.SourceConnectionID)
+	// Compaction tasks read the table's files, never the source database.
+	_, compaction, err := s.st.GetMaintenanceOperationForRun(ctx, runID)
 	if err != nil {
 		return nil, "", err
 	}
-	src, err := decryptSecretMap(s.k, srcConn)
-	if err != nil {
-		return nil, "", fmt.Errorf("source connection secret: %w", err)
+	resp := &grpcpb.GetTaskCredentialsResponse{}
+	if !compaction {
+		srcConn, err := s.st.GetConnection(ctx, r.config.Job.SourceConnectionID)
+		if err != nil {
+			return nil, "", err
+		}
+		src, err := decryptSecretMap(s.k, srcConn)
+		if err != nil {
+			return nil, "", fmt.Errorf("source connection secret: %w", err)
+		}
+		resp.SourceDsn = stringMapValue(src, "dsn")
 	}
 	s3cfg, err := s.targetS3Config(ctx, r)
 	if err != nil {
 		return nil, "", err
 	}
 
-	resp := &grpcpb.GetTaskCredentialsResponse{SourceDsn: stringMapValue(src, "dsn")}
 	tgtMeta := r.target.Metadata
 	mode := strings.ToLower(stringMapValue(tgtMeta, "credential_mode"))
 	switch mode {
@@ -99,7 +107,7 @@ func (s *Server) taskCredentials(ctx context.Context, runID, attemptID string) (
 		Region:          r.target.Region,
 		RoleARN:         stringMapValue(tgtMeta, "sts_role_arn"),
 		SessionName:     stsSessionName(attemptID),
-		Policy:          s3PrefixSessionPolicy(stsPartition(stringMapValue(tgtMeta, "sts_role_arn")), r.target.Bucket, prefix),
+		Policy:          s3SessionPolicy(stsPartition(stringMapValue(tgtMeta, "sts_role_arn")), r.target.Bucket, prefix, compaction, strings.TrimSuffix(r.prefix, "/")),
 		DurationSeconds: int32(durationSeconds),
 		AccessKeyID:     s3cfg.AccessKeyID,
 		SecretAccessKey: s3cfg.SecretAccessKey,
@@ -170,19 +178,23 @@ func assumeRoleWithSTS(ctx context.Context, req stsRequest) (aws.Credentials, er
 	return c, nil
 }
 
-// s3PrefixSessionPolicy limits temporary credentials to the object operations
-// a worker performs, under the run's own staging prefix.
-func s3PrefixSessionPolicy(partition, bucket, prefix string) string {
-	objects := fmt.Sprintf("arn:%s:s3:::%s/%s/*", partition, bucket, prefix)
-	policy := map[string]any{
-		"Version": "2012-10-17",
-		"Statement": []map[string]any{{
+// s3SessionPolicy limits temporary credentials to the object operations a
+// worker performs, under the run's own staging prefix. Compaction tasks also
+// get read-only access to the dataset, whose files they rewrite.
+func s3SessionPolicy(partition, bucket, prefix string, readDataset bool, datasetPrefix string) string {
+	statements := []map[string]any{{
+		"Effect":   "Allow",
+		"Action":   []string{"s3:PutObject", "s3:GetObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"},
+		"Resource": []string{fmt.Sprintf("arn:%s:s3:::%s/%s/*", partition, bucket, prefix)},
+	}}
+	if readDataset {
+		statements = append(statements, map[string]any{
 			"Effect":   "Allow",
-			"Action":   []string{"s3:PutObject", "s3:GetObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"},
-			"Resource": []string{objects},
-		}},
+			"Action":   []string{"s3:GetObject"},
+			"Resource": []string{fmt.Sprintf("arn:%s:s3:::%s/%s/*", partition, bucket, datasetPrefix)},
+		})
 	}
-	b, _ := json.Marshal(policy)
+	b, _ := json.Marshal(map[string]any{"Version": "2012-10-17", "Statement": statements})
 	return string(b)
 }
 

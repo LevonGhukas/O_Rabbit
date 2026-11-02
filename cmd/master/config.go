@@ -86,14 +86,21 @@ func (c masterConfig) validateAuthentication() error {
 		return fmt.Errorf("ORABBIT_REMOTE_OPS_AUTH_TOKEN must differ from ORABBIT_HTTP_AUTH_TOKEN")
 	}
 
-	if !isLoopbackListenAddress(c.HTTPAddr) && strings.TrimSpace(c.HTTPAuthToken) == "" {
-		return fmt.Errorf(
-			"remote HTTP listen address %q requires ORABBIT_HTTP_AUTH_TOKEN",
-			c.HTTPAddr,
-		)
-	}
-
 	return nil
+}
+
+// validateHTTPExposure refuses to serve the HTTP API on a routable address
+// without authentication. It runs after the database is open because scoped
+// credentials live there: either the legacy ORABBIT_HTTP_AUTH_TOKEN or at
+// least one active credential satisfies it.
+func (c masterConfig) validateHTTPExposure(activeCredentials int) error {
+	if isLoopbackListenAddress(c.HTTPAddr) || strings.TrimSpace(c.HTTPAuthToken) != "" || activeCredentials > 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"remote HTTP listen address %q requires ORABBIT_HTTP_AUTH_TOKEN or an active scoped credential (create one with `orabbit-master credentials create`)",
+		c.HTTPAddr,
+	)
 }
 
 func isLoopbackListenAddress(addr string) bool {
@@ -117,8 +124,11 @@ type masterConfig struct {
 	// RemoteOpsAuthToken enables the remote operations API (SSH, Docker,
 	// deployments) and is the only token it accepts. Empty disables it.
 	RemoteOpsAuthToken string
-	WorkerAuthToken    string
-	IceBin             string
+	// RemoteOpsEnabled enables the remote operations API for credentials
+	// carrying the remote_ops scope, without a shared token.
+	RemoteOpsEnabled bool
+	WorkerAuthToken  string
+	IceBin           string
 
 	Insecure bool
 	// WorkerCertTTL is the lifetime of master-issued worker certificates.
@@ -163,6 +173,7 @@ type masterConfig struct {
 	RegistrationMaxAttempts           int
 	ReconciliationLeaseDuration       time.Duration
 	ReconciliationMaxAttempts         int
+	RateLimits                        rateLimitConfig
 }
 
 func loadMasterConfigFromEnv() masterConfig {
@@ -172,6 +183,7 @@ func loadMasterConfigFromEnv() masterConfig {
 		HTTPAddr:                          envutil.EnvOrDefault("ORABBIT_HTTP_ADDR", "127.0.0.1:9100"),
 		HTTPAuthToken:                     strings.TrimSpace(os.Getenv("ORABBIT_HTTP_AUTH_TOKEN")),
 		RemoteOpsAuthToken:                strings.TrimSpace(os.Getenv("ORABBIT_REMOTE_OPS_AUTH_TOKEN")),
+		RemoteOpsEnabled:                  envBoolDefault("ORABBIT_REMOTE_OPS_ENABLED", false),
 		WorkerAuthToken:                   strings.TrimSpace(os.Getenv("ORABBIT_WORKER_AUTH_TOKEN")),
 		IceBin:                            envutil.EnvOrDefault("ORABBIT_ICE_BIN", "ice"),
 		Insecure:                          envBoolDefault("ORABBIT_GRPC_INSECURE", false),
@@ -210,6 +222,7 @@ func loadMasterConfigFromEnv() masterConfig {
 		RegistrationMaxAttempts:           envPositiveIntDefault("ORABBIT_REGISTRATION_MAX_ATTEMPTS", 5),
 		ReconciliationLeaseDuration:       envDurationDefault("ORABBIT_RECONCILIATION_LEASE_DURATION", 30*time.Second),
 		ReconciliationMaxAttempts:         envPositiveIntDefault("ORABBIT_RECONCILIATION_MAX_ATTEMPTS", 5),
+		RateLimits:                        loadRateLimitConfigFromEnv(),
 	}
 }
 
@@ -219,6 +232,7 @@ func bindMasterFlags(cfg *masterConfig) {
 	flag.StringVar(&cfg.HTTPAddr, "http-addr", cfg.HTTPAddr, "HTTP listen address")
 	flag.StringVar(&cfg.HTTPAuthToken, "http-auth-token", cfg.HTTPAuthToken, "HTTP bearer token for API/SSE (required for non-loopback HTTP)")
 	flag.StringVar(&cfg.WorkerAuthToken, "worker-auth-token", cfg.WorkerAuthToken, "Bearer token required on worker gRPC calls (required for non-loopback gRPC)")
+	flag.StringVar(&cfg.RateLimits.TrustedProxies, "http-trusted-proxies", cfg.RateLimits.TrustedProxies, "Comma-separated reverse proxy IPs/CIDRs whose X-Forwarded-For identifies HTTP clients for rate limiting")
 	flag.StringVar(&cfg.IceBin, "ice-bin", cfg.IceBin, "Ice CLI binary path for master-owned engine=ice registration")
 	flag.BoolVar(&cfg.Insecure, "insecure", cfg.Insecure, "Disable gRPC TLS (dev)")
 	flag.BoolVar(&cfg.AllowInsecureRemoteGRPC, "allow-insecure-remote-grpc", cfg.AllowInsecureRemoteGRPC, "Permit plaintext gRPC on a non-loopback listener (isolated private networks only)")

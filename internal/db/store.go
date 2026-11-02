@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	secretcrypto "github.com/LevonGhukas/O_Rabbit/internal/crypto"
@@ -224,6 +225,28 @@ func isSQLiteBusy(err error) bool {
 	return strings.Contains(msg, "SQLITE_BUSY") || strings.Contains(msg, "SQLITE_LOCKED") || strings.Contains(msg, "database is locked")
 }
 
+// busyRetries counts SQLITE_BUSY results that withBusyRetry retried, for
+// PoolStats.
+var busyRetries atomic.Int64
+
+// PoolStats reports contention on the database connections. The writer is a
+// single connection, so its WaitCount and WaitDuration are the time callers
+// spent queued for SQLite's one writer; BusyRetries counts SQLITE_BUSY
+// results that were retried. The values are cumulative since Open.
+type PoolStats struct {
+	Writer      sql.DBStats
+	Readers     sql.DBStats
+	BusyRetries int64
+}
+
+func (s *Store) PoolStats() PoolStats {
+	out := PoolStats{Writer: s.db.Stats(), BusyRetries: busyRetries.Load()}
+	if s.rdb != nil && s.rdb != s.db {
+		out.Readers = s.rdb.Stats()
+	}
+	return out
+}
+
 func withBusyRetry(ctx context.Context, fn func() error) error {
 	backoff := 25 * time.Millisecond
 	deadline := time.Now().Add(5 * time.Second)
@@ -237,6 +260,7 @@ func withBusyRetry(ctx context.Context, fn func() error) error {
 		if !isSQLiteBusy(err) {
 			return err
 		}
+		busyRetries.Add(1)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

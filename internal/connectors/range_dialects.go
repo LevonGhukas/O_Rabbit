@@ -12,7 +12,7 @@ func postgresRange(q CursorQuery) (rangeSQL, error) {
 	if err != nil {
 		return rangeSQL{}, err
 	}
-	return newRangeSQL(q, qt, qc, true, dollarPlaceholder)
+	return newRangeSQL(q, qt, qc, dollarPlaceholder)
 }
 
 func mysqlRange(q CursorQuery) (rangeSQL, error) {
@@ -24,7 +24,7 @@ func mysqlRange(q CursorQuery) (rangeSQL, error) {
 	if err != nil {
 		return rangeSQL{}, err
 	}
-	return newRangeSQL(q, qt, qc, true, questionPlaceholder)
+	return newRangeSQL(q, qt, qc, questionPlaceholder)
 }
 
 func mariadbRange(q CursorQuery) (rangeSQL, error) {
@@ -36,7 +36,7 @@ func mariadbRange(q CursorQuery) (rangeSQL, error) {
 	if err != nil {
 		return rangeSQL{}, err
 	}
-	return newRangeSQL(q, qt, qc, true, questionPlaceholder)
+	return newRangeSQL(q, qt, qc, questionPlaceholder)
 }
 
 func mssqlRange(q CursorQuery) (rangeSQL, error) {
@@ -48,7 +48,7 @@ func mssqlRange(q CursorQuery) (rangeSQL, error) {
 	if err != nil {
 		return rangeSQL{}, err
 	}
-	return newRangeSQL(q, qt, qc, true, mssqlPlaceholder)
+	return newRangeSQL(q, qt, qc, mssqlPlaceholder)
 }
 
 func clickHouseRange(q CursorQuery) (rangeSQL, error) {
@@ -60,7 +60,7 @@ func clickHouseRange(q CursorQuery) (rangeSQL, error) {
 	if err != nil {
 		return rangeSQL{}, err
 	}
-	return newRangeSQL(q, qt, qc, true, questionPlaceholder)
+	return newRangeSQL(q, qt, qc, questionPlaceholder)
 }
 
 func trinoRange(q CursorQuery) (rangeSQL, error) {
@@ -72,7 +72,7 @@ func trinoRange(q CursorQuery) (rangeSQL, error) {
 	if err != nil {
 		return rangeSQL{}, err
 	}
-	return newRangeSQL(q, qt, qc, true, questionPlaceholder)
+	return newRangeSQL(q, qt, qc, questionPlaceholder)
 }
 
 func oracleRange(q CursorQuery) (rangeSQL, error) {
@@ -84,5 +84,5 @@ func oracleRange(q CursorQuery) (rangeSQL, error) {
 	if err != nil {
 		return rangeSQL{}, err
 	}
-	return newRangeSQL(q, qt, qc, true, oraclePlaceholder)
+	return newRangeSQL(q, qt, qc, oraclePlaceholder)
 }

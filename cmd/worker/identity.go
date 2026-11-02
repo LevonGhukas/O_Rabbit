@@ -17,6 +17,7 @@ import (
 	grpcapi "github.com/LevonGhukas/O_Rabbit/internal/grpc"
 	"github.com/LevonGhukas/O_Rabbit/internal/grpcpb"
 	"github.com/LevonGhukas/O_Rabbit/internal/workeridentity"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -191,16 +192,41 @@ func enrollWorker(ctx context.Context, log *slog.Logger, cfg workerConfig, dir s
 			log.Info("worker enrolled", slog.String("worker_id", resp.WorkerId), slog.String("pool", resp.Pool), slog.Time("cert_not_after", time.UnixMilli(resp.NotAfterUnixMs)))
 			return w, nil
 		}
-		if code := status.Code(err); code != codes.Unavailable && code != codes.DeadlineExceeded {
+		wait, retry := enrollRetryWait(err, backoff)
+		if !retry {
 			return nil, fmt.Errorf("enroll worker: %w", err)
 		}
-		log.Warn("enrollment failed, retrying", slog.String("err", err.Error()), slog.Duration("backoff", backoff))
+		log.Warn("enrollment failed, retrying", slog.String("err", err.Error()), slog.Duration("backoff", wait))
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(backoff):
+		case <-time.After(wait):
 		}
-		backoff = min(2*backoff, 30*time.Second)
+		backoff = min(2*backoff, maxEnrollBackoff)
+	}
+}
+
+// maxEnrollBackoff caps the wait between enrollment attempts.
+const maxEnrollBackoff = 30 * time.Second
+
+// enrollRetryWait reports whether a failed enrollment is worth retrying and
+// how long to wait first. When the master rate-limits enrollment, its
+// RetryInfo hint is honoured if it is longer than the current backoff.
+func enrollRetryWait(err error, backoff time.Duration) (time.Duration, bool) {
+	st := status.Convert(err)
+	switch st.Code() {
+	case codes.Unavailable, codes.DeadlineExceeded:
+		return backoff, true
+	case codes.ResourceExhausted:
+		wait := backoff
+		for _, d := range st.Details() {
+			if info, ok := d.(*errdetails.RetryInfo); ok {
+				wait = max(wait, info.GetRetryDelay().AsDuration())
+			}
+		}
+		return min(wait, maxEnrollBackoff), true
+	default:
+		return 0, false
 	}
 }
 

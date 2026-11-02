@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/auth"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 )
 
@@ -98,7 +99,7 @@ func TestRecoveryEndpointAcknowledgesQuarantineIdempotentlyAndAudits(t *testing.
 		}
 	}
 	audits, err := st.ListAuditRecords(ctx, 10)
-	if err != nil || len(audits) != 2 || audits[0].ActorID != tokenFingerprint("admin-token") {
+	if err != nil || len(audits) != 2 || audits[0].CredentialID != auth.Fingerprint("admin-token") {
 		t.Fatalf("audits=%+v err=%v", audits, err)
 	}
 	events, err := st.ListEventsForRun(ctx, "http-recover", 100)

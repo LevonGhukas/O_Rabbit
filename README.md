@@ -44,6 +44,7 @@ incremental exports from where the last run stopped.
 - [Iceberg registration](#iceberg-registration)
 - [HTTP API](#http-api)
 - [Security model](#security-model)
+- [Scoped credentials and RBAC](#scoped-credentials-and-rbac)
 - [Configuration](#configuration)
 - [Deployment](#deployment)
 - [Observability](#observability)
@@ -401,8 +402,8 @@ Limits and cost:
 - Needs `partition_strategy: ordered_cursor` and a source of postgres, mysql,
   mariadb, mssql, oracle, clickhouse or trino. Other engines are rejected when
   the job is saved.
-- In query mode the job cannot also set `where_clause` (it is ignored in query
-  mode today, see TID-982); put the filter in the query.
+- In query mode `where_clause` filters the query result and the count applies
+  the same filter.
 - One extra `COUNT(*)` per task on the source at commit time, so keep an index on
   the cursor column. The counts run inside the commit timeout
   (`ORABBIT_COMMIT_TIMEOUT`); a commit that exceeds it is interrupted and retried
@@ -518,6 +519,49 @@ credential_vending:
 
 </details>
 
+### Table maintenance
+
+Two explicit operations keep a `rest-go` table's storage in check. Both are
+**dry runs by default**, run in the background on the active master, and allow
+one active operation per job. They work on the table of the job's newest
+registered run.
+
+```sh
+# Report orphans (nothing is deleted), then inspect the report.
+orabbit-client maintenance submit --job <job-id> --operation orphan_cleanup
+orabbit-client maintenance show <operation-id>
+
+# Delete them, or compact small files.
+orabbit-client maintenance submit --job <job-id> --operation orphan_cleanup --execute
+orabbit-client maintenance submit --job <job-id> --operation compaction --execute
+```
+
+- **Orphan cleanup** lists the table location and subtracts every file that
+  any retained snapshot references (not only the current one, so files a full
+  refresh replaced stay until their snapshots expire). A Parquet file is an
+  orphan only if it is also older than `min_age_hours` (default 168, minimum
+  1) and the run that wrote it no longer needs it: runs that are active, wait
+  for registration, were published without Iceberg, were canceled (the
+  canceled-object cleanup owns those) or are unknown keep their files. The
+  report lists every candidate with its reason, age and reference evidence.
+  Files under `metadata/` and non-Parquet objects are never candidates.
+- When executed, it deletes only if the table metadata is unchanged since the
+  listing and the dataset has no active run or unfinished registration;
+  otherwise it stops as `ABORTED` without deleting. Each delete re-checks the
+  object and the operation's lease first.
+- **Compaction** groups files below `small_file_bytes` (default 3/4 of the
+  target size) by partition and schema, and workers rewrite each group into
+  files of about `target_file_bytes`. The run's commit verifies the new files
+  like any export and swaps them in with one snapshot; history is kept, and
+  the replaced files become orphans only after their snapshots expire. If a
+  concurrent commit removed an input, nothing is committed and the operation
+  ends `ABORTED`. Only files O_Rabbit wrote are compacted, and tables with
+  delete files are refused (a full refresh clears them).
+- Compaction does not change the dataset's high-water mark or `_state.json`,
+  and a compaction run blocks exports into the same dataset while it runs.
+- Manifest rewriting is not included; a table that has many manifests after
+  many small commits is a candidate for a later operation.
+
 ## HTTP API
 
 The API listens on port `9100` and is described in
@@ -571,7 +615,8 @@ curl -sS -H "Authorization: Bearer $ORABBIT_HTTP_AUTH_TOKEN" http://127.0.0.1:91
 | `POST` | `/workers/enrollment-tokens` | Create a worker enrollment token |
 | `GET` | `/workers/identities` | List worker identities |
 | `POST` | `/workers/identities/{id}/revoke` | Revoke a worker identity |
-| `POST` | `/maintenance/submit` | Submit a maintenance operation |
+| `POST` | `/maintenance/submit` | Start an orphan cleanup or compaction (`job_id`, `operation`, `dry_run`) |
+| `GET` | `/maintenance`, `/maintenance/{id}` | List operations, or read one with its per-object report |
 
 </details>
 
@@ -622,8 +667,10 @@ The master can manage registered SSH servers: system info, Docker containers
 and logs, configuration files and deployments (`/servers`, `/deployments`,
 `/executions` under `/api/v1`). These routes are separate from the data API:
 
-- They return 404 unless `ORABBIT_REMOTE_OPS_AUTH_TOKEN` is set, and accept only
-  that token. The API token cannot reach them and vice versa.
+- They return 404 unless `ORABBIT_REMOTE_OPS_AUTH_TOKEN` is set or
+  `ORABBIT_REMOTE_OPS_ENABLED=true`. They accept only the remote-ops token or a
+  scoped credential with the `remote_ops` scope. The legacy API token cannot
+  reach them and vice versa.
 - Every server needs a pinned SSH host key (`host_key_fingerprint`, such as
   `SHA256:...`). Verify it out of band with `ssh-keyscan <host> | ssh-keygen -lf -`.
 - A worker deployment (`POST /deployments` with `component: worker`) accepts
@@ -654,7 +701,8 @@ contract is [proto/controlplane.proto](proto/controlplane.proto).
   Losing or replacing it makes them unreadable, so back it up separately and
   use key rotation (see [Troubleshooting](#troubleshooting)) to change it.
 - **Network defaults.** HTTP and gRPC bind to `127.0.0.1`. A non-loopback HTTP
-  listener requires `ORABBIT_HTTP_AUTH_TOKEN` and must sit behind a
+  listener requires `ORABBIT_HTTP_AUTH_TOKEN` or an active scoped credential
+  (see [Scoped credentials and RBAC](#scoped-credentials-and-rbac)) and must sit behind a
   TLS-terminating proxy. A non-loopback gRPC listener requires
   `ORABBIT_WORKER_AUTH_TOKEN` and gRPC TLS.
 - **Worker identity.** With gRPC TLS, every worker holds a master-issued
@@ -674,9 +722,40 @@ contract is [proto/controlplane.proto](proto/controlplane.proto).
 - **Scoped S3 access.** With target metadata `"credential_mode": "sts"` and
   `"sts_role_arn"`, workers get temporary credentials limited to the run's
   own prefix (`<dataset prefix>/_runs/run-<run id>/`).
+- **Rate limits.** The master limits requests per client address, in memory
+  (one active master, so no shared store is needed). Limited HTTP requests get
+  `429` with `Retry-After` and error code `rate_limited`; limited worker RPCs get
+  `ResourceExhausted` with a `RetryInfo` delay, which enrolling workers honour.
+  - Every HTTP request except `/healthz` and `/ready` counts against
+    `ORABBIT_HTTP_RATE_LIMIT_*`. Changes to remote operations and worker
+    identities (`POST`/`PUT`/`DELETE` on `/servers`, `/deployments`,
+    `/executions`, `/workers/...`) also count against
+    `ORABBIT_HTTP_SENSITIVE_RATE_LIMIT_*`.
+  - Rejected API and remote-ops tokens, shared worker tokens and enrollment
+    tokens spend `ORABBIT_AUTH_FAILURE_RATE_LIMIT_*`. Once a client's budget is
+    spent it is refused before its credentials are checked, even with a valid
+    token, until the budget refills. Rejected worker certificates (for example
+    an expired one) do not count, so one stale worker cannot lock out others.
+  - `EnrollWorker` calls count against `ORABBIT_ENROLL_RATE_LIMIT_*` before a
+    certificate is issued; the default burst lets 100 workers enroll at once
+    from one address. Reconnecting workers that already hold a certificate are
+    not limited.
+  - Clients sharing an address (NAT, or a proxy that is not listed in
+    `ORABBIT_HTTP_TRUSTED_PROXIES`) share one budget, including the failure
+    budget. IPv6 clients are grouped by /64. Behind a reverse proxy, list it in
+    `ORABBIT_HTTP_TRUSTED_PROXIES` so `X-Forwarded-For` identifies clients; the
+    header is ignored from any other peer. gRPC always keys on the connection
+    peer, so behind a TCP load balancer all workers share its address: raise
+    the enroll and failure bursts accordingly. Workers presenting a verified
+    certificate are never blocked by the failure budget.
+  - Each limit is `<name>_RPS` (sustained events per second; `0` disables it)
+    and `<name>_BURST` (events allowed at once). Invalid values stop the master
+    at startup.
 - **Source safety.** Query mode accepts a single `SELECT`/`WITH` statement;
-  `where_clause` must be one boolean expression. A read-only database user is
-  still the only control that holds on every engine.
+  `where_clause` must be one boolean expression. In query mode it filters the
+  query result, so it names result columns (not the inner query's table
+  aliases); Cassandra and MongoDB query mode reject it. A read-only database
+  user is still the only control that holds on every engine.
 
 Generate secrets without writing them to files under version control:
 
@@ -687,6 +766,83 @@ openssl rand -base64 32    # ORABBIT_MASTER_KEY
 ```
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
+
+## Scoped credentials and RBAC
+
+Every API caller is a named principal with scopes. Two principals can hold
+different permissions on the same API, and the audit log records which one acted.
+
+| Scope | Grants |
+|---|---|
+| `read` | All GET/HEAD on runs, jobs, connections (secrets redacted), workers, source engines, SSE, `/metrics`, `/status`; `POST /runs/validate` (dry run) |
+| `jobs:write` | Create, update, delete jobs; submit, cancel, recover and retry runs; maintenance submit |
+| `secrets:admin` | Create, update, delete connections (they hold encrypted secrets) |
+| `workers:admin` | Worker enrollment tokens, worker identity list and revoke (all methods under `/workers/...` except `GET /workers`) |
+| `remote_ops` | Every method on `/servers`, `/deployments`, `/executions` |
+| `credentials:admin` | Every method on `/credentials` |
+
+Authorization matrix (paths are under `/api/v1`; the deprecated aliases share the same policy):
+
+| Route | GET/HEAD | POST/PUT/PATCH/DELETE/OPTIONS |
+|---|---|---|
+| `/jobs`, `/jobs/{id}`, `/jobs/{id}/runs` | `read` | `jobs:write` |
+| `/runs`, `/runs/{id}/...` (cancel, recover, registration retry/cancel) | `read` | `jobs:write` |
+| `/runs/submit`, `/maintenance/submit` | `read` | `jobs:write` |
+| `/runs/validate` | `read` | `read` |
+| `/connections`, `/connections/{id}` | `read` | `secrets:admin` |
+| `/workers` | `read` | `workers:admin` |
+| `/workers/enrollment-tokens`, `/workers/identities...` | `workers:admin` | `workers:admin` |
+| `/servers`, `/deployments`, `/executions` | `remote_ops` | `remote_ops` |
+| `/credentials`, `/credentials/{id}/revoke` | `credentials:admin` | `credentials:admin` |
+| `/source-engines`, `/sse`, `/metrics`, `/status` | `read` | `jobs:write` (these are read-only; other methods return 405 once authorized) |
+| `/healthz`, `/ready` | none | none |
+
+A missing, malformed, expired or revoked credential returns `401`. A valid
+credential without the needed scope returns `403` with code `forbidden` and
+the required scope in the message. Unknown routes need any valid credential.
+
+**Bootstrap.** Create the first admin offline; the command works while the
+master runs and does not take its singleton lock:
+
+```bash
+orabbit-master credentials create --principal alice --kind human \
+  --scopes read,jobs:write,secrets:admin,workers:admin,credentials:admin --ttl 720h
+# prints the token once (orb_<id>_<secret>); only its SHA-256 is stored
+orabbit-master credentials list
+orabbit-master credentials revoke <credential-id>
+```
+
+After that, manage credentials over HTTP with `credentials:admin`:
+`POST /api/v1/credentials` (`{"principal","kind","scopes","ttl_seconds","description"}`),
+`GET /api/v1/credentials`, `POST /api/v1/credentials/{id}/revoke`. A caller can
+only grant scopes it holds, so `remote_ops` credentials are created with the CLI
+unless the caller already has it. Clients keep sending the token as
+`Authorization: Bearer ...` (the CLI reads it from `ORABBIT_HTTP_AUTH_TOKEN`).
+
+**Migrating from shared tokens.** Existing deployments keep working unchanged:
+`ORABBIT_HTTP_AUTH_TOKEN` becomes the principal `legacy-http-token` (all scopes
+except `remote_ops`) and `ORABBIT_REMOTE_OPS_AUTH_TOKEN` becomes
+`legacy-remote-ops-token` (`remote_ops` only). To migrate:
+
+1. Upgrade; the schema migration adds `api_credentials` and the audit columns.
+2. Create a named credential per person and per automation with the least scopes it needs.
+3. Switch each client to its credential (for example set `ORABBIT_HTTP_AUTH_TOKEN` to the new token on the CLI host).
+4. Check `audit_log` (`principal`, `credential_id`) shows no remaining `legacy-*` actors, then remove the legacy environment variables and restart.
+
+**Notes.**
+
+- With no legacy token and no credential row, the API stays open on loopback
+  as before (principal `anonymous`). Once any credential exists, even a revoked
+  one, requests without a valid token get `401`, so revoking the last
+  credential never reopens the API. A non-loopback listener needs the legacy
+  token or at least one active credential at startup.
+- Audit rows carry `actor_type` (`human`, `automation`, `legacy`, `anonymous`,
+  `cli`), `actor_id`/`principal` (the principal name) and `credential_id` (a
+  credential ID or a legacy-token fingerprint). Raw tokens are never stored or logged.
+- Expiry and revocation apply to the next request. Streams already open
+  (SSE) are not cut when their credential is revoked or expires.
+- `last_used_at` is not tracked: it would turn reads into writes and fail on standby masters.
+- OIDC / external identity providers are future work; the principal model is designed to accept them.
 
 ## Configuration
 
@@ -708,8 +864,14 @@ Flags override environment variables. Example files:
 | `ORABBIT_GRPC_ADDR` | `127.0.0.1:9102` | gRPC listen address |
 | `ORABBIT_HTTP_AUTH_TOKEN` | empty | Bearer token for the HTTP API and SSE |
 | `ORABBIT_WORKER_AUTH_TOKEN` | empty | Bearer token for worker RPCs; required for non-loopback gRPC |
-| `ORABBIT_REMOTE_OPS_AUTH_TOKEN` | empty | Enables the remote operations API and is its only token; must differ from the API token |
+| `ORABBIT_REMOTE_OPS_AUTH_TOKEN` | empty | Legacy shared token that enables the remote operations API; must differ from the API token |
+| `ORABBIT_REMOTE_OPS_ENABLED` | `false` | Enables the remote operations API for scoped credentials with the `remote_ops` scope, without a shared token |
 | `ORABBIT_TLS_CERT_FILE`, `ORABBIT_TLS_KEY_FILE` | empty | Master gRPC certificate and key |
+| `ORABBIT_HTTP_TRUSTED_PROXIES` | empty | Comma-separated proxy IPs/CIDRs whose `X-Forwarded-For` identifies HTTP clients for rate limiting |
+| `ORABBIT_HTTP_RATE_LIMIT_RPS`, `_BURST` | `50`, `200` | Per-client HTTP request limit (probes excluded); see [Security model](#security-model) |
+| `ORABBIT_HTTP_SENSITIVE_RATE_LIMIT_RPS`, `_BURST` | `1`, `30` | Extra per-client limit on remote-ops and worker-identity changes |
+| `ORABBIT_AUTH_FAILURE_RATE_LIMIT_RPS`, `_BURST` | `0.2`, `20` | Per-client budget of rejected tokens (HTTP and gRPC) |
+| `ORABBIT_ENROLL_RATE_LIMIT_RPS`, `_BURST` | `2`, `100` | Per-peer `EnrollWorker` limit |
 | `ORABBIT_GRPC_INSECURE` | `false` | Disable gRPC TLS (loopback only) |
 | `ORABBIT_GRPC_ALLOW_INSECURE_REMOTE` | `false` | Allow plaintext gRPC on a non-loopback listener (isolated private networks only) |
 | `ORABBIT_WORKER_CERT_TTL` | `24h` | Worker certificate lifetime (1h-720h) |
@@ -742,7 +904,6 @@ Flags override environment variables. Example files:
 | `ORABBIT_CANCELED_OBJECT_CLEANUP_SCAN_INTERVAL` | `5m` | Canceled-object scan cadence |
 | `ORABBIT_CANCELED_OBJECT_RETENTION` | `168h` | Quarantine before deletion |
 | `ORABBIT_CANCELED_OBJECT_CLEANUP_MAX_ATTEMPTS` | `5` | Object cleanup retries |
-| `ORABBIT_FULL_RUN_RETAIN_COUNT` | `1` | Full-refresh datasets kept after Iceberg publication |
 | `ORABBIT_HISTORY_RETENTION` | `720h` | Prune history of finished runs older than this; `0` disables |
 | `ORABBIT_HISTORY_PRUNE_INTERVAL` | `1h` | History pruning cadence |
 | `ORABBIT_DB_READ_CONNS` | `4` | Read-only SQLite connections for lists, metrics and SSE |
@@ -878,6 +1039,13 @@ network-level restrictions.
 > [docs/master-backup-restore.md](docs/master-backup-restore.md).
 
 > [!NOTE]
+> **Scaling limits.** One master was measured responsive with up to 128
+> running tasks, tasks of a few seconds, under ~10,000 pending tasks and about
+> two runs finishing per second. See
+> [docs/master-scaling.md](docs/master-scaling.md) for the tested envelope,
+> what limits it first and the recommended settings.
+
+> [!NOTE]
 > **MinIO.** Upstream MinIO no longer publishes images and its repository is
 > archived. The Compose files use `levonghukas/minio` and `levonghukas/mc`,
 > built from pinned upstream releases with patched dependencies by
@@ -914,6 +1082,14 @@ docker run --rm -v orabbit-worker_orabbit_worker_identity:/d debian:bookworm-sli
     `orabbit_catalog_work_rejected_total`.
   - `orabbit_runs_operator_action_required` counts runs that wait for an
     operator.
+  - Rate limits: `orabbit_rate_limited_total{surface,reason}` counts rejected
+    requests and `orabbit_auth_failures_total{surface}` rejected credentials
+    (`surface` is `http_api`, `http_remote_ops`, `grpc_enroll` or
+    `grpc_worker`). HTTP `429`s are rejected before routing, so they do not
+    appear in `orabbit_http_requests_total`. A steady rise in
+    `orabbit_auth_failures_total` means guessing or a misconfigured client; a
+    rise in `reason="request_rate"` during normal use means the limit is too
+    low or clients share an address (see `ORABBIT_HTTP_TRUSTED_PROXIES`).
 - **Alerts and dashboard:** [`monitoring/prometheus/orabbit-alerts.yml`](monitoring/prometheus/orabbit-alerts.yml)
   holds Prometheus alert rules; every alert links to its section in
   [docs/runbooks.md](docs/runbooks.md). `severity: critical` is meant to page,
@@ -1051,6 +1227,11 @@ debugging. Without `ORABBIT_E2E=1`, `go test ./...` skips these tests.
 runs the restore drill described in
 [docs/master-backup-restore.md](docs/master-backup-restore.md#restore-drill).
 
+The master load harness (`ORABBIT_LOAD=1 go test ./internal/grpc -run
+TestMasterLoad`) and the SQLite benchmarks (`go test ./internal/db -run '^$'
+-bench Hotpath`) are described in
+[docs/master-scaling.md](docs/master-scaling.md#running-it).
+
 ### CI
 
 | Workflow | Runs on | Does |
@@ -1058,6 +1239,7 @@ runs the restore drill described in
 | [CI](.github/workflows/ci.yml) | Pull requests; reused by Release images | Unit tests (race detector), integration tests against PostgreSQL, MySQL, MariaDB and ClickHouse, the end-to-end test (`scripts/e2e.sh`), `golangci-lint`, `shellcheck`, Compose validation, vulnerability check, and an image build, smoke test and Trivy scan |
 | [Release images](.github/workflows/release.yml) | Push to `main` | Runs CI, then pushes `latest-master` and `latest-worker` |
 | [Restore drill](.github/workflows/dr-drill.yml) | Every Monday, and on demand | Loses and restores the master in the end-to-end stack (`ORABBIT_E2E_DR=1 scripts/e2e.sh`) and keeps the measured RTO/RPO report |
+| [Load test](.github/workflows/load.yml) | On demand | Runs the master load harness and SQLite benchmarks (`docs/master-scaling.md`) and keeps the report |
 | [Vulnerability check](.github/workflows/vulncheck.yml) | Within CI, and every Monday | `scripts/vulncheck.sh`: fails on reachable Go vulnerabilities not reviewed in `.govulncheck-allow` |
 | [MinIO images](.github/workflows/minio-images.yml) | Changes under `docker/minio/` | Builds, tests, scans and publishes the MinIO images |
 

@@ -41,7 +41,9 @@ func (s *Server) ProcessReconciliationOnce(ctx context.Context) (bool, error) {
 		slog.String("error_class", r.LastErrorClass),
 		slog.String("executor", "master-owned-reconciliation-loop"),
 	)
-	attemptCtx, cancel := context.WithCancel(ctx)
+	// There is no separate reconciliation timeout; the registration timeout
+	// bounds catalog inspection so a hung call cannot hold the lease and slot.
+	attemptCtx, cancel := context.WithTimeout(ctx, s.commitCatalog.RegistrationTimeout)
 	defer cancel()
 	renewDone := make(chan struct{})
 	go func() {

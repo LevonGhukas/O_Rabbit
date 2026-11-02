@@ -30,6 +30,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "rotate-master-key" {
 		os.Exit(runRotateMasterKey(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "credentials" {
+		os.Exit(runCredentials(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "check-db" {
 		os.Exit(runCheckDB(os.Args[2:]))
 	}
@@ -53,6 +56,10 @@ func run() int {
 	}
 	if err := cfg.validateAuthentication(); err != nil {
 		log.Error("invalid control-plane authentication configuration", slog.String("err", err.Error()))
+		return exitConfig
+	}
+	if err := cfg.RateLimits.validate(); err != nil {
+		log.Error("invalid rate limit configuration", slog.String("err", err.Error()))
 		return exitConfig
 	}
 
@@ -105,6 +112,16 @@ func run() int {
 	}
 	defer st.Close()
 
+	activeCredentials, err := st.CountActiveAPICredentials(ctx)
+	if err != nil {
+		log.Error("count scoped credentials", slog.String("err", err.Error()))
+		return exitFailure
+	}
+	if err := cfg.validateHTTPExposure(activeCredentials); err != nil {
+		log.Error("invalid control-plane authentication configuration", slog.String("err", err.Error()))
+		return exitConfig
+	}
+
 	st.SetMasterKey(k)
 	if err := st.MigrateLegacySecrets(ctx, k); err != nil {
 		log.Error("migrate legacy secrets", slog.String("err", err.Error()))
@@ -140,6 +157,7 @@ func run() int {
 		}
 		grpcSrv.SetWorkerIdentity(workerCA, cfg.WorkerCertTTL)
 	}
+	grpcSrv.SetRateLimits(grpcapi.RateLimits{Enroll: cfg.RateLimits.Enroll, AuthFailures: cfg.RateLimits.AuthFailures})
 	grpcSrv.SetLeasePolicy(db.LeasePolicy{Duration: cfg.TaskLeaseDuration, MaxAttempts: cfg.TaskMaxAttempts, MaxActiveTasks: cfg.MaxActiveTasks, BackoffBase: cfg.TaskRetryBackoff, BackoffMax: cfg.TaskRetryBackoffMax})
 	grpcSrv.SetCatalogWorkLimit(cfg.CatalogWorkLimit)
 	commitCatalog := grpcapi.CommitCatalogPolicy{
@@ -226,6 +244,10 @@ func run() int {
 				break
 			}
 		}
+	})
+	// Lease expiry runs on its own loop so a slow registration or reconciliation
+	// cannot delay recovery of other expired attempts.
+	go runPeriodic(leaderCtx, log, "catalog lease expiration", 2*time.Second, func() {
 		if _, err := st.ExpireRegistrationAttempts(leaderCtx, time.Now(), registrationPolicy); err != nil && leaderCtx.Err() == nil {
 			log.Warn("registration lease expiration scan failed", slog.String("err", err.Error()))
 		}
@@ -273,6 +295,20 @@ func run() int {
 			}
 		}
 	})
+	go runPeriodic(leaderCtx, log, "iceberg maintenance", 5*time.Second, func() {
+		for i := 0; i < 2; i++ {
+			processed, err := grpcSrv.ProcessMaintenanceOnce(leaderCtx)
+			if err != nil {
+				if leaderCtx.Err() == nil {
+					log.Warn("iceberg maintenance failed", slog.String("err", err.Error()))
+				}
+				break
+			}
+			if !processed {
+				break
+			}
+		}
+	})
 	if cfg.HistoryRetention > 0 {
 		go runPeriodic(leaderCtx, log, "history retention", cfg.HistoryPruneInterval, func() {
 			res, err := st.PruneHistory(leaderCtx, time.Now().Add(-cfg.HistoryRetention))
@@ -295,6 +331,18 @@ func run() int {
 	httpSrv.SetLeadershipGuard(leadership)
 	httpSrv.SetRemoteOpsToken(cfg.RemoteOpsAuthToken)
 	httpSrv.SetLogBuffer(logBuf)
+	httpSrv.SetRemoteOpsEnabled(cfg.RemoteOpsEnabled)
+	trustedProxies, err := cfg.RateLimits.trustedProxies()
+	if err != nil {
+		log.Error("invalid rate limit configuration", slog.String("err", err.Error()))
+		return exitConfig
+	}
+	httpSrv.SetRateLimits(httpapi.RateLimits{
+		Requests:       cfg.RateLimits.HTTP,
+		Sensitive:      cfg.RateLimits.HTTPSensitive,
+		AuthFailures:   cfg.RateLimits.AuthFailures,
+		TrustedProxies: trustedProxies,
+	})
 	httpSrv.SetOperability(cfg.TaskMaxAttempts, grpcSrv)
 	// The servers stop when serveCtx ends: on shutdown, on lost leadership,
 	// or when the other server fails.
@@ -317,7 +365,8 @@ func run() int {
 		slog.Bool("worker_auth", strings.TrimSpace(cfg.WorkerAuthToken) != ""),
 		slog.Bool("insecure", cfg.Insecure),
 		slog.Bool("worker_identity", !cfg.Insecure),
-		slog.Bool("remote_ops", cfg.RemoteOpsAuthToken != ""),
+		slog.Bool("scoped_credentials", activeCredentials > 0),
+		slog.Bool("remote_ops", cfg.RemoteOpsAuthToken != "" || cfg.RemoteOpsEnabled),
 		slog.String("iceberg_registration", "persisted-run-snapshot"),
 		slog.String("ice_binary", cfg.IceBin),
 		slog.String("log_level", cfg.LogLevel),

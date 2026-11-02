@@ -297,6 +297,55 @@ func (u *Uploader) ListKeys(ctx context.Context, prefix string) ([]string, error
 	return out, nil
 }
 
+// ObjectInfo is one listed object.
+type ObjectInfo struct {
+	Key          string
+	Size         int64
+	LastModified time.Time
+	ETag         string
+}
+
+// ListObjects lists every object under prefix with its size, modification
+// time and ETag.
+func (u *Uploader) ListObjects(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	var out []ObjectInfo
+	var token *string
+	for {
+		in := &s3.ListObjectsV2Input{Bucket: aws.String(u.cfg.Bucket), Prefix: aws.String(strings.TrimSpace(prefix))}
+		if token != nil {
+			in.ContinuationToken = token
+		}
+		resp, err := u.client.ListObjectsV2(ctx, in)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range resp.Contents {
+			out = append(out, ObjectInfo{Key: aws.ToString(c.Key), Size: aws.ToInt64(c.Size), LastModified: aws.ToTime(c.LastModified), ETag: aws.ToString(c.ETag)})
+		}
+		if !aws.ToBool(resp.IsTruncated) {
+			break
+		}
+		token = resp.NextContinuationToken
+		if token == nil || aws.ToString(token) == "" {
+			break
+		}
+	}
+	return out, nil
+}
+
+// StatObject returns key's current size, modification time and ETag; found
+// is false when the object does not exist.
+func (u *Uploader) StatObject(ctx context.Context, key string) (ObjectInfo, bool, error) {
+	head, err := u.Head(ctx, key)
+	if err != nil {
+		if isNotFound(err) {
+			return ObjectInfo{}, false, nil
+		}
+		return ObjectInfo{}, false, err
+	}
+	return ObjectInfo{Key: key, Size: aws.ToInt64(head.ContentLength), LastModified: aws.ToTime(head.LastModified), ETag: aws.ToString(head.ETag)}, true, nil
+}
+
 type MultipartUploadInfo struct {
 	Key, UploadID string
 	Initiated     time.Time

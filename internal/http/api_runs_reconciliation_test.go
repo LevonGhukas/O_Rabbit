@@ -22,7 +22,7 @@ func TestValidateSubmitReconciliation(t *testing.T) {
 		{"count on postgres", runSubmitRequest{Reconciliation: count}, "table", "postgres", ""},
 		{"count on mongodb", runSubmitRequest{Reconciliation: count}, "table", "mongodb", "not supported"},
 		{"bad mode", runSubmitRequest{Reconciliation: &jobopts.Reconciliation{Mode: "sample"}}, "table", "postgres", "reconciliation.mode"},
-		{"query mode with where", runSubmitRequest{Reconciliation: count, Source: runSubmitSourceRequest{WhereClause: "a=1"}}, "query", "postgres", "where_clause"},
+		{"query mode with where", runSubmitRequest{Reconciliation: count, Source: runSubmitSourceRequest{WhereClause: "a=1"}}, "query", "postgres", ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -67,5 +67,51 @@ func TestJobCreateValidatesReconciliationAgainstSourceEngine(t *testing.T) {
 	rec := serveJSON(srv, "POST", "/api/v1/jobs", body)
 	if resp := decodeJobError(t, rec); rec.Code != 400 || !resp.hasField("options_json.reconciliation.mode") {
 		t.Fatalf("mongodb count job: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestJobCreateRejectsQueryModeWhereClauseOnCassandra(t *testing.T) {
+	srv, st := jobValidationServer(t) // postgres source
+	options := `{"source_mode":"query","query":"SELECT id FROM ks.orders","where_clause":"status = 'open'"}`
+	ok := serveJSON(srv, "POST", "/api/v1/jobs", jobBody(options))
+	if ok.Code != 201 {
+		t.Fatalf("postgres query-mode filter: status=%d body=%s", ok.Code, ok.Body.String())
+	}
+	createTestConnection(t, st, db.Connection{ID: "cass", Name: "cass", Kind: "source", Engine: "cassandra", MetadataJSON: []byte(`{}`), SecretEncBlob: []byte(`{}`)})
+	body := strings.Replace(jobBody(options), `"src"`, `"cass"`, 1)
+	rec := serveJSON(srv, "POST", "/api/v1/jobs", body)
+	if resp := decodeJobError(t, rec); rec.Code != 400 || !resp.hasField("options_json.where_clause") {
+		t.Fatalf("cassandra query-mode filter: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAPIRunValidateQueryModeWhereClauseByEngine(t *testing.T) {
+	tests := []struct {
+		name    string
+		engine  string
+		dsn     string
+		wantErr bool
+	}{
+		{"postgres applies filter", "postgres", "postgresql://user:pass@db:5432/app?sslmode=disable", false},
+		{"cassandra rejects filter", "cassandra", "cassandra://db:9042/ks", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := validRunSubmitRequestForValidation()
+			req.Source.Engine, req.Source.DSN = tc.engine, tc.dsn
+			req.Source.Mode, req.Source.Table, req.Source.Query = "query", "", "SELECT id, status FROM orders"
+			req.Source.WhereClause = "status = 'open'"
+			spec, err := validateRunSubmitRequest(req)
+			if !tc.wantErr {
+				if err != nil || spec.WhereClause != "status = 'open'" {
+					t.Fatalf("spec.WhereClause=%q err=%v", spec.WhereClause, err)
+				}
+				return
+			}
+			var validationErr *requestValidationError
+			if !AsValidationError(err, &validationErr) || validationErr.details["field"] != "source.where_clause" {
+				t.Fatalf("err=%v, want source.where_clause rejection", err)
+			}
+		})
 	}
 }

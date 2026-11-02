@@ -3,6 +3,8 @@ package httpapi
 import (
 	"net/http"
 	"strings"
+
+	"github.com/LevonGhukas/O_Rabbit/internal/auth"
 )
 
 // apiV1Prefix is the canonical, versioned API path. The unversioned paths
@@ -20,6 +22,9 @@ type apiRoute struct {
 	legacy  []string
 	target  string // legacy path prefix the handler expects
 	handler http.HandlerFunc
+	// policy names the scope each request needs. A nil policy denies every
+	// request, so a new route must declare one.
+	policy scopePolicy
 }
 
 func (s *Server) apiRoutes() []apiRoute {
@@ -40,9 +45,13 @@ func (s *Server) apiRoutes() []apiRoute {
 		{v1: "/runs/submit", legacy: []string{"/api/runs/submit"}, target: "/api/runs/submit", handler: s.handleRunSubmit},
 		{v1: "/runs/validate", legacy: []string{"/api/runs/validate"}, target: "/api/runs/validate", handler: s.handleRunValidate},
 		{v1: "/source-engines", legacy: []string{"/api/source-engines"}, target: "/api/source-engines", handler: s.handleSourceEngines},
-		{v1: "/maintenance/submit", legacy: []string{"/api/maintenance/submit"}, target: "/api/maintenance/submit", handler: s.handleMaintenanceSubmit},
-		{v1: "/sse", legacy: []string{"/sse"}, target: "/sse", handler: SSEHandler(s.log, s.st, s.bc)},
-		// Log viewer: new routes, so there are no legacy aliases.
+    {v1: "/maintenance", target: "/maintenance", handler: s.handleMaintenance, policy: readWrite(auth.ScopeJobsWrite)},
+    {v1: "/maintenance/submit", legacy: []string{"/api/maintenance/submit"}, target: "/api/maintenance/submit", handler: s.handleMaintenanceSubmit, policy: readWrite(auth.ScopeJobsWrite)},
+		{v1: "/maintenance", target: "/maintenance", handler: s.handleMaintenance, policy: readWrite(auth.ScopeJobsWrite)},
+		{v1: "/maintenance/", target: "/maintenance/", handler: s.handleMaintenanceByID, policy: readWrite(auth.ScopeJobsWrite)},
+		{v1: "/credentials", legacy: nil, target: "/credentials", handler: s.handleCredentials, policy: always(auth.ScopeCredentialsAdmin)},
+		{v1: "/credentials/", legacy: nil, target: "/credentials/", handler: s.handleCredentialByID, policy: always(auth.ScopeCredentialsAdmin)},
+		{v1: "/sse", legacy: []string{"/sse"}, target: "/sse", handler: SSEHandler(s.log, s.st, s.bc), policy: readWrite(auth.ScopeJobsWrite)},		{v1: "/sse", legacy: []string{"/sse"}, target: "/sse", handler: SSEHandler(s.log, s.st, s.bc)},
 		{v1: "/events", target: "/events", handler: s.handleEvents},
 		{v1: "/events/stream", target: "/events/stream", handler: s.handleEventsStream},
 		{v1: "/logs/master", target: "/logs/master", handler: s.handleMasterLogs},
@@ -54,18 +63,21 @@ func (s *Server) apiRoutes() []apiRoute {
 // older paths working as deprecated aliases.
 func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	for _, route := range s.apiRoutes() {
-		mux.HandleFunc(apiV1Prefix+route.v1, withPathPrefix(apiV1Prefix+route.v1, route.target, route.handler))
+		// The scope check wraps the path rewrite so v1 and every legacy
+		// alias share one policy.
+		handler := authorized(route.policy, route.handler)
+		mux.HandleFunc(apiV1Prefix+route.v1, withPathPrefix(apiV1Prefix+route.v1, route.target, handler))
 		for _, legacy := range route.legacy {
-			mux.HandleFunc(legacy, deprecated(legacy, apiV1Prefix+route.v1, withPathPrefix(legacy, route.target, route.handler)))
+			mux.HandleFunc(legacy, deprecated(legacy, apiV1Prefix+route.v1, withPathPrefix(legacy, route.target, handler)))
 		}
 	}
 	// /api/runs and /api/runs/{id}/... were a second copy of /runs.
-	mux.HandleFunc("/api/runs", deprecated("/api/runs", apiV1Prefix+"/runs", s.handleAPIRuns))
-	mux.HandleFunc("/api/runs/", deprecated("/api/runs/", apiV1Prefix+"/runs/", s.handleAPIRunByID))
+	mux.HandleFunc("/api/runs", deprecated("/api/runs", apiV1Prefix+"/runs", authorized(readWrite(auth.ScopeJobsWrite), s.handleAPIRuns)))
+	mux.HandleFunc("/api/runs/", deprecated("/api/runs/", apiV1Prefix+"/runs/", authorized(readWrite(auth.ScopeJobsWrite), s.handleAPIRunByID)))
 	// POST /api/jobs/{id}/runs takes {mode, iceberg} and returns run URLs; its
 	// successor POST /api/v1/jobs/{id}/runs is the /jobs/{id}/runs contract
 	// ({registration_config} → {run, tasks}) that the CLI uses.
-	mux.HandleFunc("/api/jobs/", deprecated("/api/jobs/", apiV1Prefix+"/jobs/", s.handleAPIJobByID))
+	mux.HandleFunc("/api/jobs/", deprecated("/api/jobs/", apiV1Prefix+"/jobs/", authorized(readWrite(auth.ScopeJobsWrite), s.handleAPIJobByID)))
 }
 
 // withPathPrefix rewrites the request path from prefix `from` to `to` before
@@ -101,3 +113,7 @@ func unversionedPath(path string) string {
 	}
 	return path
 }
+
+// validatePolicy lets read-only principals dry-run a run submission:
+// POST /runs/validate checks a request and persists nothing.
+func validatePolicy(string, string) auth.Scope { return auth.ScopeRead }

@@ -265,35 +265,6 @@ func (s *Store) GetRun(ctx context.Context, id string) (Run, error) {
 	return r, nil
 }
 
-// ListSucceededRunsForJob returns succeeded runs oldest-first for retention.
-func (s *Store) ListSucceededRunsForJob(ctx context.Context, jobID string) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, dataset_key, status, correlation_id, started_at, finished_at, error_summary, failure_class, failure_phase, registration_config_json, type_warnings_json FROM runs WHERE job_id = ? AND status = 'SUCCEEDED' ORDER BY started_at ASC;`, jobID)
-	if err != nil {
-		return nil, wrapRunRegistrationConfigColumnErr(err)
-	}
-	defer rows.Close()
-	var out []Run
-	for rows.Next() {
-		var r Run
-		var registrationConfig, warningJSON string
-		if err := rows.Scan(&r.ID, &r.JobID, &r.DatasetKey, &r.Status, &r.CorrelationID, &r.StartedAt, &r.FinishedAt, &r.ErrorSummary, &r.FailureClass, &r.FailurePhase, &registrationConfig, &warningJSON); err != nil {
-			return nil, err
-		}
-		if err := decodeRunWarnings(warningJSON, &r); err != nil {
-			return nil, err
-		}
-		if strings.TrimSpace(registrationConfig) != "" {
-			decrypted, err := s.decryptRunRegistrationConfig(r.ID, registrationConfig)
-			if err != nil {
-				return nil, err
-			}
-			r.RegistrationConfigJSON = decrypted
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
-}
-
 func decodeRunWarnings(raw string, r *Run) error {
 	r.TypeWarnings = []typesystem.TypeWarning{}
 	if strings.TrimSpace(raw) == "" {

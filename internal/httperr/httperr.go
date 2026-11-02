@@ -12,12 +12,14 @@ const (
 	CodeNotFound              Code = "not_found"
 	CodeConflict              Code = "conflict"
 	CodeUnauthorized          Code = "unauthorized"
+	CodeForbidden             Code = "forbidden"
 	CodeDependencyUnavailable Code = "dependency_unavailable"
 	CodeInternalError         Code = "internal_error"
 	CodeMethodNotAllowed      Code = "method_not_allowed"
 	CodeDatasetBusy           Code = "dataset_busy"
 	CodeNotImplemented        Code = "not_implemented"
 	CodeRunPlanningFailed     Code = "run_planning_failed"
+	CodeRateLimited           Code = "rate_limited"
 )
 
 type Response struct {
@@ -63,12 +65,16 @@ func CodeForStatus(status int) Code {
 		return CodeInvalidInput
 	case http.StatusUnauthorized:
 		return CodeUnauthorized
+	case http.StatusForbidden:
+		return CodeForbidden
 	case http.StatusNotFound:
 		return CodeNotFound
 	case http.StatusMethodNotAllowed:
 		return CodeMethodNotAllowed
 	case http.StatusConflict:
 		return CodeConflict
+	case http.StatusTooManyRequests:
+		return CodeRateLimited
 	case http.StatusServiceUnavailable:
 		return CodeDependencyUnavailable
 	default:

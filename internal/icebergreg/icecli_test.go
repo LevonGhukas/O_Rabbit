@@ -2,11 +2,14 @@ package icebergreg
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
 
@@ -228,5 +231,91 @@ httpCacheDir: data/ice/http/cache
 		if !strings.Contains(envText, want) {
 			t.Fatalf("env missing %q:\n%s", want, envText)
 		}
+	}
+}
+
+const iceTestReturnTimeout = 10 * time.Second
+
+func runFakeIce(t *testing.T, ctx context.Context, script string, regS3 s3io.Config, reg RunConfig, objs []icebergObj) error {
+	t.Helper()
+	scriptPath := filepath.Join(t.TempDir(), "ice")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	req := RunRequest{RunID: "run-ice", Registration: reg, DatasetS3: s3io.Config{Bucket: "bucket1"}}
+	done := make(chan error, 1)
+	go func() {
+		done <- runIceCLIRegister(ctx, exec.CommandContext, scriptPath, req, reg, "mssql.orders", regS3, objs)
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(iceTestReturnTimeout):
+		t.Fatal("runIceCLIRegister hung")
+		return nil
+	}
+}
+
+func iceTestRunConfig() RunConfig {
+	return RunConfig{Enabled: true, Engine: "ice", Table: "mssql.orders", BearerToken: "bearer-secret-value", ConfigYAML: "uri: http://catalog:8181\n"}
+}
+
+func TestRunIceCLIRegisterReturnsStderrWhenIceExitsWithoutReadingStdin(t *testing.T) {
+	objs := make([]icebergObj, 4000)
+	for i := range objs {
+		objs[i] = icebergObj{key: fmt.Sprintf("exports/orders/part-%06d-000-%s.parquet", i, strings.Repeat("x", 40))}
+	}
+	script := "#!/bin/sh\necho 'catalog says no: boom' >&2\nexit 1\n"
+	regS3 := s3io.Config{AccessKeyID: "AKIATESTKEY", SecretAccessKey: "super-secret-key", Region: "us-east-1"}
+
+	err := runFakeIce(t, context.Background(), script, regS3, iceTestRunConfig(), objs)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "catalog says no: boom") {
+		t.Fatalf("error lacks ice stderr: %v", err)
+	}
+}
+
+func TestRunIceCLIRegisterRedactsSecretsFromStderrTail(t *testing.T) {
+	script := "#!/bin/sh\necho \"leak $AWS_SECRET_ACCESS_KEY $AWS_ACCESS_KEY_ID bearer-secret-value\" >&2\nexit 1\n"
+	regS3 := s3io.Config{AccessKeyID: "AKIATESTKEY", SecretAccessKey: "super-secret-key", Region: "us-east-1"}
+
+	err := runFakeIce(t, context.Background(), script, regS3, iceTestRunConfig(), []icebergObj{{key: "a.parquet"}})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, secret := range []string{"super-secret-key", "AKIATESTKEY", "bearer-secret-value"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("error leaks %q: %v", secret, err)
+		}
+	}
+	if !strings.Contains(err.Error(), "leak") {
+		t.Fatalf("error lacks stderr tail: %v", err)
+	}
+}
+
+func TestRunIceCLIRegisterBoundsStderrTail(t *testing.T) {
+	script := "#!/bin/sh\nhead -c 100000 /dev/zero | tr '\\0' 'a' >&2\necho ' END-MARKER' >&2\nexit 1\n"
+	err := runFakeIce(t, context.Background(), script, s3io.Config{Region: "us-east-1"}, iceTestRunConfig(), []icebergObj{{key: "a.parquet"}})
+	if err == nil || !strings.Contains(err.Error(), "END-MARKER") {
+		t.Fatalf("want tail with marker, got %v", err)
+	}
+	if len(err.Error()) > 2*iceStderrTailBytes {
+		t.Fatalf("error not bounded: %d bytes", len(err.Error()))
+	}
+}
+
+func TestRunIceCLIRegisterHonoursContextDeadlineWhenIceHangs(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	script := "#!/bin/sh\nexec sleep 600\n"
+
+	err := runFakeIce(t, ctx, script, s3io.Config{Region: "us-east-1"}, iceTestRunConfig(), []icebergObj{{key: "a.parquet"}})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error should wrap context.DeadlineExceeded for classification: %v", err)
 	}
 }

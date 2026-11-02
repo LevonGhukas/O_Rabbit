@@ -1,12 +1,11 @@
 package httpapi
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strings"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/auth"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 )
 
@@ -18,6 +17,8 @@ const (
 	auditActionJobUpdate        = "job.update"
 	auditActionJobDelete        = "job.delete"
 	auditActionJobRunStart      = "job.run_start"
+	auditActionCredentialCreate = "credential.create"
+	auditActionCredentialRevoke = "credential.revoke"
 )
 
 func (s *Server) newAuditRecord(r *http.Request, action, resourceType, resourceID string, metadata any) (db.AuditRecord, error) {
@@ -25,13 +26,12 @@ func (s *Server) newAuditRecord(r *http.Request, action, resourceType, resourceI
 	if err != nil {
 		return db.AuditRecord{}, err
 	}
-	actorType, actorID := s.auditActor()
-	if isRemoteOpsPath(r.URL.Path) {
-		actorType, actorID = "remote_ops_token", tokenFingerprint(s.remoteOpsToken)
-	}
+	actor := auditActor(r)
 	return db.AuditRecord{
-		ActorType:    actorType,
-		ActorID:      actorID,
+		ActorType:    actor.actorType,
+		ActorID:      actor.name,
+		Principal:    actor.name,
+		CredentialID: actor.credentialID,
 		Action:       action,
 		ResourceType: resourceType,
 		ResourceID:   resourceID,
@@ -40,16 +40,17 @@ func (s *Server) newAuditRecord(r *http.Request, action, resourceType, resourceI
 	}, nil
 }
 
-func (s *Server) auditActor() (string, string) {
-	if strings.TrimSpace(s.authToken) == "" {
-		return "anonymous", ""
-	}
-	return "token", tokenFingerprint(s.authToken)
-}
+type actorIdentity struct{ actorType, name, credentialID string }
 
-func tokenFingerprint(token string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
-	return "sha256:" + hex.EncodeToString(sum[:8])
+// auditActor identifies who made the request from the authenticated
+// principal. It carries credential IDs and legacy-token fingerprints, never
+// the credential itself.
+func auditActor(r *http.Request) actorIdentity {
+	p, ok := auth.PrincipalFrom(r.Context())
+	if !ok {
+		return actorIdentity{actorType: string(auth.KindAnonymous), name: principalAnonymous}
+	}
+	return actorIdentity{actorType: string(p.Kind), name: p.Name, credentialID: p.CredentialID}
 }
 
 func marshalAuditMetadata(v any) (json.RawMessage, error) {

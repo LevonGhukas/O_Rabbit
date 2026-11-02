@@ -12,6 +12,10 @@ const (
 	PerformanceValueSourceInferred = "inferred"
 )
 
+// ConsistencyStrongSnapshot makes every task of a run read the source
+// snapshot exported at planning.
+const ConsistencyStrongSnapshot = "STRONG_SNAPSHOT"
+
 // Options represents job.options_json.
 //
 // This struct is shared by the planner (master) and worker assignment.

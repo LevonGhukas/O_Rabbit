@@ -24,6 +24,11 @@ func TestCodeForStatus(t *testing.T) {
 			want:   CodeUnauthorized,
 		},
 		{
+			name:   "forbidden",
+			status: http.StatusForbidden,
+			want:   CodeForbidden,
+		},
+		{
 			name:   "not found",
 			status: http.StatusNotFound,
 			want:   CodeNotFound,

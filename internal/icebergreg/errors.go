@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"os/exec"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 )
@@ -75,6 +77,11 @@ func validateTableIdentifier(table string) error {
 		if strings.TrimSpace(part) == "" {
 			return failure.NewFailure(failure.FailureTableIdentifier, false, true, fmt.Errorf("invalid iceberg table %q", table))
 		}
+	}
+	// Segments become catalog URL paths and namespace keys (joined by 0x1F),
+	// so path separators, control characters and broken UTF-8 never reach it.
+	if !utf8.ValidString(table) || strings.ContainsAny(table, `/\`) || strings.IndexFunc(table, unicode.IsControl) >= 0 {
+		return failure.NewFailure(failure.FailureTableIdentifier, false, true, fmt.Errorf("invalid iceberg table %q (unsafe character)", table))
 	}
 	return nil
 }

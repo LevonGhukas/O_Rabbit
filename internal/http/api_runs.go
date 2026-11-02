@@ -943,6 +943,9 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 		if err := connectors.ValidateWhereClause(clause); err != nil {
 			return validatedRunSubmitSpec{}, invalidSubmitField("source.where_clause", err.Error(), nil)
 		}
+		if err := jobopts.ValidateWhereClauseEngine(jobopts.Options{SourceMode: sourceMode, WhereClause: clause}, engine); err != nil {
+			return validatedRunSubmitSpec{}, invalidSubmitField("source.where_clause", err.Error(), nil)
+		}
 	}
 	workerPool := strings.TrimSpace(req.WorkerPool)
 	if workerPool != "" && !jobopts.ValidWorkerPool(workerPool) {

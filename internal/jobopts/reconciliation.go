@@ -98,9 +98,6 @@ func (o Options) validateReconciliation(add func(field, format string, args ...a
 	if o.NormalizedPartitionStrategy() != "ordered_cursor" {
 		add(reconciliationField+".mode", "count needs partition_strategy ordered_cursor so extraction and the count share one planned range")
 	}
-	if o.NormalizedSourceMode() == "query" && strings.TrimSpace(o.WhereClause) != "" {
-		add(reconciliationField+".mode", "count cannot be combined with where_clause in query mode; put the filter in the query")
-	}
 }
 
 // ValidateReconciliationEngine rejects mode=count for a source engine that

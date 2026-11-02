@@ -17,6 +17,10 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
 )
 
+// registrationPersistTimeout bounds recording an attempt outcome after the
+// attempt's own deadline has passed.
+const registrationPersistTimeout = 5 * time.Second
+
 func (s *Server) launchIcebergRegistration(runID string) {
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
@@ -181,6 +185,19 @@ func (s *Server) runIcebergRegistrationWithHooks(ctx context.Context, runID, reg
 	return true, result, err
 }
 
+// registrationPersistContext returns the context used to record an attempt
+// outcome. When the caller's deadline has expired the outcome must still be
+// written, otherwise the row would stay REGISTERING until its lease expires, so
+// the write is detached from the deadline and bounded separately. A canceled
+// context (leadership lost or shutdown) is kept as is: a stale leader must not
+// write, and lease expiry recovers the attempt.
+func registrationPersistContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), registrationPersistTimeout)
+}
+
 // ProcessRegistrationOnce claims at most one durable ordered registration.
 // It is suitable for a bounded startup/background worker and deterministic tests.
 func (s *Server) ProcessRegistrationOnce(ctx context.Context) (bool, error) {
@@ -226,7 +243,9 @@ func (s *Server) ProcessRegistrationOnce(ctx context.Context) (bool, error) {
 	if hex.EncodeToString(h.Sum(nil)) != r.ArtifactSetDigest {
 		return true, s.st.FailRegistrationAttempt(ctx, r.ID, a.ID, a.FencingToken, "ARTIFACT_VERIFICATION_FAILED", "artifact-set digest mismatch", false, true, s.nowFn(), policy)
 	}
-	attemptCtx, cancel := context.WithCancel(ctx)
+	// Every attempt is bounded, whoever drives it, so a hung catalog call
+	// cannot hold the lease and a catalog work slot forever.
+	attemptCtx, cancel := context.WithTimeout(ctx, s.commitCatalog.RegistrationTimeout)
 	defer cancel()
 	renewDone := make(chan struct{})
 	go func() {
@@ -284,6 +303,8 @@ func (s *Server) ProcessRegistrationOnce(ctx context.Context) (bool, error) {
 	if runErr == nil && !ran {
 		runErr = fmt.Errorf("registration configuration is unavailable")
 	}
+	persistCtx, persistCancel := registrationPersistContext(ctx)
+	defer persistCancel()
 	if runErr != nil {
 		failure := icebergreg.ClassifyFailure(runErr, externalStarted)
 		s.log.Warn(
@@ -297,16 +318,16 @@ func (s *Server) ProcessRegistrationOnce(ctx context.Context) (bool, error) {
 			slog.String("error_message", runErr.Error()),
 			slog.Bool("external_commit_started", externalStarted),
 		)
-		err := s.st.FailRegistrationAttempt(ctx, r.ID, a.ID, a.FencingToken, string(failure.Class), runErr.Error(), failure.Retryable, failure.DefiniteRejection, s.nowFn(), policy)
+		err := s.st.FailRegistrationAttempt(persistCtx, r.ID, a.ID, a.FencingToken, string(failure.Class), runErr.Error(), failure.Retryable, failure.DefiniteRejection, s.nowFn(), policy)
 		if errors.Is(err, db.ErrRegistrationFenced) {
-			_ = s.st.RecordRegistrationStaleResult(ctx, r.ID, a.ID, string(failure.Class), s.nowFn())
+			_ = s.st.RecordRegistrationStaleResult(persistCtx, r.ID, a.ID, string(failure.Class), s.nowFn())
 			return true, nil
 		}
 		return true, err
 	}
-	err = s.st.CompleteRegistration(ctx, r.ID, a.ID, a.FencingToken, s.nowFn())
+	err = s.st.CompleteRegistration(persistCtx, r.ID, a.ID, a.FencingToken, s.nowFn())
 	if errors.Is(err, db.ErrRegistrationFenced) {
-		_ = s.st.RecordRegistrationStaleResult(ctx, r.ID, a.ID, "STALE_COMPLETION", s.nowFn())
+		_ = s.st.RecordRegistrationStaleResult(persistCtx, r.ID, a.ID, "STALE_COMPLETION", s.nowFn())
 		return true, nil
 	}
 	return true, err

@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -92,6 +90,12 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 	}
 	if run.Status == "SUCCEEDED" {
 		return nil
+	}
+	// A compaction run replaces table files; it never publishes a dataset.
+	if op, ok, err := s.st.GetMaintenanceOperationForRun(ctx, runID); err != nil {
+		return err
+	} else if ok {
+		return s.commitCompaction(ctx, run, op)
 	}
 	// Commit where the run was planned to write, per its configuration
 	// snapshot, even if the job or connections were edited since.
@@ -231,47 +235,8 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 			return fmt.Errorf("commit verification: required object %s: %w", key, err)
 		}
 	}
-	for _, record := range acceptedArtifacts {
-		// The store's own checksum, recorded when the worker verified the
-		// upload, proves the object is unchanged with a HEAD. Only objects
-		// without one are re-read and hashed through the master.
-		if record.ProviderChecksumSHA256 != "" {
-			size, checksum, found, err := u.ObjectChecksum(ctx, record.ObjectKey)
-			if err != nil {
-				return fmt.Errorf("commit artifact verification %s: %w", record.ObjectKey, err)
-			}
-			if !found {
-				return fmt.Errorf("commit artifact verification: missing object %s", record.ObjectKey)
-			}
-			if size != record.ByteSize {
-				return fmt.Errorf("commit artifact size mismatch: %s", record.ObjectKey)
-			}
-			if checksum != "" {
-				if checksum != record.ProviderChecksumSHA256 {
-					return fmt.Errorf("commit artifact sha256 mismatch: %s", record.ObjectKey)
-				}
-				continue
-			}
-			// The store reported no checksum now; fall back to hashing.
-		}
-		body, found, err := u.OpenObject(ctx, record.ObjectKey)
-		if err != nil {
-			return fmt.Errorf("commit artifact verification %s: %w", record.ObjectKey, err)
-		}
-		if !found {
-			return fmt.Errorf("commit artifact verification: missing object %s", record.ObjectKey)
-		}
-		digest, size, hashErr := artifact.StreamSHA256(ctx, body)
-		_ = body.Close()
-		if hashErr != nil {
-			return fmt.Errorf("commit artifact verification %s: %w", record.ObjectKey, hashErr)
-		}
-		if size != record.ByteSize {
-			return fmt.Errorf("commit artifact size mismatch: %s", record.ObjectKey)
-		}
-		if digest != record.SHA256 {
-			return fmt.Errorf("commit artifact sha256 mismatch: %s", record.ObjectKey)
-		}
+	if err := verifyArtifacts(ctx, u, acceptedArtifacts); err != nil {
+		return err
 	}
 
 	if err := s.reconcileSourceRanges(ctx, resolved, srcConn, tasks, hasPersistedIntent); err != nil {
@@ -510,6 +475,54 @@ func (s *Server) commitRun(ctx context.Context, runID string) error {
 	return nil
 }
 
+// verifyArtifacts proves every accepted artifact is still the object the
+// worker verified: same size and SHA-256.
+func verifyArtifacts(ctx context.Context, u commitObjectStore, acceptedArtifacts []artifact.Record) error {
+	for _, record := range acceptedArtifacts {
+		// The store's own checksum, recorded when the worker verified the
+		// upload, proves the object is unchanged with a HEAD. Only objects
+		// without one are re-read and hashed through the master.
+		if record.ProviderChecksumSHA256 != "" {
+			size, checksum, found, err := u.ObjectChecksum(ctx, record.ObjectKey)
+			if err != nil {
+				return fmt.Errorf("commit artifact verification %s: %w", record.ObjectKey, err)
+			}
+			if !found {
+				return fmt.Errorf("commit artifact verification: missing object %s", record.ObjectKey)
+			}
+			if size != record.ByteSize {
+				return fmt.Errorf("commit artifact size mismatch: %s", record.ObjectKey)
+			}
+			if checksum != "" {
+				if checksum != record.ProviderChecksumSHA256 {
+					return fmt.Errorf("commit artifact sha256 mismatch: %s", record.ObjectKey)
+				}
+				continue
+			}
+			// The store reported no checksum now; fall back to hashing.
+		}
+		body, found, err := u.OpenObject(ctx, record.ObjectKey)
+		if err != nil {
+			return fmt.Errorf("commit artifact verification %s: %w", record.ObjectKey, err)
+		}
+		if !found {
+			return fmt.Errorf("commit artifact verification: missing object %s", record.ObjectKey)
+		}
+		digest, size, hashErr := artifact.StreamSHA256(ctx, body)
+		_ = body.Close()
+		if hashErr != nil {
+			return fmt.Errorf("commit artifact verification %s: %w", record.ObjectKey, hashErr)
+		}
+		if size != record.ByteSize {
+			return fmt.Errorf("commit artifact size mismatch: %s", record.ObjectKey)
+		}
+		if digest != record.SHA256 {
+			return fmt.Errorf("commit artifact sha256 mismatch: %s", record.ObjectKey)
+		}
+	}
+	return nil
+}
+
 // collectParquetObjectInfos extracts Parquet object info maps from completed tasks.
 // Each element is expected to contain at least {"key": "..."}. Additional fields like
 // "rows" and "bytes" may be present.
@@ -716,154 +729,4 @@ func datasetPrefixForJob(job db.Job, srcEngine string, opts jobopts.Options, tgt
 		sourceName = strings.TrimSpace(job.TargetTable)
 	}
 	return dataset.Prefix(targetPrefix, srcEngine, sourceName)
-}
-
-// defaultFullRunRetainCount is the default number of successful full-refresh runs
-// to keep in S3. Override via ORABBIT_FULL_RUN_RETAIN_COUNT env var.
-const defaultFullRunRetainCount = 1 //nolint:unused // see purgeStaleFullRunsForRun
-
-// purgeStaleFullRunsForRun deletes the S3 objects for obsolete full-refresh run
-// directories after a new full-refresh run has been successfully committed and
-// published to the Iceberg catalog.
-//
-// Safety guarantees:
-//   - Only called after ICEBERG_REGISTRATION_SUCCEEDED (new dataset fully published).
-//   - Only operates on non-incremental (full-refresh) jobs.
-//   - Keeps the latest retainCount runs intact.
-//   - Failures are best-effort: logged but never propagated to the caller.
-//   - Idempotent: re-running on already-purged directories is a no-op.
-//
-// It is not called anywhere yet, so ORABBIT_FULL_RUN_RETAIN_COUNT has no
-// effect; enabling it deletes published data and needs a deliberate decision.
-//
-//nolint:unused
-func (s *Server) purgeStaleFullRunsForRun(ctx context.Context, runID string) {
-	runID = strings.TrimSpace(runID)
-	if runID == "" {
-		return
-	}
-
-	run, err := s.st.GetRun(ctx, runID)
-	if err != nil {
-		s.log.Warn("full-run purge: failed to load run",
-			slog.String("run_id", runID),
-			slog.String("err", err.Error()),
-		)
-		return
-	}
-
-	resolved, err := s.resolveRun(ctx, run)
-	if err != nil {
-		s.log.Warn("full-run purge: failed to resolve run configuration",
-			slog.String("run_id", runID),
-			slog.String("job_id", run.JobID),
-			slog.String("err", err.Error()),
-		)
-		return
-	}
-	job := resolved.config.Job
-
-	// Only apply retention to full (non-incremental) jobs.
-	if job.Incremental {
-		return
-	}
-
-	// Determine how many successful full runs to retain.
-	retainCount := defaultFullRunRetainCount
-	if raw := strings.TrimSpace(os.Getenv("ORABBIT_FULL_RUN_RETAIN_COUNT")); raw != "" {
-		if n, err2 := strconv.Atoi(raw); err2 == nil && n >= 1 {
-			retainCount = n
-		}
-	}
-
-	// Collect all succeeded runs for this job, ordered oldest-first.
-	allRuns, err := s.st.ListSucceededRunsForJob(ctx, job.ID)
-	if err != nil {
-		s.log.Warn("full-run purge: failed to list succeeded runs",
-			slog.String("run_id", runID),
-			slog.String("job_id", job.ID),
-			slog.String("err", err.Error()),
-		)
-		return
-	}
-
-	if len(allRuns) <= retainCount {
-		// Nothing to purge yet.
-		return
-	}
-
-	// to_purge = all except the latest retainCount runs.
-	toPurge := allRuns[:len(allRuns)-retainCount]
-
-	cfg, err := s.targetS3Config(ctx, resolved)
-	if err != nil {
-		s.log.Warn("full-run purge: failed to resolve target",
-			slog.String("job_id", job.ID),
-			slog.String("err", err.Error()),
-		)
-		return
-	}
-	u, err := s3io.New(ctx, cfg)
-	if err != nil {
-		s.log.Warn("full-run purge: failed to create S3 client",
-			slog.String("job_id", job.ID),
-			slog.String("err", err.Error()),
-		)
-		return
-	}
-	basePrefix := strings.TrimSuffix(strings.TrimSpace(resolved.prefix), "/")
-	if basePrefix == "" {
-		s.log.Warn("full-run purge: could not resolve dataset prefix", slog.String("job_id", job.ID))
-		return
-	}
-
-	totalPurged := 0
-	for _, staleRun := range toPurge {
-		// Guard: never delete the current (just-published) run.
-		if staleRun.ID == runID {
-			continue
-		}
-
-		runPrefix := basePrefix + "/_runs/run-" + staleRun.ID + "/"
-		keys, listErr := u.ListKeys(ctx, runPrefix)
-		if listErr != nil {
-			s.log.Warn("full-run purge: list objects failed",
-				slog.String("run_id", staleRun.ID),
-				slog.String("prefix", runPrefix),
-				slog.String("err", listErr.Error()),
-			)
-			continue
-		}
-		if len(keys) == 0 {
-			// Already purged or never uploaded.
-			continue
-		}
-
-		deleted, delErr := u.DeleteObjects(ctx, keys)
-		if delErr != nil {
-			s.log.Warn("full-run purge: delete objects failed",
-				slog.String("run_id", staleRun.ID),
-				slog.String("prefix", runPrefix),
-				slog.String("err", delErr.Error()),
-			)
-			continue
-		}
-
-		totalPurged += deleted
-		s.log.Info("full-run purge: deleted stale run objects",
-			slog.String("current_run_id", runID),
-			slog.String("purged_run_id", staleRun.ID),
-			slog.String("prefix", runPrefix),
-			slog.Int("objects_deleted", deleted),
-		)
-	}
-
-	if totalPurged > 0 {
-		s.log.Info("full-run purge: complete",
-			slog.String("run_id", runID),
-			slog.String("job_id", job.ID),
-			slog.Int("runs_purged", len(toPurge)),
-			slog.Int("total_objects_deleted", totalPurged),
-		)
-	}
 }

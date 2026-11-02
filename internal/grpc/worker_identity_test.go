@@ -41,7 +41,9 @@ type identityHarness struct {
 	serverCA string
 }
 
-func newIdentityHarness(t *testing.T) *identityHarness {
+// newIdentityHarness starts the server after applying configure, so no
+// setting changes while RPCs are being served.
+func newIdentityHarness(t *testing.T, configure ...func(*Server)) *identityHarness {
 	t.Helper()
 	dir := t.TempDir()
 	serverCA, serverCert, serverKey := writeServerTLS(t, dir)
@@ -52,6 +54,9 @@ func newIdentityHarness(t *testing.T) *identityHarness {
 		t.Fatal(err)
 	}
 	srv.SetWorkerIdentity(ca, time.Hour)
+	for _, c := range configure {
+		c(srv)
+	}
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

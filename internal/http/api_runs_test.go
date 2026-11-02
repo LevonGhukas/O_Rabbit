@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1584,6 +1585,9 @@ func validRunSubmitRequestForValidation() runSubmitRequest {
 
 type submitTestServer struct {
 	*Server
+	// mu guards the fields below: concurrent submits (for example
+	// TestConcurrentOneShotSubmitsShareOneJob) plan at the same time.
+	mu                 sync.Mutex
 	registrationConfig json.RawMessage
 	plannedJob         db.Job
 }
@@ -1592,8 +1596,10 @@ func newSubmitTestServer(st *db.Store) *submitTestServer {
 	srv := NewServer(nil, st, nil, testCryptoKey, StatusInfo{}, "")
 	ts := &submitTestServer{Server: srv}
 	srv.runPlanner = func(ctx context.Context, st *db.Store, k crypto.Key, job db.Job, registrationConfig json.RawMessage, audit *db.AuditRecord) (db.Run, []db.TaskInsert, error) {
+		ts.mu.Lock()
 		ts.registrationConfig = append(json.RawMessage(nil), registrationConfig...)
 		ts.plannedJob = job
+		ts.mu.Unlock()
 		run := db.Run{
 			ID:            "run-submit-test",
 			JobID:         job.ID,

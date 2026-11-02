@@ -75,6 +75,15 @@ var (
 		Name: "orabbit_catalog_work_rejected_total",
 		Help: "Registration or reconciliation attempts deferred because every catalog work slot was busy.",
 	})
+
+	rateLimited = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "orabbit_rate_limited_total",
+		Help: "Requests rejected by a rate limit (HTTP 429 or gRPC ResourceExhausted), by surface and reason.",
+	}, []string{"surface", "reason"})
+	authFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "orabbit_auth_failures_total",
+		Help: "Rejected credentials counted against a client's failed-authentication budget, by surface.",
+	}, []string{"surface"})
 )
 
 func init() {
@@ -84,6 +93,7 @@ func init() {
 		taskResults, taskRows, taskBytesRead, taskBytesWritten,
 		commitLatency,
 		catalogSlotsCapacity, catalogSlotsInUse, catalogWorkRejected,
+		rateLimited, authFailures,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
@@ -181,6 +191,14 @@ func ObserveCatalogWork(acquired bool) {
 
 // ReleaseCatalogWork records a catalog slot given back.
 func ReleaseCatalogWork() { catalogSlotsInUse.Dec() }
+
+// ObserveRateLimited records one request rejected by a rate limit. Callers
+// pass fixed surface and reason names, never client data, so cardinality
+// stays bounded.
+func ObserveRateLimited(surface, reason string) { rateLimited.WithLabelValues(surface, reason).Inc() }
+
+// ObserveAuthFailure records one rejected credential on surface.
+func ObserveAuthFailure(surface string) { authFailures.WithLabelValues(surface).Inc() }
 
 // WriteText appends every registered metric in Prometheus text format.
 func WriteText(w http.ResponseWriter) error {

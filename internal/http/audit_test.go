@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/auth"
 	"github.com/LevonGhukas/O_Rabbit/internal/crypto"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 )
@@ -41,11 +42,13 @@ func TestConnectionCreateWritesAuditRecord(t *testing.T) {
 	if audit.ResourceType != "connection" {
 		t.Fatalf("resource_type=%q want=%q", audit.ResourceType, "connection")
 	}
-	if audit.ActorType != "token" {
-		t.Fatalf("actor_type=%q want=%q", audit.ActorType, "token")
+	// A shared token is now a "legacy" principal: the audit names it and
+	// carries the token fingerprint as credential_id.
+	if audit.ActorType != "legacy" || audit.ActorID != "legacy-http-token" || audit.Principal != "legacy-http-token" {
+		t.Fatalf("actor = %q/%q/%q", audit.ActorType, audit.ActorID, audit.Principal)
 	}
-	if audit.ActorID != tokenFingerprint("topsecret") {
-		t.Fatalf("actor_id=%q want=%q", audit.ActorID, tokenFingerprint("topsecret"))
+	if audit.CredentialID != auth.Fingerprint("topsecret") {
+		t.Fatalf("credential_id=%q want=%q", audit.CredentialID, auth.Fingerprint("topsecret"))
 	}
 	if audit.RequestID != "req-connection-create" {
 		t.Fatalf("request_id=%q want=%q", audit.RequestID, "req-connection-create")

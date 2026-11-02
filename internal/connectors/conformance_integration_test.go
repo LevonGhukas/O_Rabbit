@@ -273,6 +273,20 @@ func TestSQLConnectorConformanceIntegration(t *testing.T) {
 			if err != nil || qstats.MinValue != "1" || qstats.MaxValue != "50" {
 				t.Fatalf("query stats=%+v err=%v, want 1..50", qstats, err)
 			}
+			filtered := CursorQuery{SourceQuery: query, CursorColumn: qv.ResolvedName, CursorDomain: CursorDomainInt64, WhereClause: "id >= 15",
+				LowerBound: "10", LowerExclusive: true, UpperBound: "20", UpperInclusive: true}
+			frows, _, _, _, err := r.QueryCursor(ctx, filtered)
+			if err != nil {
+				t.Fatalf("query mode with where_clause: %v", err)
+			}
+			if n := countRows(t, frows); n != 6 {
+				t.Fatalf("query mode with where_clause rows=%d, want 6 (ids 15..20)", n)
+			}
+			if counter, ok := r.(RangeCounter); ok {
+				if n, err := counter.CountRange(ctx, filtered); err != nil || n != 6 {
+					t.Fatalf("query mode with where_clause count=%d err=%v, want 6", n, err)
+				}
+			}
 		})
 	}
 	if !ran {

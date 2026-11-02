@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
 
@@ -14,6 +15,12 @@ import (
 )
 
 const DefaultIceBinary = "ice"
+
+// iceStderrTailBytes bounds the ice stderr kept for error reporting.
+const iceStderrTailBytes = 4096
+
+// iceWaitDelay bounds how long Wait lingers on I/O after ice is killed.
+const iceWaitDelay = 5 * time.Second
 
 type iceCommandFactory func(context.Context, string, ...string) *exec.Cmd
 
@@ -204,9 +211,6 @@ func runIceCLIRegister(ctx context.Context, cmdFactory iceCommandFactory, iceBin
 	}
 	defer cleanup()
 
-	r, w := io.Pipe()
-	defer r.Close()
-
 	// Do not pass -p here. Altinity Ice's auto-create path reads the first S3
 	// object with a raw AWS SDK client that cannot be forced path-style without
 	// credential vending; the manager creates/verifies the table before insert.
@@ -217,35 +221,34 @@ func runIceCLIRegister(ctx context.Context, cmdFactory iceCommandFactory, iceBin
 		"-",
 	}
 
-	cmd := cmdFactory(ctx, iceBinary, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = r
-	cmd.Env = buildIceCLIEnv(os.Environ(), regS3)
+	var stdin strings.Builder
+	for _, obj := range objs {
+		fmt.Fprintf(&stdin, "s3://%s/%s\n", req.DatasetS3.Bucket, obj.key)
+	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		defer w.Close()
-		for _, obj := range objs {
-			uri := fmt.Sprintf("s3://%s/%s\n", req.DatasetS3.Bucket, obj.key)
-			if _, err := io.WriteString(w, uri); err != nil {
-				errCh <- err
-				return
-			}
-		}
-		errCh <- nil
-	}()
+	cmd := cmdFactory(ctx, iceBinary, args...)
+	stderrTail := newTailBuffer(iceStderrTailBytes)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = io.MultiWriter(os.Stderr, stderrTail)
+	cmd.Stdin = strings.NewReader(stdin.String())
+	cmd.Env = buildIceCLIEnv(os.Environ(), regS3)
+	// A killed JVM can leave grandchildren holding the stderr pipe open; do not
+	// let Wait block on them.
+	cmd.WaitDelay = iceWaitDelay
+	killProcessGroupOnCancel(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start ice insert for table %s using %q: %w", table, iceBinary, err)
 	}
-	if werr := <-errCh; werr != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return fmt.Errorf("stream parquet objects to ice insert for table %s: %w", table, werr)
-	}
 	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("ice insert failed for table %s: %w", table, err)
+		detail := stderrTail.String(regS3.SecretAccessKey, regS3.AccessKeyID, regS3.SessionToken, reg.BearerToken)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			err = fmt.Errorf("%w: %w", ctxErr, err)
+		}
+		if detail == "" {
+			return fmt.Errorf("ice insert failed for table %s: %w", table, err)
+		}
+		return fmt.Errorf("ice insert failed for table %s: %w: %s", table, err, detail)
 	}
 	return nil
 }

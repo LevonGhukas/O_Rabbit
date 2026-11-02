@@ -25,3 +25,27 @@ func TestHTTPMiddlewareLabelsByRoutePattern(t *testing.T) {
 		t.Fatal("raw path leaked into metric labels")
 	}
 }
+
+func TestObserveRateLimitedCountsBySurfaceAndReason(t *testing.T) {
+	ObserveRateLimited("http_api", "auth_failures")
+
+	rec := httptest.NewRecorder()
+	if err := WriteText(rec); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rec.Body.String(), `orabbit_rate_limited_total{reason="auth_failures",surface="http_api"} 1`) {
+		t.Fatalf("rate limit counter missing:\n%s", rec.Body.String())
+	}
+}
+
+func TestObserveAuthFailureCountsBySurface(t *testing.T) {
+	ObserveAuthFailure("grpc_enroll")
+
+	rec := httptest.NewRecorder()
+	if err := WriteText(rec); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rec.Body.String(), `orabbit_auth_failures_total{surface="grpc_enroll"} 1`) {
+		t.Fatalf("auth failure counter missing:\n%s", rec.Body.String())
+	}
+}

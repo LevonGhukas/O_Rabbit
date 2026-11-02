@@ -119,20 +119,7 @@ func (m *Manager) RegisterRun(ctx context.Context, req RunRequest) (RunResult, e
 		return RunResult{}, err
 	}
 
-	regS3 := req.DatasetS3
-	if v := strings.TrimSpace(reg.S3.Endpoint); v != "" {
-		regS3.Endpoint = v
-	}
-	if v := strings.TrimSpace(reg.S3.Region); v != "" {
-		regS3.Region = v
-	}
-	regS3.ForcePathStyle = reg.S3.PathStyleAccess
-	if v := strings.TrimSpace(reg.S3.AccessKeyID); v != "" {
-		regS3.AccessKeyID = v
-	}
-	if v := strings.TrimSpace(reg.S3.SecretAccessKey); v != "" {
-		regS3.SecretAccessKey = v
-	}
+	regS3 := registrationS3(req.DatasetS3, reg)
 	u, err := s3io.New(ctx, regS3)
 	if err != nil {
 		return RunResult{}, err
@@ -306,6 +293,26 @@ func (m *Manager) RegisterRun(ctx context.Context, req RunRequest) (RunResult, e
 		slog.String("state_key", iceKey),
 	)
 	return RunResult{Objects: len(objs)}, nil
+}
+
+// registrationS3 is the dataset's S3 configuration with the registration's
+// own S3 settings applied, as the catalog's file system uses it.
+func registrationS3(dataset s3io.Config, reg RunConfig) s3io.Config {
+	out := dataset
+	if v := strings.TrimSpace(reg.S3.Endpoint); v != "" {
+		out.Endpoint = v
+	}
+	if v := strings.TrimSpace(reg.S3.Region); v != "" {
+		out.Region = v
+	}
+	out.ForcePathStyle = reg.S3.PathStyleAccess
+	if v := strings.TrimSpace(reg.S3.AccessKeyID); v != "" {
+		out.AccessKeyID = v
+	}
+	if v := strings.TrimSpace(reg.S3.SecretAccessKey); v != "" {
+		out.SecretAccessKey = v
+	}
+	return out
 }
 
 func (m *Manager) executeRegistrationEngine(ctx context.Context, req RunRequest, reg RunConfig, table string, regS3 s3io.Config, basePrefix string, objs []icebergObj) error {
