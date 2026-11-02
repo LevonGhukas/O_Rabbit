@@ -48,7 +48,7 @@ func run() int {
 	bindMasterFlags(&cfg)
 	flag.Parse()
 
-	log := newMasterLogger(cfg.LogLevel, cfg.LogFormat)
+	log, logBuf := newMasterBufferedLogger(cfg.LogLevel, cfg.LogFormat)
 	slog.SetDefault(log)
 	if err := cfg.validateLeasePolicy(); err != nil {
 		log.Error("invalid task lease configuration", slog.String("err", err.Error()))
@@ -330,6 +330,7 @@ func run() int {
 	httpSrv := httpapi.NewServer(log, st, bc, k, httpapi.StatusInfo{PID: os.Getpid(), HTTPAddr: cfg.HTTPAddr, GRPCAddr: cfg.GRPCAddr, DBPath: processLock.Identity}, cfg.HTTPAuthToken)
 	httpSrv.SetLeadershipGuard(leadership)
 	httpSrv.SetRemoteOpsToken(cfg.RemoteOpsAuthToken)
+	httpSrv.SetLogBuffer(logBuf)
 	httpSrv.SetRemoteOpsEnabled(cfg.RemoteOpsEnabled)
 	trustedProxies, err := cfg.RateLimits.trustedProxies()
 	if err != nil {

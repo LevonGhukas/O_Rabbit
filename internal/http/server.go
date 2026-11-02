@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/auth"
@@ -27,6 +28,7 @@ import (
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 	"github.com/LevonGhukas/O_Rabbit/internal/jobopts"
+	"github.com/LevonGhukas/O_Rabbit/internal/logbuffer"
 	sshops "github.com/LevonGhukas/O_Rabbit/internal/ops/ssh"
 	"github.com/LevonGhukas/O_Rabbit/internal/planner"
 	"github.com/LevonGhukas/O_Rabbit/internal/telemetry"
@@ -50,6 +52,8 @@ type Server struct {
 	k                crypto.Key
 	authToken        string
 	remoteOpsToken   string
+	logBuf           *logbuffer.Buffer
+	logStreams       atomic.Int32
 	remoteOpsOptIn   bool
 	status           StatusInfo
 	streams          *StreamHub

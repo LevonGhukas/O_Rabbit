@@ -6,9 +6,12 @@ import (
 	"strings"
 	"time"
 
+	"fmt"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
 	opsdocker "github.com/LevonGhukas/O_Rabbit/internal/ops/docker"
 	sshops "github.com/LevonGhukas/O_Rabbit/internal/ops/ssh"
+
+	"github.com/LevonGhukas/O_Rabbit/internal/redact"
 )
 
 func (s *Server) handleServerContainers(w http.ResponseWriter, r *http.Request, serverID string, parts []string) {
@@ -129,6 +132,9 @@ func (s *Server) handleContainerLogs(w http.ResponseWriter, r *http.Request, ser
 		writeDependencyUnavailable(w, err.Error())
 		return
 	}
+	for i := range items {
+		items[i].Line = redact.Text(items[i].Line)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
@@ -151,6 +157,13 @@ func (s *Server) handleContainerLogsStream(w http.ResponseWriter, r *http.Reques
 		writeInternalError(w, "streaming unavailable")
 		return
 	}
+	// Each container stream holds an SSH session open; share the log viewer limit.
+	if s.logStreams.Add(1) > maxLogStreams {
+		s.logStreams.Add(-1)
+		writeDependencyUnavailable(w, fmt.Sprintf("too many live log viewers (limit %d); close another log tab and retry", maxLogStreams))
+		return
+	}
+	defer s.logStreams.Add(-1)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -164,7 +177,7 @@ func (s *Server) handleContainerLogsStream(w http.ResponseWriter, r *http.Reques
 			Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 			Level:     "INFO",
 			ServerID:  server.ID,
-			Data:      map[string]any{"line": line.Line},
+			Data:      map[string]any{"line": redact.Text(line.Line)},
 		})
 	})
 	if err != nil && r.Context().Err() == nil {
