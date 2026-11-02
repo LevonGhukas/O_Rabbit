@@ -49,6 +49,7 @@ var migrations = []migration{
 	{version: 33, sql: schemaV33},
 	{version: 34, sql: schemaV34},
 	{version: 35, sql: schemaV35},
+	{version: 36, sql: schemaV36},
 }
 
 // normalizeStoredTimestamps rewrites every stored timestamp in
@@ -188,6 +189,14 @@ ALTER TABLE audit_log ADD COLUMN principal TEXT NOT NULL DEFAULT '';
 ALTER TABLE audit_log ADD COLUMN credential_id TEXT NOT NULL DEFAULT '';
 `
 
+// schemaV36 indexes events for the cross-run log viewer (GET /events): time
+// ranges use ts, task filters use task_id. Queries page by rowid, which is the
+// table's own key and needs no index.
+const schemaV36 = `
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
+`
+
 // schemaV32 stores the rows each task read at its largest cursor value, which
 // the commit turns into the dataset's high-water-mark boundary.
 const schemaV32 = `
@@ -196,14 +205,6 @@ ALTER TABLE tasks ADD COLUMN hwm_boundary_json TEXT NOT NULL DEFAULT '';
 
 // schemaV33 records the optional commit-time source reconciliation, one row per
 // task, upserted because a commit attempt can be retried.
-// schemaV34 indexes events for the cross-run log viewer (GET /events): time
-// ranges use ts, task filters use task_id. Queries page by rowid, which is the
-// table's own key and needs no index.
-const schemaV34 = `
-CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
-CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
-`
-
 const schemaV33 = `
 CREATE TABLE IF NOT EXISTS source_reconciliations (
   run_id TEXT NOT NULL,
