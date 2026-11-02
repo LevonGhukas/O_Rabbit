@@ -178,6 +178,10 @@ func main() {
 		"managed_temp_root":  filepath.Base(workspaceManager.Root()),
 		"worker_instance_id": workerInstanceID,
 	}
+	// Free-form capabilities, not part of the gRPC contract: the UI shows this as available memory.
+	if mem := memoryLimitBytes(); mem > 0 {
+		cap["memory_bytes"] = mem
+	}
 	initialCapJSON, _ := json.Marshal(cap)
 
 	reg, err := registerWithRetry(ctx, log, cp, &grpcpb.RegisterWorkerRequest{WorkerId: cfg.WorkerID, Addr: cfg.WorkerAddr, CapabilitiesJson: string(initialCapJSON)})

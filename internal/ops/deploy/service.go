@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,6 +56,17 @@ type Service struct {
 
 type DeploymentParams struct {
 	Scale *int `json:"scale,omitempty"`
+	// Worker-only settings. Empty means "not set": no name prefix and no
+	// resource limit, which keeps the previous deployment behavior.
+	//
+	// Name groups the workers of one deployment: they run as their own Compose
+	// project (orabbit-worker-<name>) with IDs <name>-<container id>, so groups
+	// can be scaled and redeployed independently.
+	Name string `json:"name,omitempty"`
+	// CPUs limits each worker container, in CPUs (for example "1.5").
+	CPUs string `json:"cpus,omitempty"`
+	// Memory limits each worker container, as a Docker size ("512m", "2g").
+	Memory string `json:"memory,omitempty"`
 }
 
 type PreparedDeployment struct {
@@ -133,6 +146,60 @@ func ValidateScale(component string, scale *int) error {
 	}
 }
 
+var (
+	// Lowercase letters, digits and dashes: valid in a Compose project name,
+	// a hostname and a worker ID, and needs no shell quoting.
+	workerNamePattern   = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
+	workerCPUsPattern   = regexp.MustCompile(`^[0-9]{1,2}(\.[0-9]{1,2})?$`)
+	workerMemoryPattern = regexp.MustCompile(`^([0-9]{1,6})([mg])$`)
+)
+
+const (
+	minWorkerCPUs     = 0.1
+	maxWorkerCPUs     = 64
+	minWorkerMemoryMB = 64
+	maxWorkerMemoryMB = 512 * 1024
+)
+
+// NormalizeWorkerSettings trims and lowercases the worker-only parameters and
+// validates them. Other components must leave them empty.
+func NormalizeWorkerSettings(component string, params DeploymentParams) (DeploymentParams, error) {
+	params.Name = strings.TrimSpace(params.Name)
+	params.CPUs = strings.TrimSpace(params.CPUs)
+	params.Memory = strings.ToLower(strings.TrimSpace(params.Memory))
+
+	if strings.TrimSpace(component) != "worker" {
+		if params.Name != "" || params.CPUs != "" || params.Memory != "" {
+			return params, fmt.Errorf("name, cpus and memory are only supported for worker deployments")
+		}
+		return params, nil
+	}
+	if params.Name != "" && !workerNamePattern.MatchString(params.Name) {
+		return params, fmt.Errorf("worker name must be 1-32 lowercase letters, digits or dashes, starting and ending with a letter or digit")
+	}
+	if params.CPUs != "" {
+		cpus, err := strconv.ParseFloat(params.CPUs, 64)
+		if err != nil || !workerCPUsPattern.MatchString(params.CPUs) || cpus < minWorkerCPUs || cpus > maxWorkerCPUs {
+			return params, fmt.Errorf("worker cpus must be a number from %.1f to %d with at most two decimals, got %q", minWorkerCPUs, maxWorkerCPUs, params.CPUs)
+		}
+	}
+	if params.Memory != "" {
+		m := workerMemoryPattern.FindStringSubmatch(params.Memory)
+		if m == nil {
+			return params, fmt.Errorf("worker memory must be a whole number with m or g, such as 512m or 2g, got %q", params.Memory)
+		}
+		n, _ := strconv.Atoi(m[1])
+		mb := n
+		if m[2] == "g" {
+			mb = n * 1024
+		}
+		if mb < minWorkerMemoryMB || mb > maxWorkerMemoryMB {
+			return params, fmt.Errorf("worker memory must be between %dm and %dg, got %q", minWorkerMemoryMB, maxWorkerMemoryMB/1024, params.Memory)
+		}
+	}
+	return params, nil
+}
+
 func (s *Service) ValidateProject(ctx context.Context, target sshops.SSHTarget, projectDir string) (ProjectValidation, error) {
 	projectDir = strings.TrimSpace(projectDir)
 	if projectDir == "" {
@@ -197,6 +264,10 @@ func (s *Service) PrepareDeployment(ctx context.Context, target sshops.SSHTarget
 	if err := ValidateScale(component, params.Scale); err != nil {
 		return PreparedDeployment{}, err
 	}
+	params, err := NormalizeWorkerSettings(component, params)
+	if err != nil {
+		return PreparedDeployment{}, err
+	}
 	if _, err := s.ssh.TestConnection(ctx, target); err != nil {
 		return PreparedDeployment{}, fmt.Errorf("ssh validation failed: %w", err)
 	}
@@ -230,7 +301,18 @@ func (s *Service) PrepareDeployment(ctx context.Context, target sshops.SSHTarget
 		if params.Scale != nil {
 			scale = *params.Scale
 		}
-		plan.Command = buildScriptCommand(projectDir, ".env.worker", plan.ScriptID, map[string]string{"WORKER_SCALE": fmt.Sprintf("%d", scale)})
+		env := map[string]string{"WORKER_SCALE": fmt.Sprintf("%d", scale)}
+		// Unset settings are left out so the script and Compose keep their defaults.
+		for key, value := range map[string]string{
+			"ORABBIT_WORKER_NAME":   params.Name,
+			"ORABBIT_WORKER_CPUS":   params.CPUs,
+			"ORABBIT_WORKER_MEMORY": params.Memory,
+		} {
+			if value != "" {
+				env[key] = value
+			}
+		}
+		plan.Command = buildScriptCommand(projectDir, ".env.worker", plan.ScriptID, env)
 	case "minio":
 		plan.ScriptID = "deploy-minio.sh"
 		plan.Command = buildScriptCommand(projectDir, ".env.minio", plan.ScriptID, nil)

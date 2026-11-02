@@ -653,6 +653,13 @@ and logs, configuration files and deployments (`/servers`, `/deployments`,
   reach them and vice versa.
 - Every server needs a pinned SSH host key (`host_key_fingerprint`, such as
   `SHA256:...`). Verify it out of band with `ssh-keyscan <host> | ssh-keygen -lf -`.
+- A worker deployment (`POST /deployments` with `component: worker`) accepts
+  `params.scale` (1-50 containers), `params.name` (the group runs as its own
+  Compose project `orabbit-worker-<name>`, with worker IDs `<name>-<container>`),
+  and per-container limits `params.cpus` (`0.1`-`64`) and `params.memory`
+  (`64m`-`512g`). Unset limits mean no limit. `GET /workers` reports
+  `running_tasks` per worker, and workers report `memory_bytes` in their
+  capabilities.
 
 </details>
 
@@ -968,6 +975,8 @@ cp .env.minio.example .env.minio
 ./deploy-minio.sh
 ./deploy-master.sh
 WORKER_SCALE=2 ./deploy-worker.sh
+# Optional: a named group with per-container limits (its own Compose project).
+ORABBIT_WORKER_NAME=etl WORKER_SCALE=2 ORABBIT_WORKER_CPUS=1.5 ORABBIT_WORKER_MEMORY=2g ./deploy-worker.sh
 ```
 
 | Compose file | Purpose |

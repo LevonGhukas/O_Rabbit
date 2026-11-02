@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -25,6 +26,8 @@ type Worker struct {
 	LastHeartbeat string           `json:"last_heartbeat"`
 	Capabilities  json.RawMessage  `json:"capabilities_json"`
 	Instances     []WorkerInstance `json:"instances"`
+	// RunningTasks is the number of tasks this worker currently holds a lease on.
+	RunningTasks int `json:"running_tasks"`
 }
 
 func (s *Store) UpdateWorkerHeartbeat(ctx context.Context, bootID, workerID, addr, capabilities, hostname, version string, pid int) error {
@@ -69,6 +72,35 @@ func (s *Store) UpdateWorkerHeartbeat(ctx context.Context, bootID, workerID, add
 		return tx.Commit()
 	})
 	return err
+}
+
+// loadWorkerRunningTasks fills RunningTasks with one grouped query (served by
+// the tasks(status, ...) index) instead of one query per worker.
+func (s *Store) loadWorkerRunningTasks(ctx context.Context, workers []Worker) error {
+	if len(workers) == 0 {
+		return nil
+	}
+	rows, err := s.rdb.QueryContext(ctx, `SELECT worker_id, COUNT(*) FROM tasks WHERE status='RUNNING' AND worker_id IS NOT NULL GROUP BY worker_id`)
+	if err != nil {
+		return fmt.Errorf("count running tasks per worker: %w", err)
+	}
+	defer rows.Close()
+	counts := make(map[string]int)
+	for rows.Next() {
+		var workerID string
+		var n int
+		if err := rows.Scan(&workerID, &n); err != nil {
+			return fmt.Errorf("scan running task count: %w", err)
+		}
+		counts[workerID] = n
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read running task counts: %w", err)
+	}
+	for i := range workers {
+		workers[i].RunningTasks = counts[workers[i].ID]
+	}
+	return nil
 }
 
 func (s *Store) loadWorkerInstances(ctx context.Context, workers []Worker) error {
@@ -121,6 +153,9 @@ func (s *Store) ListWorkers(ctx context.Context) ([]Worker, error) {
 	if err := s.loadWorkerInstances(ctx, out); err != nil {
 		return nil, err
 	}
+	if err := s.loadWorkerRunningTasks(ctx, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -147,6 +182,9 @@ func (s *Store) ListWorkersActive(ctx context.Context, activeSince string) ([]Wo
 		return nil, err
 	}
 	if err := s.loadWorkerInstances(ctx, out); err != nil {
+		return nil, err
+	}
+	if err := s.loadWorkerRunningTasks(ctx, out); err != nil {
 		return nil, err
 	}
 	return out, nil

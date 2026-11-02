@@ -11,6 +11,11 @@ services:
       - ${ORABBIT_ENV_FILE:-.env.worker}
     environment:
       AWS_EC2_METADATA_DISABLED: "true"
+      ORABBIT_WORKER_NAME: ${ORABBIT_WORKER_NAME:-}
+    # Per-container limits, set by deploy-worker.sh (UI/API: cpus, memory).
+    # 0 is Docker's "no limit", the behavior before these settings existed.
+    cpus: ${ORABBIT_WORKER_CPUS:-0}
+    mem_limit: ${ORABBIT_WORKER_MEMORY:-0}
     entrypoint:
       - /bin/sh
       - -ec
@@ -18,7 +23,8 @@ services:
       - |
         : "$${ORABBIT_MASTER_GRPC_ADDR:?set ORABBIT_MASTER_GRPC_ADDR to host:port, for example orabbit-master:9102}"
         : "$${ORABBIT_WORKER_AUTH_TOKEN:?set ORABBIT_WORKER_AUTH_TOKEN to the value configured on the master}"
-        wid="$${ORABBIT_WORKER_ID:-$${HOSTNAME}}"
+        # An explicit ORABBIT_WORKER_ID wins; a deployment name prefixes the container hostname.
+        wid="$${ORABBIT_WORKER_ID:-$${ORABBIT_WORKER_NAME:+$${ORABBIT_WORKER_NAME}-}$${HOSTNAME}}"
         waddr="$${ORABBIT_WORKER_ADVERTISE_ADDR:-$${wid}}"
 
         exec /usr/local/bin/orabbit-worker \
