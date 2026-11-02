@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -20,19 +21,38 @@ import (
 // land after the attempt was already recorded as failed.
 func TestRunIceCLIRegisterKillsIceProcessGroupOnDeadline(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
-	script := "#!/bin/sh\nsleep 600 &\necho $! > " + pidFile + "\nwait\n"
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	// Write the PID atomically so the test never reads a half-written file.
+	script := "#!/bin/sh\nsleep 600 &\necho $! > " + pidFile + ".tmp\nmv " + pidFile + ".tmp " + pidFile + "\nwait\n"
+	// The attempt ends once the grandchild exists, not after a fixed time:
+	// starting a process can take longer than any short fixed deadline on a
+	// loaded machine or under the race detector. exec.CommandContext kills
+	// through cmd.Cancel for a deadline and a cancel alike; the timeout is
+	// only a safety net.
+	ctx, cancel := context.WithTimeout(context.Background(), iceTestReturnTimeout)
 	defer cancel()
+	var canceledAt atomic.Int64
+	go func() {
+		for ctx.Err() == nil {
+			if _, err := os.Stat(pidFile); err == nil {
+				canceledAt.Store(time.Now().UnixNano())
+				cancel()
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
 
-	start := time.Now()
 	err := runFakeIce(t, ctx, script, s3io.Config{Region: "us-east-1"}, iceTestRunConfig(), []icebergObj{{key: "a.parquet"}})
-	elapsed := time.Since(start)
+	returned := time.Now()
 
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if elapsed >= iceWaitDelay {
-		t.Fatalf("returned after %v; grandchild kept ice's pipes open until WaitDelay", elapsed)
+	if canceledAt.Load() == 0 {
+		t.Fatal("fake ice never started its grandchild")
+	}
+	if elapsed := returned.Sub(time.Unix(0, canceledAt.Load())); elapsed >= iceWaitDelay {
+		t.Fatalf("returned %v after the attempt ended; grandchild kept ice's pipes open until WaitDelay", elapsed)
 	}
 	raw, readErr := os.ReadFile(pidFile)
 	if readErr != nil {

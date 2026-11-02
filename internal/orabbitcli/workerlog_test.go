@@ -10,7 +10,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 )
 
 func TestEnsureLocalWorkersPassesWorkerLogSettings(t *testing.T) {
@@ -60,19 +59,17 @@ done
 		pg.wait()
 	}()
 
-	deadline := time.Now().Add(2 * time.Second)
-	var got string
-	for time.Now().Before(deadline) {
-		b, err := os.ReadFile(argsPath)
-		if err == nil {
-			got = string(b)
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
+	// The fake worker's shell creates the file before writing it, so wait
+	// for content, not just the file. The limit only matters on a loaded
+	// machine: starting a process under the race detector can take seconds.
+	if err := waitForFile(argsPath, fakeWorkerStartTimeout); err != nil {
+		t.Fatal(err)
 	}
-	if got == "" {
-		t.Fatalf("timed out waiting for worker args file %s", argsPath)
+	b, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read worker args: %v", err)
 	}
+	got := string(b)
 
 	for _, want := range []string{
 		"-master",
