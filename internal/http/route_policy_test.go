@@ -48,6 +48,9 @@ func TestSensitiveRoutesRequireTheDocumentedScopes(t *testing.T) {
 		{"/servers", "GET", auth.ScopeRemoteOps}, {"/executions/", "POST", auth.ScopeRemoteOps},
 		{"/credentials", "GET", auth.ScopeCredentialsAdmin}, {"/credentials/", "POST", auth.ScopeCredentialsAdmin},
 		{"/runs/validate", "POST", auth.ScopeRead},
+		{"/events", "GET", auth.ScopeRead}, {"/events/stream", "GET", auth.ScopeRead},
+		{"/logs/master", "GET", auth.ScopeRead}, {"/logs/master/stream", "GET", auth.ScopeRead},
+		{"/logs/master", "POST", auth.ScopeJobsWrite},
 	}
 	for _, c := range cases {
 		if got := policies[c.route](c.method, ""); got != c.want {
