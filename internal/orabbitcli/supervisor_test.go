@@ -39,7 +39,7 @@ done
 		_ = proc.wait()
 	}()
 
-	if err := waitForManagedProcessCount(tempDir, 1, 2*time.Second); err != nil {
+	if err := waitForManagedProcessCount(tempDir, 1, fakeWorkerStartTimeout); err != nil {
 		t.Fatalf("waitForManagedProcessCount: %v", err)
 	}
 
@@ -100,7 +100,7 @@ done
 		})
 	}()
 
-	if err := waitForManagedProcessCount(tempDir, 1, 2*time.Second); err != nil {
+	if err := waitForManagedProcessCount(tempDir, 1, fakeWorkerStartTimeout); err != nil {
 		t.Fatalf("waitForManagedProcessCount: %v", err)
 	}
 
@@ -114,7 +114,7 @@ done
 	if procs[0].Kind != "worker" || procs[0].WorkerID != "local-01" {
 		t.Fatalf("unexpected managed worker: %+v", procs[0])
 	}
-	if err := waitForFile(argsPath, 2*time.Second); err != nil {
+	if err := waitForFile(argsPath, fakeWorkerStartTimeout); err != nil {
 		t.Fatalf("waitForFile(worker args): %v", err)
 	}
 
@@ -163,6 +163,11 @@ func waitForManagedProcessCount(runtimeDir string, want int, timeout time.Durati
 	}
 	return fmt.Errorf("timed out waiting for %d managed processes in %s", want, runtimeDir)
 }
+
+// fakeWorkerStartTimeout bounds waiting for a fake worker process to start
+// and write its arguments. The waits return as soon as it has; the limit is
+// generous because process start-up under a parallel -race run is slow.
+const fakeWorkerStartTimeout = 15 * time.Second
 
 func waitForFile(path string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)

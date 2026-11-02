@@ -774,7 +774,7 @@ different permissions on the same API, and the audit log records which one acted
 
 | Scope | Grants |
 |---|---|
-| `read` | All GET/HEAD on runs, jobs, connections (secrets redacted), workers, source engines, SSE, `/metrics`, `/status`; `POST /runs/validate` (dry run) |
+| `read` | All GET/HEAD on runs, jobs, connections (secrets redacted), workers, source engines, SSE, the log viewer (`/events`, `/logs/master`), `/metrics`, `/status`; `POST /runs/validate` (dry run) |
 | `jobs:write` | Create, update, delete jobs; submit, cancel, recover and retry runs; maintenance submit |
 | `secrets:admin` | Create, update, delete connections (they hold encrypted secrets) |
 | `workers:admin` | Worker enrollment tokens, worker identity list and revoke (all methods under `/workers/...` except `GET /workers`) |
@@ -794,7 +794,7 @@ Authorization matrix (paths are under `/api/v1`; the deprecated aliases share th
 | `/workers/enrollment-tokens`, `/workers/identities...` | `workers:admin` | `workers:admin` |
 | `/servers`, `/deployments`, `/executions` | `remote_ops` | `remote_ops` |
 | `/credentials`, `/credentials/{id}/revoke` | `credentials:admin` | `credentials:admin` |
-| `/source-engines`, `/sse`, `/metrics`, `/status` | `read` | `jobs:write` (these are read-only; other methods return 405 once authorized) |
+| `/source-engines`, `/sse`, `/events`, `/events/stream`, `/logs/master`, `/logs/master/stream`, `/metrics`, `/status` | `read` | `jobs:write` (these are read-only; other methods return 405 once authorized) |
 | `/healthz`, `/ready` | none | none |
 
 A missing, malformed, expired or revoked credential returns `401`. A valid
