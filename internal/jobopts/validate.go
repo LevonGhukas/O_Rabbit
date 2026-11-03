@@ -63,7 +63,7 @@ var deprecatedKeys = map[string]string{
 	"iceberg_enabled":        "use iceberg_registration.enabled",
 	"iceberg_engine":         "use iceberg_registration.engine",
 	"iceberg_table":          "use iceberg_registration.table",
-	"iceberg_partition_keys": "use partition_keys",
+	"iceberg_partition_keys": "use " + RunPartitionOptions,
 	"fetch_limit_rows":       "it has no effect",
 }
 
@@ -196,6 +196,7 @@ func Validate(raw json.RawMessage, sourceSQL string, mode ValidateMode) error {
 		// Older versions accepted these and fell back to defaults at run
 		// time, so stored jobs relying on that keep running.
 		strictOnlyChecks(o, add)
+		rejectPartitionKeys(keys, add)
 	}
 	if len(errs) == 0 {
 		return nil
@@ -233,6 +234,39 @@ func strictOnlyChecks(o Options, add func(field, format string, args ...any)) {
 			add("."+field, "must be 0 or greater, got %d", value)
 		}
 	}
+}
+
+// RunPartitionOptions are the run request settings that partition worker
+// files and the Iceberg table. Partitioning is chosen per run, never by
+// options_json.
+const RunPartitionOptions = "iceberg.partition_keys or iceberg.options.partition_spec in the run request"
+
+// ErrPartitionKeysIneffective explains why partition keys are refused in
+// options_json: nothing reads them there, so they only looked like a partition.
+const ErrPartitionKeysIneffective = "is not read from job options and does not partition anything; remove it and set " +
+	RunPartitionOptions + " (partition_spec transforms: identity, year, month, day, hour, bucket[N], truncate[N])"
+
+// partitionKeyOptions are the options_json keys that never partitioned output.
+var partitionKeyOptions = []string{"iceberg_partition_keys", "partition_keys"}
+
+// rejectPartitionKeys refuses non-empty partition keys on new and updated
+// jobs. Empty lists and null set nothing and stay accepted.
+func rejectPartitionKeys(keys map[string]json.RawMessage, add func(field, format string, args ...any)) {
+	for _, name := range partitionKeyOptions {
+		value, ok := keys[name]
+		if !ok || isEmptyList(value) {
+			continue
+		}
+		add("."+name, "%s", ErrPartitionKeysIneffective)
+	}
+}
+
+func isEmptyList(value json.RawMessage) bool {
+	if isNull(value) {
+		return true
+	}
+	var items []json.RawMessage
+	return json.Unmarshal(value, &items) == nil && len(items) == 0
 }
 
 // DeprecatedKeys lists the deprecated options_json keys present in raw.

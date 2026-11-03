@@ -74,8 +74,12 @@ type Options struct {
 	FetchSize int `json:"fetch_size,omitempty"`
 
 	// Downstream configurations
-	TargetFileBytes int64    `json:"target_file_bytes"`
-	PartitionKeys   []string `json:"partition_keys,omitempty"`
+	TargetFileBytes int64 `json:"target_file_bytes"`
+
+	// Deprecated: PartitionKeys in options_json is never read; partitioning is
+	// set per run (RunPartitionOptions). New and updated jobs are refused when
+	// it is set; stored jobs still run and report it.
+	PartitionKeys []string `json:"partition_keys,omitempty"`
 
 	// Consistency configuration
 	ConsistencyMode string `json:"consistency_mode,omitempty"`
@@ -117,6 +121,9 @@ func (o Options) DeprecatedUsages(srcEngine string) []string {
 	}
 	if o.ChunkSize > 0 {
 		out = append(out, "chunk_size (use planned_tasks or target_rows_per_task)")
+	}
+	if len(o.PartitionKeys) > 0 {
+		out = append(out, "partition_keys (not read; use "+RunPartitionOptions+")")
 	}
 	if srcEngine == "s3" && strings.TrimSpace(o.FileFormat) == "" {
 		out = append(out, "S3 format inferred from the file extension (set format)")
