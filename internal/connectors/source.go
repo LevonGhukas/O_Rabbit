@@ -380,6 +380,17 @@ func (w *errorWrappedSourceQueryReader) ValidateQueryCursorColumn(ctx context.Co
 	return v, ClassifyConnectorError(err)
 }
 
+// ScanDecimalColumns forwards to the connector when it can measure decimal
+// columns (Cassandra); other sources report ErrColumnProbeUnsupported.
+func (w *errorWrappedTableReader) ScanDecimalColumns(ctx context.Context, table, query string, columns []string) (map[string]DecimalColumnStats, error) {
+	s, ok := w.inner.(DecimalColumnScanner)
+	if !ok {
+		return nil, ErrColumnProbeUnsupported
+	}
+	r, err := s.ScanDecimalColumns(ctx, table, query, columns)
+	return r, ClassifyConnectorError(err)
+}
+
 func (w *errorWrappedSourceQueryReader) ProbeQueryColumns(ctx context.Context, query string, probes []ColumnProbe) ([]ColumnProbeResult, error) {
 	p, ok := w.inner.(QueryColumnProber)
 	if !ok {

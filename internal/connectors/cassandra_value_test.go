@@ -6,6 +6,8 @@ import (
 
 	"github.com/gocql/gocql"
 	"github.com/stretchr/testify/require"
+
+	"github.com/LevonGhukas/O_Rabbit/internal/typesystem"
 )
 
 func TestCassandraToDriverValueIsLossless(t *testing.T) {
@@ -22,5 +24,15 @@ func TestCassandraToDriverValueIsLossless(t *testing.T) {
 	require.Equal(t, "123e4567-e89b-12d3-a456-426614174000", value)
 	value, err = cassandraToDriverValue(map[string]any{"b": 2, "a": 1})
 	require.NoError(t, err)
-	require.Equal(t, `{"a":1,"b":2}`, value)
+	require.Equal(t, typesystem.MapValue{{Key: "a", Value: 1}, {Key: "b", Value: 2}}, value)
+	require.Equal(t, `{"a":1,"b":2}`, cassandraJSONText(t, value))
+}
+
+// cassandraJSONText is how a map, tuple or UDT value is stored in a column
+// that keeps a JSON text type. It must stay the text earlier releases wrote.
+func cassandraJSONText(t *testing.T, value any) any {
+	t.Helper()
+	text, err := typesystem.Convert(value, typesystem.LogicalType{Kind: typesystem.KindJSON})
+	require.NoError(t, err)
+	return text
 }
