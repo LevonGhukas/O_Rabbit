@@ -516,6 +516,18 @@ credential_vending:
   table that is partitioned while the run has no `partition_spec`, or files
   from workers older than protocol 8, fail registration with a
   non-retryable error and nothing is committed; set the spec and export again.
+- With `engine: ice`, appends and the first load into an empty table go
+  through `ice insert`. A full refresh of a table that already has data is
+  committed by the master with iceberg-go instead, as one snapshot that
+  replaces every live file: the table is never dropped, readers never see it
+  missing or empty, earlier snapshots stay until `metadata_retention` expires
+  them, and a failed commit leaves the previous snapshot current. The table
+  keeps its schema, so a source schema change follows `schema_evolution` as
+  on an append instead of being absorbed by a recreated table. Ice workers
+  do not split files by partition, so a full refresh of a partitioned `ice`
+  table that already has data fails with a non-retryable
+  `CONFIGURATION_INVALID` and nothing is committed; use `engine: rest-go` for
+  it.
 
 </details>
 

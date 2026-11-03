@@ -316,7 +316,6 @@ func registrationS3(dataset s3io.Config, reg RunConfig) s3io.Config {
 }
 
 func (m *Manager) executeRegistrationEngine(ctx context.Context, req RunRequest, reg RunConfig, table string, regS3 s3io.Config, basePrefix string, objs []icebergObj) error {
-	isFullRefresh := !req.Incremental || strings.EqualFold(req.WriteMode, "overwrite")
 	switch reg.Engine {
 	case "rest-go":
 		return runRESTGoRegister(ctx, m.log, req, reg, table, regS3, basePrefix, objs)
@@ -329,20 +328,7 @@ func (m *Manager) executeRegistrationEngine(ctx context.Context, req RunRequest,
 		if got := strings.TrimSuffix(strings.TrimSpace(tbl.Location()), "/"); got != "" && got != expectedLocation {
 			return fmt.Errorf("iceberg table %s location %q does not match dataset location %q; ice insert requires parquet files under the table location", table, got, expectedLocation)
 		}
-
-		if isFullRefresh && tbl.CurrentSnapshot() != nil {
-			// Full Refresh: drop and recreate the table so that the subsequent
-			// ice insert starts from an empty snapshot (no previous rows remain).
-			m.log.Info("iceberg full refresh: dropping table before ice insert",
-				slog.String("run_id", req.RunID),
-				slog.String("table", table),
-			)
-			if err := dropAndRecreateCatalogTable(ctx, m.log, req, reg, table, regS3, basePrefix); err != nil {
-				return fmt.Errorf("iceberg full refresh drop-recreate: %w", err)
-			}
-		}
-
-		return runIceCLIRegister(ctx, m.execCommand, m.iceBinary, req, reg, table, regS3, objs)
+		return m.registerIceTable(ctx, tbl, req, reg, table, regS3, objectURIs(req.DatasetS3.Bucket, objs))
 	default:
 		return fmt.Errorf("iceberg engine %q is not supported by master", reg.Engine)
 	}

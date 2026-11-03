@@ -134,7 +134,7 @@ httpCacheDir: data/ice/http/cache
 		{key: "exports/orders/part-000002-000.parquet"},
 	}
 
-	if err := runIceCLIRegister(context.Background(), exec.CommandContext, scriptPath, req, req.Registration, "mssql.orders", regS3, objs); err != nil {
+	if err := runIceCLIRegister(context.Background(), exec.CommandContext, scriptPath, req.Registration, "mssql.orders", regS3, objectURIs(req.DatasetS3.Bucket, objs)); err != nil {
 		t.Fatalf("runIceCLIRegister: %v", err)
 	}
 
@@ -245,7 +245,7 @@ func runFakeIce(t *testing.T, ctx context.Context, script string, regS3 s3io.Con
 	req := RunRequest{RunID: "run-ice", Registration: reg, DatasetS3: s3io.Config{Bucket: "bucket1"}}
 	done := make(chan error, 1)
 	go func() {
-		done <- runIceCLIRegister(ctx, exec.CommandContext, scriptPath, req, reg, "mssql.orders", regS3, objs)
+		done <- runIceCLIRegister(ctx, exec.CommandContext, scriptPath, reg, "mssql.orders", regS3, objectURIs(req.DatasetS3.Bucket, objs))
 	}()
 	select {
 	case err := <-done:
