@@ -174,6 +174,58 @@ func TestRunStartForStoredInvalidOptionsReturns422(t *testing.T) {
 	}
 }
 
+// TID-948: no worker executes a cdc_stream partition, so the strategy is
+// refused when a job is saved and when a job stored earlier is run, with the
+// reason and a supported alternative, before a run or task exists.
+func TestCDCStreamJobsAreRefusedBeforeARunExists(t *testing.T) {
+	const field = "options_json.partition_strategy"
+	refusesCDC := func(rec *httptest.ResponseRecorder) bool {
+		resp := decodeJobError(t, rec)
+		for _, e := range resp.Error.Details.Errors {
+			if e.Field == field && strings.Contains(e.Error, "change data capture is not supported") && strings.Contains(e.Error, "full refresh") {
+				return true
+			}
+		}
+		return false
+	}
+	for _, options := range []string{`{"partition_strategy":"cdc_stream"}`, `{"partition_strategy":" CDC_STREAM "}`} {
+		srv, st := jobValidationServer(t)
+		rec := serveJSON(srv, http.MethodPost, "/api/v1/jobs", jobBody(options))
+		if rec.Code != http.StatusBadRequest || !refusesCDC(rec) {
+			t.Errorf("create %s: status=%d body=%s, want 400 explaining CDC is not supported", options, rec.Code, rec.Body.String())
+		}
+		if jobs, _ := st.ListJobs(context.Background()); len(jobs) != 0 {
+			t.Errorf("create %s: %d job(s) stored, want none", options, len(jobs))
+		}
+
+		created := serveJSON(srv, http.MethodPost, "/api/v1/jobs", jobBody(`{"partition_strategy":"ordered_cursor"}`))
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create ordered_cursor status=%d body=%s", created.Code, created.Body.String())
+		}
+		var job db.Job
+		decodeJSONBody(t, created, &job)
+		rec = serveJSON(srv, http.MethodPut, "/api/v1/jobs/"+job.ID, jobBody(options))
+		if rec.Code != http.StatusBadRequest || !refusesCDC(rec) {
+			t.Errorf("update %s: status=%d body=%s, want 400 explaining CDC is not supported", options, rec.Code, rec.Body.String())
+		}
+		if stored, err := st.GetJob(context.Background(), job.ID); err != nil || string(stored.OptionsJSON) != `{"partition_strategy":"ordered_cursor"}` {
+			t.Errorf("update %s: stored options=%s err=%v, want the previous options unchanged", options, stored.OptionsJSON, err)
+		}
+
+		// Saved before the strategy was refused.
+		if err := st.CreateJob(context.Background(), db.Job{ID: "cdc", Name: "cdc", SourceConnectionID: "src", TargetConnectionID: "tgt", TargetTable: "t", WriteMode: "overwrite", OptionsJSON: json.RawMessage(options)}); err != nil {
+			t.Fatal(err)
+		}
+		rec = serveJSON(srv, http.MethodPost, "/api/v1/jobs/cdc/runs", "")
+		if resp := decodeJobError(t, rec); rec.Code != http.StatusUnprocessableEntity || resp.Error.FailureClass != string(failure.FailureConfigurationInvalid) || !refusesCDC(rec) {
+			t.Errorf("run %s: status=%d body=%s, want 422 CONFIGURATION_INVALID explaining CDC is not supported", options, rec.Code, rec.Body.String())
+		}
+		if runs, _ := st.ListRuns(context.Background()); len(runs) != 0 {
+			t.Errorf("run %s: %d run(s) created, want none", options, len(runs))
+		}
+	}
+}
+
 func TestJobWriteModeIsValidatedAndDefaulted(t *testing.T) {
 	body := func(mode string, incremental bool) string {
 		return fmt.Sprintf(`{"name":"job","source_connection_id":"src","target_connection_id":"tgt","target_table":"t","write_mode":%q,"incremental":%t,"hwm_column":"id","options_json":{"partition_strategy":"single"}}`, mode, incremental)
