@@ -176,3 +176,18 @@ func decimalFromFloat(v float64, bits int, original any, target LogicalType) (De
 	}
 	return DecimalValue{Unscaled: unscaled, Scale: scale}, nil
 }
+
+// DecimalDigits reports how many digits an exact decimal text needs before
+// and after the decimal point, by the same rules the decimal converter uses.
+// "123.45" needs 3 and 2, "-0.005" needs 0 and 3.
+func DecimalDigits(text string) (integerDigits, scale int, ok bool) {
+	unscaled, s, ok := parseDecimal(strings.TrimSpace(text))
+	if !ok {
+		return 0, 0, false
+	}
+	integerDigits = decimalPrecision(unscaled) - int(s)
+	if unscaled.Sign() == 0 || integerDigits < 0 {
+		integerDigits = 0
+	}
+	return integerDigits, int(s), true
+}

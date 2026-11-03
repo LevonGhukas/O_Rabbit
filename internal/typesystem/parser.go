@@ -46,6 +46,10 @@ func (p *typeParser) parseType() (LogicalType, error) {
 	switch name {
 	case "array":
 		return p.parseArray()
+	case "map":
+		return p.parseMap()
+	case "struct":
+		return p.parseStruct()
 	case "nullable":
 		return p.parseNullable()
 	case "lowcardinality":
@@ -131,6 +135,64 @@ func (p *typeParser) parseArray() (LogicalType, error) {
 		return LogicalType{}, err
 	}
 	return ArrayOf(element), nil
+}
+
+// parseMap parses map<key,value>, the spelling LogicalType.String renders.
+func (p *typeParser) parseMap() (LogicalType, error) {
+	_, close, err := p.openContainer()
+	if err != nil {
+		return LogicalType{}, err
+	}
+	key, err := p.parseType()
+	if err != nil {
+		return LogicalType{}, err
+	}
+	p.skipSpace()
+	if !p.consume(',') {
+		return LogicalType{}, p.errorf("expected ',' between map key and value types")
+	}
+	value, err := p.parseType()
+	if err != nil {
+		return LogicalType{}, err
+	}
+	if err := p.closeContainer(close); err != nil {
+		return LogicalType{}, err
+	}
+	return MapOf(key, value), nil
+}
+
+// parseStruct parses struct<name:type,...>, the spelling LogicalType.String
+// renders.
+func (p *typeParser) parseStruct() (LogicalType, error) {
+	_, close, err := p.openContainer()
+	if err != nil {
+		return LogicalType{}, err
+	}
+	var fields []LogicalField
+	for {
+		name, err := p.identifier()
+		if err != nil {
+			return LogicalType{}, err
+		}
+		p.skipSpace()
+		if !p.consume(':') {
+			return LogicalType{}, p.errorf("expected ':' after struct field %q", name)
+		}
+		fieldType, err := p.parseType()
+		if err != nil {
+			return LogicalType{}, err
+		}
+		fields = append(fields, LogicalField{Name: name, Type: fieldType})
+		p.skipSpace()
+		if p.consume(',') {
+			continue
+		}
+		break
+	}
+	if err := p.closeContainer(close); err != nil {
+		return LogicalType{}, err
+	}
+	return LogicalType{Kind: KindStruct, Fields: fields}, nil
 }
 
 func (p *typeParser) parseNullable() (LogicalType, error) {

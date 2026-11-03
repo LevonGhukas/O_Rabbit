@@ -53,6 +53,12 @@ func ToLosslessString(value any) (string, error) {
 		return v.String(), nil
 	case time.Time:
 		return v.UTC().Format(time.RFC3339Nano), nil
+	case MapValue:
+		// Plain JSON, without the "json:" tag: it is the text Cassandra map,
+		// tuple and UDT columns have always been stored as.
+		return v.JSONText(), nil
+	case TupleValue:
+		return v.JSONText(), nil
 	}
 	reflected := reflect.ValueOf(value)
 	if reflected.Kind() == reflect.Array && reflected.Type().Elem().Kind() == reflect.Uint8 {
