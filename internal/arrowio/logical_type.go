@@ -69,13 +69,11 @@ func ArrowTypeForLogicalType(t typesystem.LogicalType) (arrow.DataType, typesyst
 		}
 		return exact(&arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: zone})
 	case typesystem.KindUUID:
-		return fallback(typesystem.MappingSemanticFallback, "runtime conversion emits canonical UUID text; current storage bridge requires Arrow UUID extension values for native Iceberg UUID")
+		return fallback(typesystem.MappingSemanticFallback, "stored as canonical UUID text because ClickHouse cannot read Parquet UUID columns; choose the uuid column type to store a native Iceberg uuid for other engines")
 	case typesystem.KindJSON:
 		return fallback(typesystem.MappingSemanticFallback, "native JSON conversion is not implemented")
-	case typesystem.KindStruct:
-		return fallback(typesystem.MappingSemanticFallback, "native struct conversion is not implemented")
-	case typesystem.KindMap:
-		return fallback(typesystem.MappingSemanticFallback, "native map conversion is not implemented")
+	case typesystem.KindStruct, typesystem.KindMap:
+		return StorageArrowTypeForLogicalType(t)
 	case typesystem.KindUnknown:
 		if unboundedNumericSource(t.SourceTypeName) {
 			return fallback(typesystem.MappingUnsupportedFallback, "source numeric type has no fixed precision/scale, so values are stored as exact text; choose a decimal(p,s) column type to store them as numbers")

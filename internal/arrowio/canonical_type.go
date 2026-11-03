@@ -2,6 +2,7 @@ package arrowio
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 )
@@ -29,6 +30,14 @@ func CanonicalTypeForArrow(dt arrow.DataType) string {
 		return "array<" + CanonicalTypeForArrow(t.Elem()) + ">"
 	case *arrow.FixedSizeListType:
 		return "array<" + CanonicalTypeForArrow(t.Elem()) + ">"
+	case *arrow.MapType:
+		return "map<" + CanonicalTypeForArrow(t.KeyType()) + "," + CanonicalTypeForArrow(t.ItemType()) + ">"
+	case *arrow.StructType:
+		fields := make([]string, t.NumFields())
+		for i, f := range t.Fields() {
+			fields[i] = f.Name + ":" + CanonicalTypeForArrow(f.Type)
+		}
+		return "struct<" + strings.Join(fields, ",") + ">"
 	}
 	switch dt.ID() {
 	case arrow.STRING, arrow.LARGE_STRING, arrow.STRING_VIEW:

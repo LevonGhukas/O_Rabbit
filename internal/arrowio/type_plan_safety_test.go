@@ -28,7 +28,7 @@ func TestCurrentPlannerMappingsAndFallbacks(t *testing.T) {
 		{"oracle_number_precision", "oracle", "NUMBER", 4, 0, true, arrow.PrimitiveTypes.Int16},
 		{"clickhouse_structural_fallback", "clickhouse", "Tuple(String, UInt64)", 0, 0, false, arrow.BinaryTypes.String},
 		{"trino_structural_fallback", "trino", "ROW(x BIGINT)", 0, 0, false, arrow.BinaryTypes.String},
-		{"cassandra_varint", "cassandra", "varint", 0, 0, false, arrow.BinaryTypes.String},
+		{"cassandra_varint", "cassandra", "varint", 0, 0, false, &arrow.Decimal128Type{Precision: 38, Scale: 0}},
 		{"sqlite_unknown_type", "sqlite", "CUSTOM_AFFINITY", 0, 0, false, arrow.BinaryTypes.String},
 	}
 

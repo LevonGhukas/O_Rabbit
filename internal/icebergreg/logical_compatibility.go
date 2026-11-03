@@ -97,7 +97,7 @@ func IcebergMappingForLogicalType(t typesystem.LogicalType) (IcebergMapping, err
 		}
 		return exact("timestamptz"), nil
 	case typesystem.KindUUID:
-		return fallback(typesystem.MappingSemanticFallback, "Iceberg supports UUID, but current runtime conversion and Arrow storage path use canonical UUID text"), nil
+		return fallback(typesystem.MappingSemanticFallback, "stored as canonical UUID text because ClickHouse cannot read Parquet UUID columns; choose the uuid column type to store a native Iceberg uuid for other engines"), nil
 	case typesystem.KindJSON:
 		return fallback(typesystem.MappingSemanticFallback, "native JSON conversion is not implemented"), nil
 	case typesystem.KindStruct:

@@ -46,6 +46,41 @@ func StorageArrowTypeForLogicalType(t typesystem.LogicalType) (arrow.DataType, t
 		}
 		return arrow.ListOf(element), typesystem.MappingFor(t, arrow.ListOf(element).String(), mapping.Class, mapping.Reason), nil
 	}
+	if t.Kind == typesystem.KindMap {
+		if err := t.Validate(); err != nil {
+			return nil, typesystem.MappingResult{}, err
+		}
+		key, keyMapping, err := StorageArrowTypeForLogicalType(*t.Key)
+		if err != nil {
+			return nil, typesystem.MappingResult{}, fmt.Errorf("map key: %w", err)
+		}
+		value, valueMapping, err := StorageArrowTypeForLogicalType(*t.Value)
+		if err != nil {
+			return nil, typesystem.MappingResult{}, fmt.Errorf("map value: %w", err)
+		}
+		dataType := arrow.MapOf(key, value)
+		dataType.SetItemNullable(t.Value.Nullable)
+		class, reason := nestedMappingClass([]typesystem.MappingResult{keyMapping, valueMapping})
+		return dataType, typesystem.MappingFor(t, dataType.String(), class, reason), nil
+	}
+	if t.Kind == typesystem.KindStruct {
+		if err := t.Validate(); err != nil {
+			return nil, typesystem.MappingResult{}, err
+		}
+		fields := make([]arrow.Field, len(t.Fields))
+		mappings := make([]typesystem.MappingResult, len(t.Fields))
+		for i, field := range t.Fields {
+			fieldType, fieldMapping, err := StorageArrowTypeForLogicalType(field.Type)
+			if err != nil {
+				return nil, typesystem.MappingResult{}, fmt.Errorf("struct field %q: %w", field.Name, err)
+			}
+			fields[i] = arrow.Field{Name: field.Name, Type: fieldType, Nullable: field.Type.Nullable}
+			mappings[i] = fieldMapping
+		}
+		dataType := arrow.StructOf(fields...)
+		class, reason := nestedMappingClass(mappings)
+		return dataType, typesystem.MappingFor(t, dataType.String(), class, reason), nil
+	}
 	if t.Kind == typesystem.KindUInt32 {
 		return arrow.PrimitiveTypes.Int64, typesystem.MappingFor(t, "long", typesystem.MappingSafePromotion, "Iceberg long preserves the full uint32 range"), nil
 	}
@@ -81,8 +116,43 @@ func storageConversionTarget(t typesystem.LogicalType) typesystem.LogicalType {
 			element := storageConversionTarget(*t.Element)
 			t.Element = &element
 		}
+	case typesystem.KindMap:
+		if t.Key != nil {
+			key := storageConversionTarget(*t.Key)
+			t.Key = &key
+		}
+		if t.Value != nil {
+			value := storageConversionTarget(*t.Value)
+			t.Value = &value
+		}
+	case typesystem.KindStruct:
+		fields := make([]typesystem.LogicalField, len(t.Fields))
+		for i, field := range t.Fields {
+			fields[i] = typesystem.LogicalField{Name: field.Name, Type: storageConversionTarget(field.Type)}
+		}
+		t.Fields = fields
 	}
 	return t
+}
+
+// nestedMappingClass reports the weakest mapping among a nested type's
+// members, so a lossy member (for example a nested UUID kept as text) is
+// visible on the whole column. A fallback outranks a safe promotion.
+func nestedMappingClass(members []typesystem.MappingResult) (typesystem.MappingClass, string) {
+	class, reason := typesystem.MappingExact, ""
+	for _, m := range members {
+		if m.Class == typesystem.MappingExact {
+			continue
+		}
+		if class == typesystem.MappingExact || (m.Fallback && !isFallbackClass(class)) {
+			class, reason = m.Class, m.Reason
+		}
+	}
+	return class, reason
+}
+
+func isFallbackClass(c typesystem.MappingClass) bool {
+	return c == typesystem.MappingSemanticFallback || c == typesystem.MappingUnsupportedFallback
 }
 
 func storageUTCAlias(zone string) bool {
@@ -168,6 +238,36 @@ func appendLogicalValue(builder array.Builder, dataType arrow.DataType, value an
 		for _, item := range items {
 			if err := appendLogicalValue(b.ValueBuilder(), elementType, item); err != nil {
 				return err
+			}
+		}
+	case *array.MapBuilder:
+		entries, ok := value.([]typesystem.MapEntry)
+		if !ok {
+			return fmt.Errorf("map append: expected []MapEntry, got %T", value)
+		}
+		mapType := dataType.(*arrow.MapType)
+		b.Append(true)
+		for _, e := range entries {
+			if err := appendLogicalValue(b.KeyBuilder(), mapType.KeyType(), e.Key); err != nil {
+				return fmt.Errorf("map key: %w", err)
+			}
+			if err := appendLogicalValue(b.ItemBuilder(), mapType.ItemType(), e.Value); err != nil {
+				return fmt.Errorf("map value: %w", err)
+			}
+		}
+	case *array.StructBuilder:
+		fields, ok := value.([]any)
+		if !ok {
+			return fmt.Errorf("struct append: expected []any, got %T", value)
+		}
+		structType := dataType.(*arrow.StructType)
+		if len(fields) != structType.NumFields() {
+			return fmt.Errorf("struct append: %d values for %d fields", len(fields), structType.NumFields())
+		}
+		b.Append(true)
+		for i, field := range structType.Fields() {
+			if err := appendLogicalValue(b.FieldBuilder(i), field.Type, fields[i]); err != nil {
+				return fmt.Errorf("struct field %q: %w", field.Name, err)
 			}
 		}
 	default:
