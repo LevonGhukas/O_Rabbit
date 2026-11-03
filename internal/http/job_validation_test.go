@@ -158,6 +158,7 @@ func TestRunStartForStoredInvalidOptionsReturns422(t *testing.T) {
 		"options_json.partition_strategy": `{"partition_strategy":"bogus"}`,
 		"options_json.where_clause":       `{"partition_strategy":"single","where_clause":"1=1; DROP TABLE x"}`,
 		"options_json.column_types.a":     `{"partition_strategy":"single","column_types":{"a":"notatype<"}}`,
+		"options_json.consistency_mode":   `{"partition_strategy":"single","consistency_mode":"STRONG_CDC"}`,
 	} {
 		srv, st := jobValidationServer(t)
 		if err := st.CreateJob(context.Background(), db.Job{ID: "bad", Name: "bad", SourceConnectionID: "src", TargetConnectionID: "tgt", TargetTable: "t", WriteMode: "overwrite", OptionsJSON: json.RawMessage(options)}); err != nil {

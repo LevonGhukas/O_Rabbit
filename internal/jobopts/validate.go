@@ -149,6 +149,12 @@ func Validate(raw json.RawMessage, sourceSQL string, mode ValidateMode) error {
 	default:
 		add(".partition_strategy", "must be single or ordered_cursor, got %q", o.PartitionStrategy)
 	}
+	// Checked in both modes: planning ignores consistency modes it does not
+	// know, so a stored STRONG_CDC job would run as EVENTUAL and silently miss
+	// the deletes it asked for.
+	if strings.EqualFold(strings.TrimSpace(o.ConsistencyMode), "STRONG_CDC") {
+		add(".consistency_mode", "%s", ErrCDCNotSupported)
+	}
 	switch o.NormalizedSourceMode() {
 	case "table":
 	case "query":
@@ -216,7 +222,7 @@ func strictOnlyChecks(o Options, add func(field, format string, args ...any)) {
 	switch strings.ToUpper(strings.TrimSpace(o.ConsistencyMode)) {
 	case "", "EVENTUAL", "STRONG_SNAPSHOT":
 	case "STRONG_CDC":
-		add(".consistency_mode", "%s", ErrCDCNotSupported)
+		// Reported by Validate in both modes.
 	default:
 		add(".consistency_mode", "must be EVENTUAL or STRONG_SNAPSHOT, got %q", o.ConsistencyMode)
 	}
