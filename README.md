@@ -1385,6 +1385,15 @@ credentials, namespace and table names, and partition sources. The run's events
 and `GET /api/v1/runs/{id}/diagnosis` show the failing step;
 `POST /api/v1/runs/{id}/registration/retry` retries it.
 
+Registration creates a table only when the catalog reports it does not exist,
+and never recreates a table because loading it failed. If the catalog has the
+table but its metadata files cannot be read, registration fails with
+`TABLE_METADATA_UNREADABLE` and leaves the table, its snapshots and its
+properties unchanged. Check the files under `<table location>/metadata/`,
+restore them from a backup if needed, then retry. Catalog outages and timeouts
+fail with `CATALOG_UNAVAILABLE` or `CATALOG_TIMEOUT` and are retried
+automatically.
+
 </details>
 
 <details>
