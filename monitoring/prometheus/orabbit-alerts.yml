@@ -4,7 +4,8 @@
 # severity: critical pages someone; severity: warning opens a ticket.
 # Every rule waits ("for") longer than the retries and lease scans it watches
 # normally take, so brief, expected retries never alert. Defaults it assumes:
-# ORABBIT_REGISTRATION_TIMEOUT 30m, lease durations 30s, lease scans <= 5s.
+# ORABBIT_REGISTRATION_TIMEOUT 30m, ORABBIT_RECONCILIATION_TIMEOUT 10m,
+# lease durations 30s, lease scans <= 5s.
 # Validate with: promtool check rules orabbit-alerts.yml
 #                promtool test rules orabbit-alerts.test.yml
 groups:

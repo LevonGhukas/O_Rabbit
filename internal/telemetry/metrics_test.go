@@ -49,3 +49,15 @@ func TestObserveAuthFailureCountsBySurface(t *testing.T) {
 		t.Fatalf("auth failure counter missing:\n%s", rec.Body.String())
 	}
 }
+
+func TestObserveCatalogAttemptTimeoutCountsByOperation(t *testing.T) {
+	ObserveCatalogAttemptTimeout("reconciliation")
+
+	rec := httptest.NewRecorder()
+	if err := WriteText(rec); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rec.Body.String(), `orabbit_catalog_attempt_timeouts_total{operation="reconciliation"} 1`) {
+		t.Fatalf("catalog attempt timeout counter missing:\n%s", rec.Body.String())
+	}
+}

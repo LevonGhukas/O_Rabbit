@@ -64,3 +64,32 @@ func TestWorkerAuthTokenLoadsFromEnvironment(t *testing.T) {
 		t.Fatalf("WorkerAuthToken=%q", cfg.WorkerAuthToken)
 	}
 }
+
+func TestCatalogAttemptTimeoutsFromEnvironment(t *testing.T) {
+	t.Setenv("ORABBIT_REGISTRATION_TIMEOUT", "4m")
+	t.Setenv("ORABBIT_RECONCILIATION_TIMEOUT", "90s")
+	cfg := loadMasterConfigFromEnv()
+	if cfg.RegistrationTimeout != 4*time.Minute || cfg.ReconciliationTimeout != 90*time.Second {
+		t.Fatalf("registration=%s reconciliation=%s", cfg.RegistrationTimeout, cfg.ReconciliationTimeout)
+	}
+}
+
+func TestReconciliationTimeoutDefaultsWhenUnset(t *testing.T) {
+	t.Setenv("ORABBIT_RECONCILIATION_TIMEOUT", "")
+	if got := loadMasterConfigFromEnv().ReconciliationTimeout; got != defaultReconciliationTimeout {
+		t.Fatalf("reconciliation timeout=%s want %s", got, defaultReconciliationTimeout)
+	}
+}
+
+func TestLeasePolicyRejectsNonPositiveCatalogTimeouts(t *testing.T) {
+	cfg := loadMasterConfigFromEnv()
+	cfg.ReconciliationTimeout = 0
+	if err := cfg.validateLeasePolicy(); err == nil {
+		t.Fatal("zero reconciliation timeout accepted")
+	}
+	cfg = loadMasterConfigFromEnv()
+	cfg.RegistrationTimeout = 0
+	if err := cfg.validateLeasePolicy(); err == nil {
+		t.Fatal("zero registration timeout accepted")
+	}
+}

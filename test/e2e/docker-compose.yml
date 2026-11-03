@@ -94,6 +94,7 @@ services:
       # Short catalog timings so the fault scenarios finish in seconds. The
       # injected catalog delay (test/e2e) must stay longer than the timeout.
       ORABBIT_REGISTRATION_TIMEOUT: 10s
+      ORABBIT_RECONCILIATION_TIMEOUT: 10s
       ORABBIT_REGISTRATION_LEASE_DURATION: 6s
       ORABBIT_RECONCILIATION_LEASE_DURATION: 6s
     extra_hosts:

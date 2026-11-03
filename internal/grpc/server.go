@@ -198,11 +198,18 @@ type CommitCatalogPolicy struct {
 	// RegistrationTimeout bounds one catalog registration.
 	RegistrationTimeout time.Duration
 	Registration        db.RegistrationPolicy
+	// ReconciliationTimeout bounds one catalog observation after an
+	// ambiguous registration.
+	ReconciliationTimeout time.Duration
 	// ReconciliationLease and ReconciliationMaxAttempts govern catalog
 	// observation after an ambiguous registration.
 	ReconciliationLease       time.Duration
 	ReconciliationMaxAttempts int
 }
+
+// DefaultReconciliationTimeout bounds one catalog observation. Observation
+// only reads catalog metadata, so it gets a shorter bound than registration.
+const DefaultReconciliationTimeout = 10 * time.Minute
 
 // DefaultCommitCatalogPolicy returns the built-in commit and catalog policy.
 func DefaultCommitCatalogPolicy() CommitCatalogPolicy {
@@ -211,6 +218,7 @@ func DefaultCommitCatalogPolicy() CommitCatalogPolicy {
 		CommitMaxAttempts:         5,
 		RegistrationTimeout:       30 * time.Minute,
 		Registration:              db.RegistrationPolicy{LeaseDuration: 30 * time.Second, MaxAttempts: 5, BackoffBase: time.Second, BackoffMax: time.Minute},
+		ReconciliationTimeout:     DefaultReconciliationTimeout,
 		ReconciliationLease:       30 * time.Second,
 		ReconciliationMaxAttempts: 5,
 	}
@@ -240,6 +248,9 @@ func (s *Server) SetCommitCatalogPolicy(p CommitCatalogPolicy) {
 	}
 	if p.Registration.BackoffMax <= 0 {
 		p.Registration.BackoffMax = d.Registration.BackoffMax
+	}
+	if p.ReconciliationTimeout <= 0 {
+		p.ReconciliationTimeout = d.ReconciliationTimeout
 	}
 	if p.ReconciliationLease <= 0 {
 		p.ReconciliationLease = d.ReconciliationLease

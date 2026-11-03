@@ -42,6 +42,12 @@ dataset are ordered, so every later registration of that dataset waits.
 - Find it: `runs | jq '.[] | select(.catalog_status=="REGISTERING")'`.
 - Master logs for `iceberg registration` and the catalog URI: a hanging
   REST catalog or object store is the usual cause.
+- `orabbit_catalog_attempt_timeouts_total{operation}` counts registration and
+  reconciliation attempts stopped by `ORABBIT_REGISTRATION_TIMEOUT` or
+  `ORABBIT_RECONCILIATION_TIMEOUT`. Each timeout frees its catalog work slot. A
+  registration that timed out before its catalog commit began is retried
+  (`CATALOG_TIMEOUT`); one that timed out after is reconciled
+  (`EXTERNAL_COMMIT_AMBIGUOUS`).
 - Is the catalog reachable from the master host (`curl <uri>/v1/config`)?
 
 **Act.**
@@ -88,6 +94,9 @@ decides whether to replay.
 - `runs | jq '.[] | select(.catalog_status=="RECONCILING") | {id, reconciliation}'`.
 - The `reconciliation` projection's classification:
   `CATALOG_OBSERVATION_UNAVAILABLE` means the catalog cannot be read;
+  `CATALOG_OBSERVATION_TIMEOUT` means an inspection ran past
+  `ORABBIT_RECONCILIATION_TIMEOUT` (10m) and was stopped; its partial evidence
+  is discarded and the observation is retried;
   `CATALOG_HISTORY_INCOMPLETE` means snapshots were expired or the table
   changed during inspection.
 
