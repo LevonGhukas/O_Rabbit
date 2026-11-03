@@ -3,6 +3,7 @@ package planner
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -23,7 +24,7 @@ import (
 // violate NOT NULL; those columns fall back to a lossless type and get a
 // warning. Columns without overrides keep source inference, plus catalog-proven
 // NOT NULL for drivers that cannot report nullability themselves.
-func resolveEffectiveColumnTypes(ctx context.Context, st *db.Store, k crypto.Key, job db.Job, srcEngine string, o jobopts.Options, runID string) (map[string]string, []typesystem.TypeWarning, error) {
+func resolveEffectiveColumnTypes(ctx context.Context, st *db.Store, k crypto.Key, job db.Job, srcEngine string, o jobopts.Options, runID string, registrationConfig json.RawMessage) (map[string]string, []typesystem.TypeWarning, error) {
 	if connectors.NormalizeSourceEngine(srcEngine) == "s3" {
 		if o.NormalizedPartitionStrategy() != "single" {
 			// Files are only planned as one task; planning rejects the rest.
@@ -80,7 +81,22 @@ func resolveEffectiveColumnTypes(ctx context.Context, st *db.Store, k crypto.Key
 		}
 	}
 
-	resolutions, err := arrowio.PlanColumnResolutions(srcEngine, cols, colTypes, o.ColumnTypes, knownNotNull)
+	overrides := o.ColumnTypes
+	var autoWarnings []typesystem.TypeWarning
+	if connectors.NormalizeSourceEngine(srcEngine) == "cassandra" {
+		// Cassandra types the schema alone cannot map natively (TID-945).
+		scanner, _ := reader.(connectors.DecimalColumnScanner)
+		scanQuery := ""
+		if o.NormalizedSourceMode() == "query" {
+			scanQuery = query
+		}
+		existing := plannedTargetTable(ctx, st, k, job, srcEngine, o, registrationConfig, runID)
+		var auto map[string]string
+		auto, autoWarnings = cassandraAutomaticColumnTypes(ctx, scanner, o.Table, scanQuery, cols, colTypes, o.ColumnTypes, existing)
+		overrides = withAutomaticColumnTypes(o.ColumnTypes, auto)
+	}
+
+	resolutions, err := arrowio.PlanColumnResolutions(srcEngine, cols, colTypes, overrides, knownNotNull)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -115,7 +131,7 @@ func resolveEffectiveColumnTypes(ctx context.Context, st *db.Store, k crypto.Key
 		}
 	}
 
-	warnings := overrideWarnings
+	warnings := append(overrideWarnings, autoWarnings...)
 	if result, e := arrowio.PlansFromSQLEngineResult(srcEngine, cols, colTypes, effective); e == nil {
 		warnings = append(warnings, result.Warnings...)
 	}
