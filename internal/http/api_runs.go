@@ -92,12 +92,14 @@ type runSubmitPerformanceRequest struct {
 }
 
 type runSubmitIcebergRequest struct {
-	Enabled       bool                  `json:"enabled"`
-	Engine        string                `json:"engine"`
-	Table         string                `json:"table"`
-	ConfigYAML    string                `json:"config_yaml"` // optional defaults
-	Options       icebergreg.RunOptions `json:"options"`
-	PartitionKeys []string              `json:"partition_keys"`
+	Enabled    bool                  `json:"enabled"`
+	Engine     string                `json:"engine"`
+	Table      string                `json:"table"`
+	ConfigYAML string                `json:"config_yaml"` // optional defaults
+	Options    icebergreg.RunOptions `json:"options"`
+	// PartitionKeys is shorthand for identity fields of options.partition_spec;
+	// see icebergOptionsWithPartitionKeys.
+	PartitionKeys []string `json:"partition_keys"`
 }
 
 type existingJobRunRequest struct {
@@ -143,7 +145,6 @@ type validatedRunSubmitSpec struct {
 	IcebergEnabled         bool
 	IcebergEngine          string
 	IcebergTable           string
-	IcebergPartitionKeys   []string
 	IcebergRunConfig       icebergreg.RunConfig
 	ConsistencyMode        string
 	Reconciliation         *jobopts.Reconciliation
@@ -933,6 +934,10 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 		return validatedRunSubmitSpec{}, err
 	}
 
+	icebergOptions, err := icebergOptionsWithPartitionKeys(req.Iceberg, req.Source.SelectColumns)
+	if err != nil {
+		return validatedRunSubmitSpec{}, err
+	}
 	icebergEnabled := req.Iceberg.Enabled
 	icebergEngine := normalizedIcebergEngine(req.Iceberg.Engine)
 	icebergTable := strings.TrimSpace(req.Iceberg.Table)
@@ -1024,7 +1029,7 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 			ForcePathStyle:  targetForcePathStyle,
 			AccessKeyID:     targetAccessKeyID,
 			SecretAccessKey: targetSecretAccessKey,
-		}, iceCfg, req.Iceberg.Options)
+		}, iceCfg, icebergOptions)
 		if err != nil {
 			return validatedRunSubmitSpec{}, invalidSubmitField("iceberg.options", "iceberg run options are invalid", map[string]any{"cause": err.Error()})
 		}
@@ -1037,7 +1042,6 @@ func validateRunSubmitRequest(req runSubmitRequest) (validatedRunSubmitSpec, err
 		}
 		spec.TargetFileBytes = targetFileBytes
 		spec.IcebergEnabled = true
-		spec.IcebergPartitionKeys = req.Iceberg.PartitionKeys
 		spec.IcebergRunConfig = runCfg
 	}
 	return spec, nil
@@ -1104,7 +1108,6 @@ func buildOneShotJobRequest(spec validatedRunSubmitSpec, sourceConnectionID, tar
 		"id_column":            spec.CursorColumn,
 		"planned_tasks":        spec.PlannedTasks,
 		"target_file_bytes":    spec.TargetFileBytes,
-		"partition_keys":       spec.IcebergPartitionKeys,
 		"consistency_mode":     spec.ConsistencyMode,
 		"where_clause":         spec.WhereClause,
 		"select_columns":       spec.SelectColumns,
@@ -1181,6 +1184,14 @@ func validateExistingJobRunMode(job db.Job, raw string) (string, error) {
 }
 
 func (s *Server) buildExistingJobRunRegistrationConfig(ctx context.Context, job db.Job, req runSubmitIcebergRequest) (json.RawMessage, error) {
+	jobOpts, err := jobopts.Parse(job.OptionsJSON)
+	if err != nil {
+		return nil, fmt.Errorf("job options are invalid: %w", err)
+	}
+	icebergOptions, err := icebergOptionsWithPartitionKeys(req, jobOpts.SelectColumns)
+	if err != nil {
+		return nil, err
+	}
 	if !req.Enabled {
 		return explicitDisabledRunRegistrationConfig(), nil
 	}
@@ -1240,7 +1251,7 @@ func (s *Server) buildExistingJobRunRegistrationConfig(ctx context.Context, job 
 		return nil, err
 	}
 
-	runCfg, err := icebergreg.ResolveRunConfigWithOptions(true, engine, table, baseS3, iceCfg, req.Options)
+	runCfg, err := icebergreg.ResolveRunConfigWithOptions(true, engine, table, baseS3, iceCfg, icebergOptions)
 	if err != nil {
 		return nil, invalidSubmitField("iceberg.options", "iceberg run options are invalid", map[string]any{"cause": err.Error()})
 	}

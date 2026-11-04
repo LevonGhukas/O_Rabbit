@@ -512,6 +512,14 @@ credential_vending:
   only order-preserving transforms (identity, year, month, day, hour,
   truncate) keep full column metrics; with `bucket[N]` they carry partition
   values and counts but no column bounds.
+- HTTP run requests (`/api/v1/runs/submit`, `/api/jobs/{id}/runs`) also take
+  `iceberg.partition_keys: ["tenant_id", "region"]`, shorthand for a
+  `partition_spec` of identity fields in that order. It needs
+  `enabled: true`; giving it together with a different `partition_spec` is
+  rejected. Use `partition_spec` for other transforms and in `run.yaml`.
+  Identity on a high-cardinality column (an id, a timestamp) makes one
+  partition per value. The first keyed run evolves the table's spec, so later
+  runs into that table must send the same keys or spec.
 - `partition_spec` cannot change between an export and its registration. A
   table that is partitioned while the run has no `partition_spec`, or files
   from workers older than protocol 8, fail registration with a
@@ -1262,6 +1270,16 @@ TestMasterLoad`) and the SQLite benchmarks (`go test ./internal/db -run '^$'
 Deprecated options still work. When a run uses one, the planner records a
 `deprecated job options used` run event, so usage can be measured before removal.
 
+`options_json` partition keys are the exception: nothing reads them there
+(partitioning is chosen per run), so a non-empty `partition_keys` or
+`iceberg_partition_keys` is rejected when a job is created or updated (400
+`invalid_input`). Empty lists and `null` are accepted. Stored jobs that carry
+them still run, unpartitioned as before, and record the deprecation event. To
+migrate, remove the key and pass `iceberg.partition_keys` or
+`iceberg.options.partition_spec` with each run (see
+[Iceberg registration](#iceberg-registration)); a stored job cannot be saved
+again until the key is removed.
+
 | Deprecated | Use instead |
 |---|---|
 | Unversioned and `/api/...` HTTP paths | `/api/v1/...` |
@@ -1270,7 +1288,8 @@ Deprecated options still work. When a run uses one, the planner records a
 | `partition_strategy: int_range` | `ordered_cursor` |
 | Job option `chunk_size` | `planned_tasks` or `target_rows_per_task` |
 | S3 sources without `format` | Set `source.format` |
-| `options_json` keys `iceberg_enabled`, `iceberg_engine`, `iceberg_table`, `iceberg_partition_keys` (never read) | `iceberg_registration` |
+| `options_json` keys `iceberg_enabled`, `iceberg_engine`, `iceberg_table` (never read) | `iceberg_registration` |
+| `options_json` keys `partition_keys`, `iceberg_partition_keys` (never read) | Run request `iceberg.partition_keys` or `iceberg.options.partition_spec` |
 | `options_json` key `fetch_limit_rows` (never read) | `fetch_size` |
 
 ## Troubleshooting

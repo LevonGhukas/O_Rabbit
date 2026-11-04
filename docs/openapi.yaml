@@ -521,8 +521,22 @@ components:
             engine: { type: string, enum: [rest-go, ice] }
             table: { type: string }
             config_yaml: { type: string }
-            options: { type: object }
-            partition_keys: { type: array, items: { type: string } }
+            options:
+              type: object
+              description: >
+                Iceberg registration options. options.partition_spec partitions
+                the table, and for rest-go workers split their files by it.
+                Transforms: identity, year, month, day, hour, bucket[N],
+                truncate[N].
+            partition_keys:
+              type: array
+              items: { type: string }
+              description: >
+                Shorthand for options.partition_spec with the identity transform,
+                one field per column, in order. Needs enabled: true. Rejected with
+                400 invalid_input when a key is blank, repeated, missing from
+                source.select_columns, or when options.partition_spec is also set
+                and describes a different partitioning.
         consistency:
           type: object
           properties:

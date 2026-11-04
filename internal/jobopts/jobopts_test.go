@@ -3,6 +3,7 @@ package jobopts
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -305,6 +306,10 @@ func TestDeprecatedUsages(t *testing.T) {
 	}
 	if got := (Options{}).DeprecatedUsages("s3"); len(got) != 1 {
 		t.Fatalf("s3 without format usages=%v, want 1", got)
+	}
+	partitioned := Options{CursorColumn: "id", PartitionStrategy: "ordered_cursor", PartitionKeys: []string{"tenant_id"}}
+	if got := partitioned.DeprecatedUsages("postgres"); len(got) != 1 || !strings.Contains(got[0], "iceberg.options.partition_spec") {
+		t.Fatalf("partition_keys usages=%v, want one pointing at partition_spec", got)
 	}
 	current := Options{CursorColumn: "id", IDColumn: "id", PartitionStrategy: "ordered_cursor", FileFormat: "csv"}
 	if got := current.DeprecatedUsages("s3"); len(got) != 0 {

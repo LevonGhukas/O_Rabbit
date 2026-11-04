@@ -30,7 +30,11 @@ func TestValidateAcceptsValidOptions(t *testing.T) {
 		`{"source_mode":"query","query":"SELECT id FROM t"}`,
 		`{"worker_pool":"etl-a","where_clause":"status = 'open'","cursor_lookback":"48h"}`,
 		`{"cursor_lookback":"1000","column_types":{"amount":"decimal(12,2)","note":"nullable<source>"}}`,
-		`{"format":"xlsx","record_path":"/items","select_columns":["a","b"],"partition_keys":["a"]}`,
+		`{"format":"xlsx","record_path":"/items","select_columns":["a","b"]}`,
+		// Empty partition keys set nothing, so clients that always send the
+		// field keep working.
+		`{"partition_keys":[]}`,
+		`{"partition_keys":null,"iceberg_partition_keys":null}`,
 		`{"fetch_size":20000}`,
 		// Keys O_Rabbit itself writes: the registration config and leftovers
 		// from older versions, so stored jobs can be fetched and saved back.
@@ -76,6 +80,8 @@ func TestValidateRejectsInvalidOptions(t *testing.T) {
 		{"negative", `{"max_in_flight_tasks":-1}`, "options_json.max_in_flight_tasks", "0 or greater"},
 		{"fetch size too large", `{"fetch_size":2000000}`, "options_json.fetch_size", "at most 1000000"},
 		{"negative fetch size", `{"fetch_size":-1}`, "options_json.fetch_size", "0 or greater"},
+		{"partition keys", `{"partition_keys":["tenant_id"]}`, "options_json.partition_keys", "iceberg.options.partition_spec"},
+		{"legacy iceberg partition keys", `{"iceberg_partition_keys":["tenant_id"]}`, "options_json.iceberg_partition_keys", "iceberg.options.partition_spec"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -110,6 +116,11 @@ func TestValidateLenientAcceptsWhatPlanningTolerates(t *testing.T) {
 	if errs := validationErrors(t, `{"planed_tasks":4,"consistency_mode":"sometimes","target_rows_per_task":-1}`, "", Lenient); errs != nil {
 		t.Fatalf("lenient errors=%+v, want none", errs)
 	}
+	// Stored jobs with the deprecated partition keys keep running; the keys
+	// never partitioned anything.
+	if errs := validationErrors(t, `{"partition_keys":["tenant_id"],"iceberg_partition_keys":["tenant_id"]}`, "", Lenient); errs != nil {
+		t.Fatalf("lenient partition keys errors=%+v, want none", errs)
+	}
 	// Problems that would make planning fail are still reported.
 	for _, raw := range []string{`"text"`, `{"planned_tasks":"ten"}`, `{"worker_pool":"Bad Pool!"}`, `{"partition_strategy":"bogus"}`, `{"where_clause":"a; b"}`} {
 		if errs := validationErrors(t, raw, "", Lenient); errs == nil {
@@ -122,6 +133,10 @@ func TestDeprecatedKeys(t *testing.T) {
 	got := DeprecatedKeys(json.RawMessage(`{"fetch_limit_rows":1,"iceberg_table":"t","table":"x"}`))
 	if len(got) != 2 || !strings.HasPrefix(got[0], "fetch_limit_rows") || !strings.HasPrefix(got[1], "iceberg_table") {
 		t.Fatalf("DeprecatedKeys=%v", got)
+	}
+	got = DeprecatedKeys(json.RawMessage(`{"iceberg_partition_keys":["a"]}`))
+	if len(got) != 1 || !strings.Contains(got[0], "iceberg.options.partition_spec") {
+		t.Fatalf("iceberg_partition_keys hint=%v, want the partition_spec path", got)
 	}
 	if DeprecatedKeys(json.RawMessage(`"x"`)) != nil {
 		t.Fatal("non-object options have no deprecated keys")

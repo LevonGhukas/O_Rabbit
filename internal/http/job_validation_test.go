@@ -75,6 +75,9 @@ var invalidJobOptions = map[string]string{
 	"options_json.where_clause":       `{"where_clause":"1=1; DROP TABLE x"}`,
 	"options_json.column_types.a":     `{"column_types":{"a":"notatype<"}}`,
 	"options_json.planed_tasks":       `{"planed_tasks":4}`,
+	// Not read from job options; partitioning is set per run.
+	"options_json.partition_keys":         `{"partition_keys":["tenant_id"]}`,
+	"options_json.iceberg_partition_keys": `{"iceberg_partition_keys":["tenant_id"]}`,
 }
 
 func TestJobCreateRejectsInvalidOptionsJSON(t *testing.T) {
