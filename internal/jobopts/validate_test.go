@@ -151,3 +151,12 @@ func TestValidateRefusesStoredCDCJobsAtPlanning(t *testing.T) {
 		t.Fatalf("errors=%+v", errs)
 	}
 }
+
+// TID-973: a stored STRONG_CDC job is refused at planning too. Planning ignores
+// unknown consistency modes, so it would otherwise run as EVENTUAL.
+func TestStoredStrongCDCIsRefused(t *testing.T) {
+	errs := validationErrors(t, `{"consistency_mode":"STRONG_CDC"}`, "", Lenient)
+	if len(errs) != 1 || !strings.Contains(errs[0].Error, ErrCDCNotSupported) {
+		t.Fatalf("errors=%+v, want STRONG_CDC rejection", errs)
+	}
+}
