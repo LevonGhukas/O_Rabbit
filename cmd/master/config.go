@@ -12,8 +12,13 @@ import (
 	"time"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/envutil"
+	grpcapi "github.com/LevonGhukas/O_Rabbit/internal/grpc"
 	"github.com/LevonGhukas/O_Rabbit/internal/logbuffer"
 )
+
+// defaultReconciliationTimeout is used when ORABBIT_RECONCILIATION_TIMEOUT is
+// unset or invalid.
+const defaultReconciliationTimeout = grpcapi.DefaultReconciliationTimeout
 
 func (c masterConfig) validateLeasePolicy() error {
 	if c.TaskLeaseDuration < 3*time.Second {
@@ -51,6 +56,9 @@ func (c masterConfig) validateLeasePolicy() error {
 	}
 	if c.RegistrationLeaseDuration < 3*time.Second || c.ReconciliationLeaseDuration < 3*time.Second {
 		return fmt.Errorf("registration and reconciliation lease durations must be at least 3s")
+	}
+	if c.RegistrationTimeout <= 0 || c.ReconciliationTimeout <= 0 {
+		return fmt.Errorf("registration and reconciliation timeouts must be positive")
 	}
 	return nil
 }
@@ -171,6 +179,7 @@ type masterConfig struct {
 	RegistrationTimeout               time.Duration
 	RegistrationLeaseDuration         time.Duration
 	RegistrationMaxAttempts           int
+	ReconciliationTimeout             time.Duration
 	ReconciliationLeaseDuration       time.Duration
 	ReconciliationMaxAttempts         int
 	RateLimits                        rateLimitConfig
@@ -220,6 +229,7 @@ func loadMasterConfigFromEnv() masterConfig {
 		RegistrationTimeout:               envDurationDefault("ORABBIT_REGISTRATION_TIMEOUT", 30*time.Minute),
 		RegistrationLeaseDuration:         envDurationDefault("ORABBIT_REGISTRATION_LEASE_DURATION", 30*time.Second),
 		RegistrationMaxAttempts:           envPositiveIntDefault("ORABBIT_REGISTRATION_MAX_ATTEMPTS", 5),
+		ReconciliationTimeout:             envDurationDefault("ORABBIT_RECONCILIATION_TIMEOUT", defaultReconciliationTimeout),
 		ReconciliationLeaseDuration:       envDurationDefault("ORABBIT_RECONCILIATION_LEASE_DURATION", 30*time.Second),
 		ReconciliationMaxAttempts:         envPositiveIntDefault("ORABBIT_RECONCILIATION_MAX_ATTEMPTS", 5),
 		RateLimits:                        loadRateLimitConfigFromEnv(),

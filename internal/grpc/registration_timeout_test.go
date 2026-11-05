@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
+	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 	grpcpb "github.com/LevonGhukas/O_Rabbit/internal/grpcpb"
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 )
@@ -84,11 +85,12 @@ func TestProcessRegistrationOnceBoundsHungAttemptAndPersistsFailure(t *testing.T
 		startExternal bool
 		outerDeadline bool
 		wantStatus    string
+		wantClass     failure.FailureClass
 	}{
-		{"before external commit", false, false, db.RegistrationRetryRequired},
-		{"after external commit", true, false, db.RegistrationReconciling},
-		{"outer deadline before external commit", false, true, db.RegistrationRetryRequired},
-		{"outer deadline after external commit", true, true, db.RegistrationReconciling},
+		{"before external commit", false, false, db.RegistrationRetryRequired, failure.FailureCatalogTimeout},
+		{"after external commit", true, false, db.RegistrationReconciling, failure.FailureExternalAmbiguous},
+		{"outer deadline before external commit", false, true, db.RegistrationRetryRequired, failure.FailureCatalogTimeout},
+		{"outer deadline after external commit", true, true, db.RegistrationReconciling, failure.FailureExternalAmbiguous},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -133,6 +135,9 @@ func TestProcessRegistrationOnceBoundsHungAttemptAndPersistsFailure(t *testing.T
 			}
 			if reg.Status != tc.wantStatus {
 				t.Fatalf("status=%s want %s", reg.Status, tc.wantStatus)
+			}
+			if reg.LastErrorClass != string(tc.wantClass) {
+				t.Fatalf("last_error_class=%s want %s", reg.LastErrorClass, tc.wantClass)
 			}
 			if reg.LastErrorMessage == nil || *reg.LastErrorMessage == "" {
 				t.Fatalf("last_error_message not recorded: %+v", reg)

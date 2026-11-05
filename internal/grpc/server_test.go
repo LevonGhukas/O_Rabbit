@@ -866,10 +866,18 @@ func saveGRPCTestVerifiedEmptyIntent(ctx context.Context, st *db.Store, runID, p
 }
 
 func createGRPCTestRegistrableRunAndTask(t *testing.T, st *db.Store, runID, jobID, taskID string) {
-	createGRPCTestRegistrableRunAndTaskWithSnapshot(t, st, runID, jobID, taskID, mustJSONRaw(t, map[string]any{
+	createGRPCTestRegistrableRunAndTaskWithSnapshot(t, st, runID, jobID, taskID, grpcTestRegistrationConfig(t, "mssql.orders"))
+}
+
+// grpcTestRegistrationConfig is a rest-go registration snapshot for table.
+// Runs with different tables have different catalog targets, so their
+// registrations are not ordered behind each other.
+func grpcTestRegistrationConfig(t *testing.T, table string) json.RawMessage {
+	t.Helper()
+	return mustJSONRaw(t, map[string]any{
 		"enabled":      true,
 		"engine":       "rest-go",
-		"table":        "mssql.orders",
+		"table":        table,
 		"uri":          "http://catalog:8181",
 		"bearer_token": "token",
 		"s3": map[string]any{
@@ -879,10 +887,18 @@ func createGRPCTestRegistrableRunAndTask(t *testing.T, st *db.Store, runID, jobI
 			"access_key_id":     "minioadmin",
 			"secret_access_key": "minioadmin",
 		},
-	}))
+	})
 }
 
 func createGRPCTestRegistrableRunAndTaskWithSnapshot(t *testing.T, st *db.Store, runID, jobID, taskID string, registrationConfig json.RawMessage) {
+	t.Helper()
+	createGRPCTestRegistrableConnections(t, st)
+	createGRPCTestRegistrableJobRunAndTask(t, st, runID, jobID, taskID, registrationConfig)
+}
+
+// createGRPCTestRegistrableConnections creates the "src" and "tgt"
+// connections that registrable test jobs use. Call it once per store.
+func createGRPCTestRegistrableConnections(t *testing.T, st *db.Store) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -921,6 +937,13 @@ func createGRPCTestRegistrableRunAndTaskWithSnapshot(t *testing.T, st *db.Store,
 	}); err != nil {
 		t.Fatalf("create target connection: %v", err)
 	}
+}
+
+// createGRPCTestRegistrableJobRunAndTask creates a registrable job, run and
+// task on connections from createGRPCTestRegistrableConnections.
+func createGRPCTestRegistrableJobRunAndTask(t *testing.T, st *db.Store, runID, jobID, taskID string, registrationConfig json.RawMessage) {
+	t.Helper()
+	ctx := context.Background()
 
 	if err := st.CreateJob(ctx, db.Job{
 		ID:                 jobID,

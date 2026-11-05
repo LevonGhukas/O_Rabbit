@@ -915,6 +915,7 @@ Flags override environment variables. Example files:
 | `ORABBIT_REGISTRATION_TIMEOUT` | `30m` | Bound on one catalog registration |
 | `ORABBIT_REGISTRATION_LEASE_DURATION` | `30s` | Registration attempt lease (min `3s`) |
 | `ORABBIT_REGISTRATION_MAX_ATTEMPTS` | `5` | Registration attempts |
+| `ORABBIT_RECONCILIATION_TIMEOUT` | `10m` | Bound on one catalog observation (reconciliation) |
 | `ORABBIT_RECONCILIATION_LEASE_DURATION` | `30s` | Catalog observation lease (min `3s`) |
 | `ORABBIT_RECONCILIATION_MAX_ATTEMPTS` | `5` | Catalog observation attempts |
 | `ORABBIT_MULTIPART_CLEANUP_SCAN_INTERVAL` | `1m` | Abandoned-upload scan cadence |

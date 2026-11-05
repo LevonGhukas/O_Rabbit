@@ -165,6 +165,7 @@ func run() int {
 		CommitMaxAttempts:         cfg.CommitMaxAttempts,
 		RegistrationTimeout:       cfg.RegistrationTimeout,
 		Registration:              db.RegistrationPolicy{LeaseDuration: cfg.RegistrationLeaseDuration, MaxAttempts: cfg.RegistrationMaxAttempts, BackoffBase: time.Second, BackoffMax: time.Minute},
+		ReconciliationTimeout:     cfg.ReconciliationTimeout,
 		ReconciliationLease:       cfg.ReconciliationLeaseDuration,
 		ReconciliationMaxAttempts: cfg.ReconciliationMaxAttempts,
 	}

@@ -13,8 +13,10 @@ import (
 
 	"github.com/LevonGhukas/O_Rabbit/internal/artifact"
 	"github.com/LevonGhukas/O_Rabbit/internal/db"
+	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 	"github.com/LevonGhukas/O_Rabbit/internal/icebergreg"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
+	"github.com/LevonGhukas/O_Rabbit/internal/telemetry"
 )
 
 // registrationPersistTimeout bounds recording an attempt outcome after the
@@ -32,10 +34,10 @@ func (s *Server) launchIcebergRegistration(runID string) {
 		if leader, ok := s.leadership.(interface{ WorkContext() context.Context }); ok && leader.WorkContext() != nil {
 			base = leader.WorkContext()
 		}
-		ctx, cancel := context.WithTimeout(base, s.commitCatalog.RegistrationTimeout)
-		defer cancel()
-		if _, err := s.ProcessRegistrationOnce(ctx); err != nil {
-			if ctx.Err() == nil {
+		// ProcessRegistrationOnce bounds the attempt itself; an outer deadline
+		// here would mask that bound and its timeout accounting.
+		if _, err := s.ProcessRegistrationOnce(base); err != nil {
+			if base.Err() == nil {
 				s.log.Error("durable iceberg registration worker failed", slog.String("run_id", runID), slog.String("err", err.Error()))
 			}
 		}
@@ -245,7 +247,7 @@ func (s *Server) ProcessRegistrationOnce(ctx context.Context) (bool, error) {
 	}
 	// Every attempt is bounded, whoever drives it, so a hung catalog call
 	// cannot hold the lease and a catalog work slot forever.
-	attemptCtx, cancel := context.WithTimeout(ctx, s.commitCatalog.RegistrationTimeout)
+	attemptCtx, cancel := catalogAttemptContext(ctx, s.commitCatalog.RegistrationTimeout)
 	defer cancel()
 	renewDone := make(chan struct{})
 	go func() {
@@ -298,6 +300,7 @@ func (s *Server) ProcessRegistrationOnce(ctx context.Context) (bool, error) {
 		}
 	}
 	ran, _, runErr := s.runIcebergRegistrationWithHooks(attemptCtx, r.RunID, r.ID, r.ArtifactSetDigest, alreadyCommitted, receiptValue, receiptFactory, before, committed, noOp, iceStateWriting)
+	timedOut := catalogAttemptTimedOut(attemptCtx)
 	cancel()
 	<-renewDone
 	if runErr == nil && !ran {
@@ -306,7 +309,10 @@ func (s *Server) ProcessRegistrationOnce(ctx context.Context) (bool, error) {
 	persistCtx, persistCancel := registrationPersistContext(ctx)
 	defer persistCancel()
 	if runErr != nil {
-		failure := icebergreg.ClassifyFailure(runErr, externalStarted)
+		classified := classifyRegistrationFailure(runErr, externalStarted, timedOut)
+		if timedOut {
+			telemetry.ObserveCatalogAttemptTimeout(catalogOperationRegistration)
+		}
 		s.log.Warn(
 			"iceberg registration attempt failed",
 			slog.String("run_id", r.RunID),
@@ -314,13 +320,14 @@ func (s *Server) ProcessRegistrationOnce(ctx context.Context) (bool, error) {
 			slog.Int("registration_attempt", a.AttemptNumber),
 			slog.String("commit_id", r.CommitID),
 			slog.String("catalog_status", r.Status),
-			slog.String("error_class", string(failure.Class)),
+			slog.String("error_class", string(classified.Class)),
 			slog.String("error_message", runErr.Error()),
 			slog.Bool("external_commit_started", externalStarted),
+			slog.Bool("attempt_deadline_exceeded", timedOut),
 		)
-		err := s.st.FailRegistrationAttempt(persistCtx, r.ID, a.ID, a.FencingToken, string(failure.Class), runErr.Error(), failure.Retryable, failure.DefiniteRejection, s.nowFn(), policy)
+		err := s.st.FailRegistrationAttempt(persistCtx, r.ID, a.ID, a.FencingToken, string(classified.Class), runErr.Error(), classified.Retryable, classified.DefiniteRejection, s.nowFn(), policy)
 		if errors.Is(err, db.ErrRegistrationFenced) {
-			_ = s.st.RecordRegistrationStaleResult(persistCtx, r.ID, a.ID, string(failure.Class), s.nowFn())
+			_ = s.st.RecordRegistrationStaleResult(persistCtx, r.ID, a.ID, string(classified.Class), s.nowFn())
 			return true, nil
 		}
 		return true, err
@@ -331,4 +338,16 @@ func (s *Server) ProcessRegistrationOnce(ctx context.Context) (bool, error) {
 		return true, nil
 	}
 	return true, err
+}
+
+// classifyRegistrationFailure classifies a failed attempt. An attempt stopped
+// by its own deadline is a catalog timeout whatever error the registrar
+// wrapped it in: retryable before the external commit began, ambiguous after.
+func classifyRegistrationFailure(runErr error, externalStarted, timedOut bool) failure.Failure {
+	if timedOut {
+		out := icebergreg.ClassifyFailure(context.DeadlineExceeded, externalStarted)
+		out.Err = runErr
+		return out
+	}
+	return icebergreg.ClassifyFailure(runErr, externalStarted)
 }

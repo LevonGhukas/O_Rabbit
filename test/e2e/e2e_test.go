@@ -36,8 +36,9 @@ type env struct {
 var stack *env
 
 const (
-	// registrationTimeout must match ORABBIT_REGISTRATION_TIMEOUT in
-	// docker-compose.yml. Faults hold the catalog longer than this.
+	// registrationTimeout must match ORABBIT_REGISTRATION_TIMEOUT and
+	// ORABBIT_RECONCILIATION_TIMEOUT in docker-compose.yml. Faults hold the
+	// catalog longer than this.
 	registrationTimeout = 10 * time.Second
 	faultHold           = registrationTimeout + 5*time.Second
 	// faultSettle is how long past its hold a fault that was hit may take to

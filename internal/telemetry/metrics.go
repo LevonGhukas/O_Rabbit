@@ -75,6 +75,10 @@ var (
 		Name: "orabbit_catalog_work_rejected_total",
 		Help: "Registration or reconciliation attempts deferred because every catalog work slot was busy.",
 	})
+	catalogAttemptTimeouts = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "orabbit_catalog_attempt_timeouts_total",
+		Help: "Registration or reconciliation attempts stopped by their own deadline, by operation.",
+	}, []string{"operation"})
 
 	rateLimited = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "orabbit_rate_limited_total",
@@ -92,7 +96,7 @@ func init() {
 		httpHandled, httpLatency,
 		taskResults, taskRows, taskBytesRead, taskBytesWritten,
 		commitLatency,
-		catalogSlotsCapacity, catalogSlotsInUse, catalogWorkRejected,
+		catalogSlotsCapacity, catalogSlotsInUse, catalogWorkRejected, catalogAttemptTimeouts,
 		rateLimited, authFailures,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
@@ -191,6 +195,13 @@ func ObserveCatalogWork(acquired bool) {
 
 // ReleaseCatalogWork records a catalog slot given back.
 func ReleaseCatalogWork() { catalogSlotsInUse.Dec() }
+
+// ObserveCatalogAttemptTimeout records one catalog attempt stopped by its own
+// deadline. Callers pass a fixed operation name ("registration" or
+// "reconciliation"), so cardinality stays bounded.
+func ObserveCatalogAttemptTimeout(operation string) {
+	catalogAttemptTimeouts.WithLabelValues(operation).Inc()
+}
 
 // ObserveRateLimited records one request rejected by a rate limit. Callers
 // pass fixed surface and reason names, never client data, so cardinality
