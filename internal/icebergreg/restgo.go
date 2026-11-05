@@ -112,23 +112,19 @@ func prepareRESTGoTable(ctx context.Context, log *slog.Logger, req RunRequest, r
 	return loadOrCreateRESTGoTable(ctx, log, cat, ident, req, reg, table, basePrefix)
 }
 
-// dropAndRecreateCatalogTable drops the Iceberg table via the REST catalog and
-// immediately recreates it empty. Used during Full Refresh for the ice engine
-// so that the subsequent ice insert appends into a clean snapshot.
-func dropAndRecreateCatalogTable(ctx context.Context, log *slog.Logger, req RunRequest, reg RunConfig, table string, regS3 s3io.Config, basePrefix string) error {
-	cat, ident, err := openRESTCatalog(ctx, req, reg, regS3, table)
-	if err != nil {
-		return err
+// isFullRefreshRequest reports whether the run replaces the table's rows
+// instead of appending to them.
+func isFullRefreshRequest(req RunRequest) bool {
+	return !req.Incremental || strings.EqualFold(req.WriteMode, "overwrite")
+}
+
+// objectURIs returns the S3 URIs of the run's verified objects.
+func objectURIs(bucket string, objs []icebergObj) []string {
+	out := make([]string, 0, len(objs))
+	for _, obj := range objs {
+		out = append(out, fmt.Sprintf("s3://%s/%s", bucket, obj.key))
 	}
-	if dropErr := cat.DropTable(ctx, ident); dropErr != nil && !errors.Is(dropErr, icecatalog.ErrNoSuchTable) {
-		return fmt.Errorf("drop iceberg table %s: %w", table, dropErr)
-	}
-	log.Info("iceberg full refresh: table dropped, recreating",
-		slog.String("run_id", req.RunID),
-		slog.String("table", table),
-	)
-	_, err = createRESTGoTable(ctx, cat, ident, req, reg, basePrefix)
-	return err
+	return out
 }
 
 func runRESTGoRegister(ctx context.Context, log *slog.Logger, req RunRequest, reg RunConfig, table string, regS3 s3io.Config, basePrefix string, objs []icebergObj) error {
@@ -136,13 +132,16 @@ func runRESTGoRegister(ctx context.Context, log *slog.Logger, req RunRequest, re
 	if err != nil {
 		return err
 	}
+	return commitRESTGoFiles(ctx, log, tbl, req, reg, table, objectURIs(req.DatasetS3.Bucket, objs))
+}
 
-	newFiles := make([]string, 0, len(objs))
-	for _, obj := range objs {
-		newFiles = append(newFiles, fmt.Sprintf("s3://%s/%s", req.DatasetS3.Bucket, obj.key))
-	}
-
-	isFullRefresh := !req.Incremental || strings.EqualFold(req.WriteMode, "overwrite")
+// commitRESTGoFiles registers newFiles in tbl with one transaction, so the
+// catalog publishes them in a single snapshot marked with the operation
+// identity. A full refresh replaces every live data file in that snapshot:
+// readers see the previous rows or the new rows, never an empty table, and a
+// failed commit leaves the previous snapshot current.
+func commitRESTGoFiles(ctx context.Context, log *slog.Logger, tbl *icetable.Table, req RunRequest, reg RunConfig, table string, newFiles []string) error {
+	isFullRefresh := isFullRefreshRequest(req)
 
 	log.Info("iceberg registration files",
 		slog.String("run_id", req.RunID),
@@ -171,6 +170,7 @@ func runRESTGoRegister(ctx context.Context, log *slog.Logger, req RunRequest, re
 	if isFullRefresh {
 		// A full refresh atomically replaces every live data file with the new
 		// files in one snapshot (true snapshot overwrite).
+		var err error
 		existing, err = currentDataFiles(ctx, tbl)
 		if err != nil {
 			return fmt.Errorf("iceberg full refresh: %w", err)
@@ -190,16 +190,10 @@ func runRESTGoRegister(ctx context.Context, log *slog.Logger, req RunRequest, re
 		if err := registerPartitionedFiles(ctx, tx, reg, table, existing, isFullRefresh, newFiles, snapshotProperties); err != nil {
 			return err
 		}
-	} else {
-		existingFiles := make([]string, len(existing))
-		for i, df := range existing {
-			existingFiles[i] = df.FilePath()
-		}
-		if err := applyRESTGoFileMutation(ctx, tx, isFullRefresh, existingFiles, newFiles, snapshotProperties); err != nil {
-			return err
-		}
+	} else if err := registerUnpartitionedFiles(ctx, tx, existing, isFullRefresh, newFiles, snapshotProperties); err != nil {
+		return err
 	}
-	_, err = tx.Commit(ctx)
+	_, err := tx.Commit(ctx)
 	return err
 }
 

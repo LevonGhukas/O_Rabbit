@@ -195,7 +195,7 @@ func buildIceCLIEnv(base []string, regS3 s3io.Config) []string {
 	return filtered
 }
 
-func runIceCLIRegister(ctx context.Context, cmdFactory iceCommandFactory, iceBinary string, req RunRequest, reg RunConfig, table string, regS3 s3io.Config, objs []icebergObj) error {
+func runIceCLIRegister(ctx context.Context, cmdFactory iceCommandFactory, iceBinary string, reg RunConfig, table string, regS3 s3io.Config, files []string) error {
 	if strings.TrimSpace(iceBinary) == "" {
 		iceBinary = DefaultIceBinary
 	}
@@ -222,8 +222,8 @@ func runIceCLIRegister(ctx context.Context, cmdFactory iceCommandFactory, iceBin
 	}
 
 	var stdin strings.Builder
-	for _, obj := range objs {
-		fmt.Fprintf(&stdin, "s3://%s/%s\n", req.DatasetS3.Bucket, obj.key)
+	for _, file := range files {
+		fmt.Fprintln(&stdin, file)
 	}
 
 	cmd := cmdFactory(ctx, iceBinary, args...)
