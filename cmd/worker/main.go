@@ -350,13 +350,15 @@ func main() {
 				continue
 			}
 			if cancelErr, ok := asTaskCanceledError(err); ok {
+				// No BootId: the attempt was assigned without one (RequestTask
+				// sends none), and a report whose boot ID differs from the
+				// attempt's is rejected as stale, losing the error message.
 				reportErr := reportResultWithRetry(
 					ctx,
 					log,
 					cp,
 					&grpcpb.ReportTaskResultRequest{
 						WorkerId:     cfg.WorkerID,
-						BootId:       workerInstanceID,
 						TaskId:       t.TaskId,
 						RunId:        t.RunId,
 						AttemptId:    t.AttemptId,
@@ -393,13 +395,13 @@ func main() {
 			// Always report a class: unrecognized errors classify as
 			// UNKNOWN_PERMANENT rather than leaving the failure unclassified.
 			failureClass := string(failure.ClassOf(err))
+			// No BootId, for the reason given at the cancel report above.
 			reportErr := reportResultWithRetry(
 				ctx,
 				log,
 				cp,
 				&grpcpb.ReportTaskResultRequest{
 					WorkerId:     cfg.WorkerID,
-					BootId:       workerInstanceID,
 					TaskId:       t.TaskId,
 					RunId:        t.RunId,
 					AttemptId:    t.AttemptId,

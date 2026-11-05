@@ -1189,3 +1189,48 @@ func TestReportMultipartLifecycleRejectsOversizedErrorMessage(t *testing.T) {
 		t.Fatalf("code=%v want=%v err=%v", status.Code(err), codes.InvalidArgument, err)
 	}
 }
+
+// A worker reports a failed task with the attempt's identity exactly as it
+// was assigned. The report must be accepted with its error message: before,
+// the worker added a boot ID the attempt never had, so every failure report
+// was rejected as stale and the task only failed later by lease expiry,
+// as "retry limit exhausted".
+func TestReportTaskResultAcceptsAFailureReportWithItsMessage(t *testing.T) {
+	st := openGRPCTestStore(t)
+	ctx := context.Background()
+	createGRPCTestRunAndTask(t, st, "run-result-failed", "job-result-failed", "task-result-failed", "PENDING")
+	assignGRPCTestAttempt(t, st, "task-result-failed", "worker-1")
+	srv := NewServer(nil, st, nil, testCryptoKey, 5*time.Second, nil)
+	report := &grpcpb.ReportTaskResultRequest{
+		WorkerId:     "worker-1",
+		TaskId:       "task-result-failed",
+		RunId:        "run-result-failed",
+		AttemptId:    "attempt-task-result-failed",
+		FencingToken: "token-task-result-failed",
+		Status:       "FAILED",
+		ErrorMessage: `column "balance": cannot convert string to nullable<decimal(38,3)>: value requires dropping fractional digits`,
+		FailureClass: "UNKNOWN_PERMANENT",
+	}
+
+	// The shape the worker used to send is rejected, which is why it changed.
+	_, err := srv.ReportTaskResult(ctx, &grpcpb.ReportTaskResultRequest{
+		WorkerId: report.WorkerId, BootId: "worker-boot-1", TaskId: report.TaskId, RunId: report.RunId,
+		AttemptId: report.AttemptId, FencingToken: report.FencingToken, Status: report.Status,
+		ErrorMessage: report.ErrorMessage, FailureClass: report.FailureClass,
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("report with a boot ID the attempt does not have: err=%v, want FailedPrecondition", err)
+	}
+
+	resp, err := srv.ReportTaskResult(ctx, report)
+	if err != nil || !resp.Accepted {
+		t.Fatalf("failure report: resp=%+v err=%v", resp, err)
+	}
+	tasks, err := st.ListTasksForRun(ctx, "run-result-failed")
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("tasks=%+v err=%v", tasks, err)
+	}
+	if tasks[0].ErrorMessage == nil || !strings.Contains(*tasks[0].ErrorMessage, "requires dropping fractional digits") {
+		t.Fatalf("task error message = %v, want the worker's conversion error", tasks[0].ErrorMessage)
+	}
+}

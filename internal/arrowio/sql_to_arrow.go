@@ -602,3 +602,9 @@ func PlansFromSQLEngineWithOverrides(engine string, cols []string, colTypes []*s
 
 	return plans, arrow.NewSchema(newFields, nil), nil
 }
+
+// LookupColumnOverride finds a column's override the way planning and
+// extraction do: exact name first, then case-insensitively.
+func LookupColumnOverride(targetTypes map[string]string, col string) (string, bool) {
+	return lookupColumnOverride(targetTypes, col)
+}

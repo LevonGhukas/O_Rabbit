@@ -41,8 +41,9 @@ func TestArrowTypeForLogicalTypeScalars(t *testing.T) {
 		{"timestamp timezone preserved", typesystem.LogicalType{Kind: typesystem.KindTimestampTZ, Timezone: "America/New_York"}, &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "America/New_York"}, typesystem.MappingExact, false},
 		{"uuid", typesystem.LogicalType{Kind: typesystem.KindUUID}, arrow.BinaryTypes.String, typesystem.MappingSemanticFallback, true},
 		{"json", typesystem.LogicalType{Kind: typesystem.KindJSON}, arrow.BinaryTypes.String, typesystem.MappingSemanticFallback, true},
-		{"struct", typesystem.LogicalType{Kind: typesystem.KindStruct}, arrow.BinaryTypes.String, typesystem.MappingSemanticFallback, true},
-		{"map", typesystem.MapOf(typesystem.LogicalType{Kind: typesystem.KindString}, typesystem.LogicalType{Kind: typesystem.KindInt64}), arrow.BinaryTypes.String, typesystem.MappingSemanticFallback, true},
+		{"struct", typesystem.LogicalType{Kind: typesystem.KindStruct, Fields: []typesystem.LogicalField{{Name: "f1", Type: typesystem.Nullable(typesystem.LogicalType{Kind: typesystem.KindInt32})}, {Name: "f2", Type: typesystem.LogicalType{Kind: typesystem.KindString}}}}, arrow.StructOf(arrow.Field{Name: "f1", Type: arrow.PrimitiveTypes.Int32, Nullable: true}, arrow.Field{Name: "f2", Type: arrow.BinaryTypes.String}), typesystem.MappingExact, false},
+		{"map", typesystem.MapOf(typesystem.LogicalType{Kind: typesystem.KindString}, typesystem.LogicalType{Kind: typesystem.KindInt64}), mapWithItemNullable(arrow.BinaryTypes.String, arrow.PrimitiveTypes.Int64, false), typesystem.MappingExact, false},
+		{"map with a text member", typesystem.MapOf(typesystem.LogicalType{Kind: typesystem.KindString}, typesystem.Nullable(typesystem.LogicalType{Kind: typesystem.KindUUID})), mapWithItemNullable(arrow.BinaryTypes.String, arrow.BinaryTypes.String, true), typesystem.MappingSemanticFallback, true},
 		{"unknown", typesystem.LogicalType{Kind: typesystem.KindUnknown}, arrow.BinaryTypes.String, typesystem.MappingUnsupportedFallback, true},
 	}
 
@@ -92,4 +93,10 @@ func TestArrowTypeForLogicalTypeDecimalArrayAndInvalid(t *testing.T) {
 		_, _, err := ArrowTypeForLogicalType(invalid)
 		require.Error(t, err)
 	}
+}
+
+func mapWithItemNullable(key, item arrow.DataType, nullable bool) *arrow.MapType {
+	m := arrow.MapOf(key, item)
+	m.SetItemNullable(nullable)
+	return m
 }

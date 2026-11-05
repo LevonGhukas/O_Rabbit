@@ -426,7 +426,41 @@ Source types are mapped to Arrow, Parquet and Iceberg types automatically.
 or with `source` / `nullable<source>` to change only nullability. Before any
 task starts, the planner checks every override against the data. An override
 that would lose values or violate NOT NULL falls back to a lossless type, and
-the run gets a `type_warnings` entry explaining why.
+the run gets a `type_warnings` entry explaining why. Overrides also accept
+nested types: `array<T>`, `map<K,V>` and `struct<name:T,...>`.
+
+<details>
+<summary><b>Cassandra types</b></summary>
+
+| CQL type | Iceberg | ClickHouse |
+|---|---|---|
+| `decimal` | `decimal(38,S)`, S = most decimal places in the data | `Decimal(38, S)` |
+| `varint` | `decimal(38,0)` | `Decimal(38, 0)` |
+| `uuid`, `timeuuid` | `string` (canonical UUID text) | `String` |
+| `map<k,v>` | `map<k,v>` | `Map(K, V)` |
+| `tuple<a,b,...>` | `struct<f1:a,f2:b,...>` | `Tuple(f1 A, f2 B, ...)` |
+| `list<T>`, `set<T>`, `vector<T,n>` | `list<T>` | `Array(T)` |
+| `inet`, `duration`, user-defined types | `string` (text, JSON for UDTs) | `String` |
+
+- Cassandra decimals declare no precision, so the planner reads the decimal
+  columns once before tasks start and uses the largest scale it finds. A
+  column with no values yet gets `decimal(38,18)`. Values that need more than
+  38 digits are stored as exact text, with a warning.
+- A `varint` or decimal value that does not fit its column fails the run
+  instead of being rounded; choose a column type, for example `string`, for
+  such data.
+- UUIDs are stored as canonical text because ClickHouse (25.8) cannot read
+  Parquet UUID columns. The `uuid` column type stores a column as a native
+  Iceberg `uuid` for other engines; ClickHouse then cannot read that table.
+- ClickHouse has no NULL `Map`, `Array` or `Tuple`: a NULL collection reads as
+  empty there. Cassandra itself does not distinguish an empty collection from
+  NULL. NULL values inside a tuple read as NULL.
+- A table that already exists keeps the types its columns have. Columns that
+  earlier releases stored as text stay text (Iceberg cannot change a column's
+  type), and the run gets a warning; write to a new target table to store
+  them natively. Running Cassandra jobs therefore keep working unchanged.
+
+</details>
 
 ## Iceberg registration
 

@@ -74,12 +74,42 @@ func LogicalTypeForCassandraColumn(dbType string, precision, scale int64, hasDec
 			return cassandraUnknown(lower), nil
 		}
 		return cassandraArrayOf(args[0])
-	case "map", "tuple":
-		// Stored as JSON text: native Iceberg map/struct conversion is not
-		// implemented in the storage bridge.
-		return typesystem.LogicalType{Kind: typesystem.KindJSON, SourceTypeName: lower}, nil
+	case "map":
+		args, ok := cassandraTypeArgs(lower)
+		if !ok || len(args) != 2 {
+			return cassandraUnknown(lower), nil
+		}
+		key, err := LogicalTypeForCassandraColumn(args[0], 0, 0, false)
+		if err != nil {
+			return typesystem.LogicalType{}, err
+		}
+		value, err := LogicalTypeForCassandraColumn(args[1], 0, 0, false)
+		if err != nil {
+			return typesystem.LogicalType{}, err
+		}
+		// Cassandra map keys are never null.
+		return typesystem.MapOf(key, typesystem.Nullable(value)), nil
+	case "tuple":
+		args, ok := cassandraTypeArgs(lower)
+		if !ok {
+			return cassandraUnknown(lower), nil
+		}
+		fields := make([]typesystem.LogicalField, len(args))
+		for i, arg := range args {
+			element, err := LogicalTypeForCassandraColumn(arg, 0, 0, false)
+			if err != nil {
+				return typesystem.LogicalType{}, err
+			}
+			// Tuple elements may be null; they are matched by position.
+			fields[i] = typesystem.LogicalField{Name: typesystem.TupleFieldName(i), Type: typesystem.Nullable(element)}
+		}
+		return typesystem.LogicalType{Kind: typesystem.KindStruct, Fields: fields, SourceTypeName: lower}, nil
 	case "varint":
-		return cassandraUnknown(base), nil
+		// Arbitrary-size integer: decimal(38,0) holds every value up to 38
+		// digits exactly and stays the same across runs, so a later, larger
+		// value never needs a different column type. Longer values fail the
+		// conversion with an explicit error instead of being rounded.
+		return typesystem.Decimal(38, 0), nil
 	default:
 		if cassandraIdentPattern.MatchString(base) {
 			// Any other bare identifier in system_schema.columns is a user-defined

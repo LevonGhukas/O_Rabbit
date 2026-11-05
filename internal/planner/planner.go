@@ -364,7 +364,7 @@ func CreateRunAndTasks(ctx context.Context, st *db.Store, k crypto.Key, job db.J
 	// Keep the user's requested types for persisted job options; o.ColumnTypes
 	// becomes this run's verified effective types.
 	userColumnTypes := o.ColumnTypes
-	effectiveTypes, typeWarnings, err := resolveEffectiveColumnTypes(ctx, st, k, job, srcEngine, o, run.ID)
+	effectiveTypes, typeWarnings, err := resolveEffectiveColumnTypes(ctx, st, k, job, srcEngine, o, run.ID, registrationConfig)
 	if err != nil {
 		return db.Run{}, nil, err
 	}

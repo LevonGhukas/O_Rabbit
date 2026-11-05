@@ -72,7 +72,11 @@ func Convert(value any, target LogicalType) (any, error) {
 		return convertBinary(value, target)
 	case KindArray:
 		return convertArray(value, target)
-	case KindUnknown, KindStruct, KindMap, KindJSON:
+	case KindMap:
+		return convertMap(value, target)
+	case KindStruct:
+		return convertStruct(value, target)
+	case KindUnknown, KindJSON:
 		return ToLosslessString(value)
 	default:
 		return nil, conversionError(target, value, "unsupported logical type")
@@ -115,6 +119,10 @@ func convertString(value any, target LogicalType) (string, error) {
 		return v.String(), nil
 	case time.Time:
 		return v.Format(time.RFC3339Nano), nil
+	case MapValue:
+		return v.JSONText(), nil
+	case TupleValue:
+		return v.JSONText(), nil
 	default:
 		return "", conversionError(target, value, "unsupported string source")
 	}

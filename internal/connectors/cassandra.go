@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -985,11 +984,24 @@ func newCassandraRowScanner(columns []gocql.ColumnInfo) *cassandraRowScanner {
 }
 
 func cassandraDestFactory(info gocql.TypeInfo) func() any {
-	if _, err := info.NewWithError(); err != nil {
+	sample, err := info.NewWithError()
+	if err != nil {
 		custom := info.Custom()
 		return func() any { return &cassandraRawValue{custom: custom} }
 	}
-	return func() any { v, _ := info.NewWithError(); return v }
+	switch reflect.TypeOf(sample).Elem().Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice:
+		// Already nullable (decimal, varint), or a collection, which Cassandra
+		// cannot tell apart from an empty one.
+		return func() any { v, _ := info.NewWithError(); return v }
+	}
+	// Scan scalars into **T: gocql sets the inner pointer to nil for NULL.
+	// Scanning into *T stores T's zero value instead, so a NULL int, text,
+	// uuid or timestamp became 0, "", a zero UUID or year 1.
+	return func() any {
+		v, _ := info.NewWithError()
+		return reflect.New(reflect.TypeOf(v)).Interface()
+	}
 }
 
 func (s *cassandraRowScanner) scan(iter *gocql.Iter) (map[string]any, bool) {
@@ -1058,6 +1070,10 @@ func cassandraToDriverValue(v any) (driver.Value, error) {
 	case []any:
 		// list/set/vector values stay structured for the array converter.
 		return x, nil
+	case typesystem.MapValue, typesystem.TupleValue:
+		// map, tuple and UDT values stay structured: the column's type decides
+		// whether they are stored natively or as JSON text.
+		return x, nil
 	default:
 		text, err := typesystem.ToLosslessString(v)
 		if err != nil {
@@ -1069,15 +1085,11 @@ func cassandraToDriverValue(v any) (driver.Value, error) {
 
 // normalizeCassandraValue rewrites gocql-specific Go values into values the
 // type system converts natively: decimal/varint become exact strings, duration
-// becomes ISO-8601 text, list/set/vector become []any, and map/UDT/tuple values
-// become one JSON document.
+// becomes ISO-8601 text, list/set/vector become []any, maps and UDT values
+// become typesystem.MapValue and tuples typesystem.TupleValue. Nested values
+// are normalized the same way, so a map or tuple stored as JSON text renders
+// exactly as before (see typesystem.MapValue.JSONText).
 func normalizeCassandraValue(v any) any {
-	return normalizeCassandraNested(v, false)
-}
-
-// normalizeCassandraNested keeps containers as native Go structures when they
-// are nested inside a JSON document, so they are encoded exactly once.
-func normalizeCassandraNested(v any, inJSON bool) any {
 	switch x := v.(type) {
 	case nil:
 		return nil
@@ -1100,46 +1112,38 @@ func normalizeCassandraNested(v any, inJSON bool) any {
 	case []byte, string, time.Time, time.Duration:
 		return x
 	case cassandraTuple:
-		out := make([]any, len(x))
+		out := make(typesystem.TupleValue, len(x))
 		for i, elem := range x {
-			out[i] = normalizeCassandraNested(elem, true)
+			out[i] = normalizeCassandraValue(elem)
 		}
-		return cassandraJSONDocument(out, inJSON)
+		return out
 	}
 	rv := reflect.ValueOf(v)
 	switch rv.Kind() {
 	case reflect.Slice, reflect.Array:
 		out := make([]any, rv.Len())
 		for i := range out {
-			out[i] = normalizeCassandraNested(rv.Index(i).Interface(), inJSON)
+			out[i] = normalizeCassandraValue(rv.Index(i).Interface())
 		}
 		return out
 	case reflect.Map:
-		out := make(map[string]any, rv.Len())
+		out := make(typesystem.MapValue, 0, rv.Len())
 		iter := rv.MapRange()
 		for iter.Next() {
-			key := normalizeCassandraNested(iter.Key().Interface(), true)
-			out[fmt.Sprint(key)] = normalizeCassandraNested(iter.Value().Interface(), true)
+			out = append(out, typesystem.MapEntry{
+				Key:   normalizeCassandraValue(iter.Key().Interface()),
+				Value: normalizeCassandraValue(iter.Value().Interface()),
+			})
 		}
-		return cassandraJSONDocument(out, inJSON)
+		typesystem.SortMapEntries(out)
+		return out
 	case reflect.Pointer:
 		if rv.IsNil() {
 			return nil
 		}
-		return normalizeCassandraNested(rv.Elem().Interface(), inJSON)
+		return normalizeCassandraValue(rv.Elem().Interface())
 	}
 	return v
-}
-
-func cassandraJSONDocument(v any, inJSON bool) any {
-	if inJSON {
-		return v
-	}
-	encoded, err := json.Marshal(v)
-	if err != nil {
-		return fmt.Sprint(v)
-	}
-	return string(encoded)
 }
 
 // cassandraISODuration renders a CQL duration as ISO-8601, e.g. P1M2DT3.5S.
