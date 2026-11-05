@@ -28,9 +28,13 @@ const (
 	FailureCatalogTimeout     FailureClass = "CATALOG_TIMEOUT"
 	FailureCatalogConflict    FailureClass = "CATALOG_CONFLICT"
 	FailureSchemaIncompatible FailureClass = "SCHEMA_INCOMPATIBLE"
-	FailureExternalAmbiguous  FailureClass = "EXTERNAL_COMMIT_AMBIGUOUS"
-	FailureIceStateWrite      FailureClass = "ICE_STATE_WRITE_FAILED"
-	FailureIceStateVerify     FailureClass = "ICE_STATE_VERIFY_FAILED"
+	// The catalog has the table but its metadata cannot be read; an operator
+	// must inspect and restore it, because recreating the table would erase
+	// its snapshots and properties.
+	FailureTableMetadataUnreadable FailureClass = "TABLE_METADATA_UNREADABLE"
+	FailureExternalAmbiguous       FailureClass = "EXTERNAL_COMMIT_AMBIGUOUS"
+	FailureIceStateWrite           FailureClass = "ICE_STATE_WRITE_FAILED"
+	FailureIceStateVerify          FailureClass = "ICE_STATE_VERIFY_FAILED"
 
 	// Execution & Verification
 	FailureArtifactVerification FailureClass = "ARTIFACT_VERIFICATION_FAILED"

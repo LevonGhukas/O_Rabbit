@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"strings"
 
+	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 	"github.com/LevonGhukas/O_Rabbit/internal/s3io"
 	iceberg "github.com/apache/iceberg-go"
 	icecatalog "github.com/apache/iceberg-go/catalog"
@@ -238,24 +240,50 @@ func loadOrCreateRESTGoTable(ctx context.Context, log *slog.Logger, cat *restcat
 		}
 		return applySortOrder(ctx, cat, ident, tbl, reg.SortOrder)
 	}
+	// Checked before ErrNoSuchTable: a catalog may report missing metadata
+	// as 404, which iceberg-go also maps to ErrNoSuchTable, but the table
+	// still exists. Dropping and recreating it would erase its snapshots and
+	// properties, so the table is left as it is for an operator.
+	tableLoc := restGoTableLocation(req.DatasetS3.Bucket, basePrefix)
+	if isBrokenRESTMetadataErr(err, tableLoc) {
+		log.Warn("iceberg registration cannot read table metadata; table left unchanged",
+			slog.String("run_id", req.RunID),
+			slog.String("table", table),
+			slog.String("location", tableLoc),
+		)
+		return nil, failure.NewFailure(failure.FailureTableMetadataUnreadable, false, true, fmt.Errorf(
+			"iceberg table %s exists but its metadata cannot be read: %w; the table was left unchanged. "+
+				"Check that the metadata files under %s/metadata/ exist and are readable (restore them from a backup if needed), "+
+				"then retry with POST /api/v1/runs/%s/registration/retry", table, err, tableLoc, req.RunID))
+	}
 	if errors.Is(err, icecatalog.ErrNoSuchTable) {
 		return createRESTGoTable(ctx, cat, ident, req, reg, basePrefix)
 	}
+	return nil, classifyTableLoadError(table, err)
+}
 
-	tableLoc := restGoTableLocation(req.DatasetS3.Bucket, basePrefix)
-	if !isBrokenRESTMetadataErr(err, tableLoc) {
-		return nil, err
+// classifyTableLoadError marks a failed table load as a definite rejection:
+// nothing was written, so the registration can safely run again. Without it,
+// a load that fails after the external-commit boundary would be reported as an
+// ambiguous commit. Catalog outages and timeouts are retried automatically.
+func classifyTableLoadError(table string, err error) error {
+	err = fmt.Errorf("load iceberg table %s: %w", table, err)
+	var ne net.Error
+	var ue *url.Error
+	switch {
+	case errors.Is(err, context.Canceled):
+		return err
+	case errors.Is(err, context.DeadlineExceeded):
+		return failure.NewFailure(failure.FailureCatalogTimeout, true, true, err)
+	case errors.Is(err, restcatalog.ErrServiceUnavailable), errors.Is(err, restcatalog.ErrServerError), errors.As(err, &ne), errors.As(err, &ue):
+		return failure.NewFailure(failure.FailureCatalogUnavailable, true, true, err)
+	case errors.Is(err, restcatalog.ErrUnauthorized), errors.Is(err, restcatalog.ErrAuthorizationExpired):
+		return failure.NewFailure(failure.FailureAuthentication, false, true, err)
+	case errors.Is(err, restcatalog.ErrForbidden):
+		return failure.NewFailure(failure.FailureAuthorization, false, true, err)
+	default:
+		return failure.NewFailure(failure.FailureUnknownPermanent, false, true, err)
 	}
-
-	log.Warn("iceberg registration found broken table metadata; recreating table",
-		slog.String("run_id", req.RunID),
-		slog.String("table", table),
-		slog.String("location", tableLoc),
-	)
-	if dropErr := cat.DropTable(ctx, ident); dropErr != nil && !errors.Is(dropErr, icecatalog.ErrNoSuchTable) {
-		return nil, fmt.Errorf("drop broken iceberg table %s: %w", table, dropErr)
-	}
-	return createRESTGoTable(ctx, cat, ident, req, reg, basePrefix)
 }
 
 func createRESTGoTable(ctx context.Context, cat *restcatalog.Catalog, ident icetable.Identifier, req RunRequest, reg RunConfig, basePrefix string) (*icetable.Table, error) {
