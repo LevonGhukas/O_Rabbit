@@ -237,8 +237,10 @@ shell then watches, or save the answers as a YAML spec for `/submit` (written
 to the working directory with owner-only permissions, since it holds the
 secrets). The wizard builds the same spec as `run submit` and applies the same
 validation. Before submitting it prints the configuration, and master errors
-are shown with their details and a suggested fix. `/run classic [flags]`, or
-`/run` with any flag, still runs the line-by-line prompts of `run interactive`.
+are shown with their details and a suggested fix. Every form of `/run`
+(including `/run interactive` and the old `/run classic`) opens the wizard;
+the line-by-line prompts remain available outside the shell as
+`orabbit-client run interactive`.
 
 `/submit`, `/recover`, `/stack` and `/maintenance` run the matching subcommand
 below, and pass the shell's master URL along. `/connect <url>` switches masters. Esc stops

@@ -43,59 +43,59 @@ func TestTUIMenuItemsCommands(t *testing.T) {
 	}
 }
 
-func TestTUIMenuItemsRunFlags(t *testing.T) {
-	items := tuiMenuItems("/run classic ")
-	if len(items) != len(runClassicFlags) {
-		t.Fatalf("/run classic lists %d flags, want %d", len(items), len(runClassicFlags))
+func TestTUIMenuItemsSubcommandFlags(t *testing.T) {
+	items := tuiMenuItems("/stack start --")
+	if want := len(subFlags(t, "stack", "start")); len(items) != want {
+		t.Fatalf("/stack start -- lists %d flags, want %d", len(items), want)
 	}
 	// Prefix filtering works with one or two dashes.
-	for _, line := range []string{"/run classic --ice", "/run classic -ice"} {
+	for _, line := range []string{"/stack start --worker-", "/stack start -worker-"} {
 		labels := menuLabels(tuiMenuItems(line))
 		for _, l := range labels {
-			if !strings.HasPrefix(l, "--ice") {
+			if !strings.HasPrefix(l, "--worker-") {
 				t.Fatalf("%q offered %q", line, l)
 			}
 		}
-		if len(labels) != 5 { // iceberg-engine, ice-uri, ice-table, ice-config, ice-bin
+		if len(labels) != 4 { // worker-bin, worker-log-level, worker-log-format, worker-enrollment-token
 			t.Fatalf("%q offered %v", line, labels)
 		}
 	}
 	// Choosing keeps earlier words and adds the flag.
-	got := menuInserts(tuiMenuItems("/run classic --advanced --loc"))
-	if len(got) != 1 || got[0] != "/run classic --advanced --local-workers " {
+	got := menuInserts(tuiMenuItems("/stack start --quiet --verb"))
+	if len(got) != 1 || got[0] != "/stack start --quiet --verbose " {
 		t.Fatalf("inserts = %v", got)
 	}
 	// Flags already used are not offered again.
-	for _, l := range menuLabels(tuiMenuItems("/run classic --advanced ")) {
-		if l == "--advanced" {
-			t.Fatal("--advanced offered twice")
+	for _, l := range menuLabels(tuiMenuItems("/stack start --quiet ")) {
+		if l == "--quiet" {
+			t.Fatal("--quiet offered twice")
 		}
 	}
 }
 
 func TestTUIMenuItemsFlagValues(t *testing.T) {
-	got := menuLabels(tuiMenuItems("/run classic --local-workers "))
+	got := menuLabels(tuiMenuItems("/stack start --insecure "))
 	if strings.Join(got, ",") != "true,false" {
-		t.Fatalf("--local-workers values = %v", got)
+		t.Fatalf("--insecure values = %v", got)
 	}
-	got = menuInserts(tuiMenuItems("/run classic --iceberg-engine i"))
-	if len(got) != 1 || got[0] != "/run classic --iceberg-engine ice " {
-		t.Fatalf("--iceberg-engine i inserts = %v", got)
+	got = menuInserts(tuiMenuItems("/stack start --worker-log-format t"))
+	if len(got) != 1 || got[0] != "/stack start --worker-log-format text " {
+		t.Fatalf("--worker-log-format t inserts = %v", got)
 	}
 	got = menuLabels(tuiMenuItems("/recover r1 --action "))
 	if len(got) != 4 {
 		t.Fatalf("--action values = %v", got)
 	}
 	// Free-form values (URLs, paths) get no menu: the user types them.
-	if items := tuiMenuItems("/run classic --ice-uri "); items != nil {
-		t.Fatalf("--ice-uri offered %v", menuLabels(items))
+	if items := tuiMenuItems("/stack start --db "); items != nil {
+		t.Fatalf("--db offered %v", menuLabels(items))
 	}
 	// With --flag=value the value is done; the next flags are offered.
-	if items := tuiMenuItems("/run classic --iceberg-engine=ice "); len(items) == 0 {
+	if items := tuiMenuItems("/stack start --insecure=true "); len(items) == 0 {
 		t.Fatal("no flags offered after --flag=value")
 	}
 	// After the value, flags come back.
-	if items := tuiMenuItems("/run classic --iceberg-engine ice "); len(items) == 0 {
+	if items := tuiMenuItems("/stack start --insecure true "); len(items) == 0 {
 		t.Fatal("no flags offered after a flag value")
 	}
 }
@@ -177,14 +177,14 @@ func TestTUIArrowsNavigateMenu(t *testing.T) {
 
 func TestTUITabAndEnterPickFlag(t *testing.T) {
 	m := newTestTUIModel("http://127.0.0.1:1")
-	m.input.SetValue("/run classic --adv")
+	m.input.SetValue("/stack start --verb")
 	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyTab})
-	if m.input.Value() != "/run classic --advanced " {
+	if m.input.Value() != "/stack start --verbose " {
 		t.Fatalf("tab inserted %q", m.input.Value())
 	}
 	// A complete line runs on Enter even though the flag menu is open.
 	if !strings.Contains(m.View(), "--count") {
-		t.Fatal("flag menu should be visible after /run --advanced ")
+		t.Fatal("flag menu should be visible after /stack start --verbose ")
 	}
 	if m.enterAppliesMenu() {
 		t.Fatal("enter on a complete line should run it, not pick a flag")
@@ -228,8 +228,8 @@ func TestTUIHistoryHidesMenu(t *testing.T) {
 
 func TestTUIMenuScrollWindow(t *testing.T) {
 	m := newTestTUIModel("http://127.0.0.1:1")
-	m.input.SetValue("/run classic ")
-	n := len(tuiMenuItems("/run classic "))
+	m.input.SetValue("/stack start --")
+	n := len(tuiMenuItems("/stack start --"))
 	for range n - 1 { // move to the last flag
 		m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyDown})
 	}
@@ -237,7 +237,7 @@ func TestTUIMenuScrollWindow(t *testing.T) {
 	if rows := strings.Count(out, "\n"); rows > tuiMenuMaxRows+1 {
 		t.Fatalf("menu has %d rows, cap is %d plus a footer", rows, tuiMenuMaxRows)
 	}
-	flags := runClassicFlags
+	flags := subFlags(t, "stack", "start")
 	last := flags[len(flags)-1].Name
 	if !strings.Contains(out, "--"+last) {
 		t.Fatalf("highlighted last flag --%s is not visible:\n%s", last, out)
@@ -285,7 +285,6 @@ func TestTUICompletionMatchesRealFlags(t *testing.T) {
 		run   func(context.Context, []string) int
 		flags []tuiFlag
 	}{
-		{"run interactive", cmdRunInteractive, runClassicFlags},
 		{"run submit", cmdRunSubmit, tuiCompletionSpecs["submit"].Flags},
 		{"run recover", cmdRunRecover, tuiCompletionSpecs["recover"].Flags},
 		{"stack start", cmdStart, sub("stack", "start")},
@@ -309,7 +308,7 @@ func TestTUICompletionMatchesRealFlags(t *testing.T) {
 }
 
 func TestTUIRunInteractiveChoice(t *testing.T) {
-	// Only "interactive" is advertised; "classic" works but is hidden.
+	// Only "interactive" is offered; the old "classic" also opens the wizard.
 	got := menuLabels(tuiMenuItems("/run "))
 	if strings.Join(got, ",") != "interactive" {
 		t.Fatalf("/run menu = %v, want only interactive", got)
@@ -321,8 +320,8 @@ func TestTUIRunInteractiveChoice(t *testing.T) {
 	if items := tuiMenuItems("/run interactive "); items != nil {
 		t.Fatalf("the wizard takes no flags, menu offered %v", menuLabels(items))
 	}
-	if len(tuiMenuItems("/run classic --adv")) != 1 {
-		t.Fatal("hidden classic should still complete its flags")
+	if items := tuiMenuItems("/run classic "); items != nil {
+		t.Fatalf("/run classic should offer no flags, got %v", menuLabels(items))
 	}
 }
 
@@ -337,4 +336,14 @@ func TestTUIGhostSuggestion(t *testing.T) {
 	if got := m.input.AvailableSuggestions(); len(got) != 0 {
 		t.Fatalf("no match should clear the ghost, got %v", got)
 	}
+}
+
+// subFlags returns the completion flags of a subcommand such as `stack start`.
+func subFlags(t *testing.T, cmd, name string) []tuiFlag {
+	t.Helper()
+	s, ok := findTUISubcommand(tuiCompletionSpecs[cmd].Subcommands, name)
+	if !ok {
+		t.Fatalf("no subcommand %s %s", cmd, name)
+	}
+	return s.Flags
 }

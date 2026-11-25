@@ -321,13 +321,16 @@ func TestShellWizardSubmitsAndWatches(t *testing.T) {
 	}
 }
 
-func TestShellRunClassicAndFlagsUseCLI(t *testing.T) {
+func TestShellEveryRunFormOpensWizard(t *testing.T) {
 	m := newTestTUIModel("http://127.0.0.1:1")
-	for _, line := range []string{"/run classic", "/run --advanced", "/run interactive --advanced"} {
+	for _, line := range []string{"/run classic", "/run interactive", "/run --advanced", "/run classic --count 2"} {
 		next, _ := m.dispatchModel(t, line)
-		if next.wizard != nil || !next.execing {
-			t.Errorf("%q should run the CLI prompts, not the wizard", line)
+		if next.wizard == nil || next.execing {
+			t.Errorf("%q should open the wizard, not the old CLI prompts", line)
 		}
+	}
+	if got := wizardIgnoredArgs([]string{"classic", "--count", "2"}); strings.Join(got, " ") != "--count 2" {
+		t.Errorf("ignored args = %v", got)
 	}
 	if next, _ := m.dispatchModel(t, "/run"); next.wizard == nil {
 		t.Error("/run should open the wizard")

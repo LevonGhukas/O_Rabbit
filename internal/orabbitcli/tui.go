@@ -552,24 +552,19 @@ func (m tuiModel) dispatch(line string) (tea.Model, tea.Cmd) {
 		m.busy = "diagnosing " + refs[0]
 		return m, m.diagnoseCmd(refs[0], rawJSON)
 	case "run":
-		// Accept `/run interactive` like the CLI's `run interactive`. Passing the
-		// word through would make the flag parser stop there and silently
-		// ignore every flag after it.
-		if len(args) > 0 && args[0] == "interactive" {
-			args = args[1:]
+		// Every form of /run opens the wizard: plain, `interactive`, and the
+		// old `classic`. Its Advanced step covers what the CLI's flags set, so
+		// extra words are not run through the old line-by-line prompts.
+		var notes []tea.Cmd
+		if extra := wizardIgnoredArgs(args); len(extra) > 0 {
+			notes = append(notes, tea.Println(tuiStyleWarn.Render(
+				"note: the wizard takes no flags, ignoring "+strings.Join(extra, " ")+
+					" (its Advanced step sets prefix, tuning and fetch size)")))
 		}
-		// Plain /run opens the wizard. `/run classic` or any flag runs the
-		// CLI's line-by-line prompts, which is where those flags apply.
-		if len(args) == 0 {
-			m.wizard = newRunWizard(m.lastWizard)
-			// Without a width the input wraps long DSNs over several lines.
-			m.wizard.input.Width = max(10, boxWidth(m.width)-8)
-			return m, textinput.Blink
-		}
-		if args[0] == "classic" {
-			args = args[1:]
-		}
-		return m, m.startExec("run interactive", append([]string{"run", "interactive"}, args...), m.explicit)
+		m.wizard = newRunWizard(m.lastWizard)
+		// Without a width the input wraps long DSNs over several lines.
+		m.wizard.input.Width = max(10, boxWidth(m.width)-8)
+		return m, tea.Batch(append(notes, textinput.Blink)...)
 	case "submit":
 		if len(args) == 0 {
 			return m, usageErr(cmd)
@@ -830,4 +825,16 @@ func printErr(err error) tea.Cmd {
 
 func usageErr(c tuiCommand) tea.Cmd {
 	return tea.Println(tuiStyleWarn.Render("usage: " + c.Usage))
+}
+
+// wizardIgnoredArgs drops the accepted aliases and returns what is left.
+func wizardIgnoredArgs(args []string) []string {
+	var extra []string
+	for i, a := range args {
+		if i == 0 && (a == "interactive" || a == "classic") {
+			continue
+		}
+		extra = append(extra, a)
+	}
+	return extra
 }

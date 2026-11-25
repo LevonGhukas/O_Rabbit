@@ -38,41 +38,13 @@ var (
 	logFormats = []string{"json", "text"}
 )
 
-// runClassicFlags are the flags of `run interactive`, used by `/run classic`.
-var runClassicFlags = []tuiFlag{
-	{Name: "master-http", Value: "url", Summary: "Existing master HTTP base URL (the shell passes its own)"},
-	{Name: "master-grpc", Value: "addr", Summary: "Master gRPC address for local workers"},
-	{Name: "local-workers", Value: "bool", Summary: "Start local worker processes (use =false on a server)", Values: []string{"true", "false"}},
-	{Name: "advanced", Summary: "Show advanced interactive options"},
-	{Name: "count", Value: "n", Summary: "Worker count when starting a stack (default 10)"},
-	{Name: "auto-max-in-flight", Value: "n", Summary: "Override planner max_in_flight_tasks (0 = heuristic)"},
-	{Name: "auto-iceberg", Value: "bool", Summary: "Register Parquet parts in Iceberg after success", Values: []string{"true", "false"}},
-	{Name: "iceberg-engine", Value: "engine", Summary: "Iceberg registration engine", Values: []string{"rest-go", "ice"}},
-	{Name: "ice-uri", Value: "url", Summary: "Iceberg REST catalog URI for this run"},
-	{Name: "ice-table", Value: "ns.table", Summary: "Iceberg table name (default: derived)"},
-	{Name: "ice-config", Value: "file", Summary: "Optional Iceberg defaults file"},
-	{Name: "ice-bin", Value: "path", Summary: "Deprecated: ignored by master-owned registration"},
-	{Name: "http-addr", Value: "addr", Summary: "Master HTTP listen addr when starting a stack"},
-	{Name: "grpc-addr", Value: "addr", Summary: "Master gRPC listen addr when starting a stack"},
-	{Name: "db", Value: "path", Summary: "Master SQLite path when starting a stack"},
-	{Name: "gocache", Value: "dir", Summary: "Managed local daemon runtime dir"},
-	{Name: "master-bin", Value: "path", Summary: "Path to the orabbit-master binary"},
-	{Name: "worker-bin", Value: "path", Summary: "Path to the orabbit-worker binary"},
-	{Name: "worker-log-level", Value: "level", Summary: "Log level for local workers", Values: logLevels},
-	{Name: "worker-log-format", Value: "format", Summary: "Log format for local workers", Values: logFormats},
-	{Name: "quiet", Summary: "Suppress non-essential output"},
-	{Name: "verbose", Summary: "Show additional progress details"},
-}
-
 var tuiCompletionSpecs = map[string]tuiCommandSpec{
 	"runs":     {Flags: []tuiFlag{{Name: "job", Value: "id|name", Summary: "Only this job's runs"}}},
 	"diagnose": {Flags: []tuiFlag{{Name: "json", Summary: "Print the master's raw diagnosis JSON"}}},
 	"workers":  {Flags: []tuiFlag{{Name: "all", Summary: "Include workers that stopped heartbeating"}}},
-	// `/run` and `/run interactive` open the wizard. `/run classic` keeps the
-	// CLI's line-by-line prompts for their flags; it is not advertised.
+	// Every /run form opens the wizard, which takes no flags.
 	"run": {Subcommands: []tuiSubcommand{
 		{Name: "interactive", Summary: "Step-by-step run wizard (same as plain /run)"},
-		{Name: "classic", Hidden: true, Summary: "The CLI's line-by-line prompts", Flags: runClassicFlags},
 	}},
 	"submit": {Flags: []tuiFlag{
 		{Name: "file", Value: "path", Summary: "YAML/JSON run spec (a bare first argument works too)"},
