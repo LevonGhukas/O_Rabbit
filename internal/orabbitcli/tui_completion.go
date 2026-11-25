@@ -29,6 +29,8 @@ type tuiSubcommand struct {
 type tuiCommandSpec struct {
 	Flags       []tuiFlag
 	Subcommands []tuiSubcommand
+	// Choices are optional positional words offered before the flags.
+	Choices []string
 }
 
 var (
@@ -37,7 +39,9 @@ var (
 )
 
 var tuiCompletionSpecs = map[string]tuiCommandSpec{
-	"run": {Flags: []tuiFlag{
+	// `/run interactive` is accepted as a spelling of `/run`, matching the
+	// CLI's `run interactive`, so the menu offers it too.
+	"run": {Choices: []string{"interactive", "classic"}, Flags: []tuiFlag{
 		{Name: "master-http", Value: "url", Summary: "Existing master HTTP base URL (the shell passes its own)"},
 		{Name: "master-grpc", Value: "addr", Summary: "Master gRPC address for local workers"},
 		{Name: "local-workers", Value: "bool", Summary: "Start local worker processes (use =false on a server)", Values: []string{"true", "false"}},
@@ -180,8 +184,11 @@ func tuiMenuItems(line string) []tuiMenuItem {
 	}
 
 	flags := spec.Flags
-	var choices []string
 	rest := done[1:]
+	var choices []string
+	if len(rest) == 0 {
+		choices = spec.Choices // only as the first argument
+	}
 	if len(spec.Subcommands) > 0 {
 		if len(rest) == 0 {
 			var items []tuiMenuItem
@@ -217,7 +224,7 @@ func tuiMenuItems(line string) []tuiMenuItem {
 	if !strings.HasPrefix(partial, "-") {
 		for _, c := range choices {
 			if strings.HasPrefix(c, partial) && !containsWord(rest, c) {
-				items = append(items, tuiMenuItem{Label: c, Summary: "component", Insert: prefix + c + " "})
+				items = append(items, tuiMenuItem{Label: c, Summary: tuiChoiceSummary(cmd.Name, c), Insert: prefix + c + " "})
 			}
 		}
 	}
@@ -235,6 +242,18 @@ func tuiMenuItems(line string) []tuiMenuItem {
 		}
 	}
 	return items
+}
+
+func tuiChoiceSummary(command, choice string) string {
+	if command == "run" {
+		switch choice {
+		case "interactive":
+			return "Step-by-step run wizard (same as plain /run)"
+		case "classic":
+			return "The CLI's line-by-line prompts; the flags below apply to it"
+		}
+	}
+	return "component"
 }
 
 func findTUISubcommand(subs []tuiSubcommand, name string) (tuiSubcommand, bool) {

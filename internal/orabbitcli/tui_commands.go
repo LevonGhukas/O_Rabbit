@@ -21,7 +21,7 @@ var tuiCommands = []tuiCommand{
 	{Name: "status", Usage: "/status", Summary: "Check master health and active workers"},
 	{Name: "connect", Usage: "/connect <master-http-url>", Summary: "Switch to another master"},
 	{Name: "runs", Usage: "/runs [limit]", Summary: "List recent runs (default 10)"},
-	{Name: "run", Usage: "/run [flags]", Summary: "Start a guided run (run interactive)"},
+	{Name: "run", Usage: "/run [classic] [flags]", Summary: "Start a run with the step-by-step wizard"},
 	{Name: "submit", Usage: "/submit <spec-file>", Summary: "Submit a run from a YAML/JSON spec"},
 	{Name: "watch", Usage: "/watch <run-id>", Summary: "Follow a run with a progress bar"},
 	{Name: "cancel", Usage: "/cancel <run-id>", Summary: "Cancel a run (asks for confirmation)"},

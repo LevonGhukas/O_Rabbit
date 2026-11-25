@@ -137,6 +137,10 @@ type tuiModel struct {
 	menuIndex       int  // highlighted completion menu row
 	menuNavigated   bool // the user moved the highlight with the arrows
 	browsingHistory bool // ↑/↓ recalled a history entry; the menu stays hidden
+	execing         bool // a child CLI process owns the terminal
+
+	wizard     *runWizard        // the guided /run wizard, while it is open
+	lastWizard map[string]string // answers of the last wizard, to prefill the next
 
 	masterHealthy *bool
 	workers       int
@@ -163,7 +167,19 @@ func (m tuiModel) Init() tea.Cmd {
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.wizard != nil {
+			return m.handleWizardKey(msg)
+		}
 		return m.handleKey(msg)
+
+	case tuiWizardSubmittedMsg:
+		m.busy = ""
+		if msg.err != nil {
+			return m, printErr(fmt.Errorf("submit failed: %w — /run reopens the wizard with your answers", msg.err))
+		}
+		m.watch = &tuiWatch{runID: msg.runID}
+		note := tuiStyleOK.Render(fmt.Sprintf("✓ submitted run %s (%d tasks) — watching it, Esc stops watching", msg.runID, msg.tasks))
+		return m, tea.Sequence(tea.Println(note), m.fetchWatchCmd(msg.runID))
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -185,6 +201,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Println(m.renderStatus(msg))
 
 	case tuiExecDoneMsg:
+		m.execing = false
 		if msg.err != nil {
 			var exitErr *exec.ExitError
 			if errors.As(msg.err, &exitErr) {
@@ -204,8 +221,43 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.fetchWatchCmd(msg.runID)
 	}
 
+	if m.wizard != nil { // e.g. cursor blink messages for the wizard's input
+		var cmd tea.Cmd
+		m.wizard.input, cmd = m.wizard.input.Update(msg)
+		return m, cmd
+	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+// handleWizardKey forwards keys to the open wizard and acts on its result.
+func (m tuiModel) handleWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	action, cmd := m.wizard.handleKey(msg)
+	m.lastWizard = m.wizard.answers
+	switch action {
+	case wizClose:
+		m.wizard = nil
+		return m, tea.Println(tuiStyleDim.Render("run wizard closed — /run reopens it with your answers"))
+	case wizSubmit, wizSave:
+		spec, err := buildWizardSpec(m.wizard.answers, m.base)
+		if err != nil {
+			m.wizard.err = strings.TrimPrefix(err.Error(), ErrRunSubmitSpecInvalid.Error()+": ")
+			return m, nil
+		}
+		if action == wizSave {
+			path, err := saveWizardSpec(spec)
+			if err != nil {
+				m.wizard.err = err.Error()
+				return m, nil
+			}
+			m.wizard.notice = "saved " + path + " (contains secrets, owner-only) — run it later with /submit " + path
+			return m, nil
+		}
+		m.wizard = nil
+		m.busy = "submitting run"
+		return m, tea.Sequence(tea.Println(tuiStyleDim.Render("submitting "+spec.Job.Name+" to "+m.base+"…")), m.submitWizardCmd(spec))
+	}
 	return m, cmd
 }
 
@@ -433,7 +485,22 @@ func (m tuiModel) dispatch(line string) (tea.Model, tea.Cmd) {
 		m.busy = "diagnosing " + args[0]
 		return m, m.diagnoseCmd(args[0])
 	case "run":
-		return m, m.execCLI("run interactive", append([]string{"run", "interactive"}, args...), m.explicit)
+		// Accept `/run interactive` like the CLI's `run interactive`. Passing the
+		// word through would make the flag parser stop there and silently
+		// ignore every flag after it.
+		if len(args) > 0 && args[0] == "interactive" {
+			args = args[1:]
+		}
+		// Plain /run opens the wizard. `/run classic` or any flag runs the
+		// CLI's line-by-line prompts, which is where those flags apply.
+		if len(args) == 0 {
+			m.wizard = newRunWizard(m.lastWizard)
+			return m, textinput.Blink
+		}
+		if args[0] == "classic" {
+			args = args[1:]
+		}
+		return m, m.startExec("run interactive", append([]string{"run", "interactive"}, args...), m.explicit)
 	case "submit":
 		if len(args) == 0 {
 			return m, usageErr(cmd)
@@ -442,23 +509,23 @@ func (m tuiModel) dispatch(line string) (tea.Model, tea.Cmd) {
 		if !strings.HasPrefix(args[0], "-") {
 			args = append([]string{"--file", args[0]}, args[1:]...)
 		}
-		return m, m.execCLI("run submit", append([]string{"run", "submit"}, args...), true)
+		return m, m.startExec("run submit", append([]string{"run", "submit"}, args...), true)
 	case "recover":
 		if len(args) == 0 {
 			return m, usageErr(cmd)
 		}
-		return m, m.execCLI("run recover", append([]string{"run", "recover"}, args...), true)
+		return m, m.startExec("run recover", append([]string{"run", "recover"}, args...), true)
 	case "stack":
 		if len(args) == 0 {
 			return m, usageErr(cmd)
 		}
 		// stack commands manage local processes and have no --master-http flag.
-		return m, m.execCLI("stack "+args[0], append([]string{"stack"}, args...), false)
+		return m, m.startExec("stack "+args[0], append([]string{"stack"}, args...), false)
 	case "maintenance":
 		if len(args) == 0 {
 			return m, usageErr(cmd)
 		}
-		return m, m.execCLI("maintenance "+args[0], append([]string{"maintenance"}, args...), true)
+		return m, m.startExec("maintenance "+args[0], append([]string{"maintenance"}, args...), true)
 	}
 	return m, printErr(fmt.Errorf("command /%s is not implemented", cmd.Name))
 }
@@ -511,6 +578,12 @@ func (m tuiModel) handleWatchUpdate(msg tuiWatchMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m tuiModel) View() string {
+	if m.execing {
+		return ""
+	}
+	if m.wizard != nil {
+		return m.wizard.view() + m.renderFooter()
+	}
 	var b strings.Builder
 
 	switch {
@@ -725,13 +798,23 @@ func (m tuiModel) diagnoseCmd(runID string) tea.Cmd {
 func (m tuiModel) execCLI(label string, args []string, withMaster bool) tea.Cmd {
 	exe, err := os.Executable()
 	if err != nil {
-		return printErr(fmt.Errorf("locate %s binary: %w", CLIName, err))
+		// Report through tuiExecDoneMsg so Update also clears m.execing.
+		err = fmt.Errorf("locate %s binary: %w", CLIName, err)
+		return func() tea.Msg { return tuiExecDoneMsg{label: label, err: err} }
 	}
 	if withMaster && !hasFlag(args, "master-http") {
 		args = append(args, "--master-http", m.base)
 	}
 	c := exec.Command(exe, args...)
 	return tea.ExecProcess(c, func(err error) tea.Msg { return tuiExecDoneMsg{label: label, err: err} })
+}
+
+// startExec hides the shell's prompt before handing the terminal over.
+// Bubble Tea leaves the last frame on screen in inline mode, so without this
+// a stale "› type / for commands" line would sit above the child's output.
+func (m *tuiModel) startExec(label string, args []string, withMaster bool) tea.Cmd {
+	m.execing = true
+	return m.execCLI(label, args, withMaster)
 }
 
 func printErr(err error) tea.Cmd {

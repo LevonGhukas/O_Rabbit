@@ -221,9 +221,20 @@ ORABBIT_MASTER_HTTP=http://master:9100 orabbit-client  # a remote master
 ```
 
 Type `/help` inside it. `/status`, `/runs`, `/watch <run-id>`, `/cancel` (asks
-for confirmation) and `/diagnose` call the master directly. `/run`, `/submit`,
-`/recover`, `/stack` and `/maintenance` run the matching subcommand below, and
-pass the shell's master URL along. `/connect <url>` switches masters. Esc stops
+for confirmation) and `/diagnose` call the master directly.
+
+`/run` (or `/run interactive`) opens a step-by-step wizard: source, data,
+storage, destination and a review screen. It offers choices as lists, proposes
+names from earlier answers, prefills storage from `ORABBIT_DEFAULT_S3_*` when
+set, and hides passwords. From the review you can submit the run, which the
+shell then watches, or save the answers as a YAML spec for `/submit` (written
+to the working directory with owner-only permissions, since it holds the
+secrets). The wizard builds the same spec as `run submit` and applies the same
+validation. `/run classic [flags]`, or `/run` with any flag, uses the
+line-by-line prompts of `run interactive` instead.
+
+`/submit`, `/recover`, `/stack` and `/maintenance` run the matching subcommand
+below, and pass the shell's master URL along. `/connect <url>` switches masters. Esc stops
 watching without stopping the run, and Ctrl+D exits. When stdin or stdout is not
 a terminal, no arguments still prints usage and exits with code 2, so scripts
 are unaffected.

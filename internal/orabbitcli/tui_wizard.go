@@ -1,0 +1,541 @@
+package orabbitcli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+	"gopkg.in/yaml.v3"
+
+	"github.com/LevonGhukas/O_Rabbit/internal/connectors"
+)
+
+// The run wizard is the shell's guided path for starting an export. It asks
+// one question at a time, shows real choices instead of free text where it
+// can, and builds a runSubmitFile, so the result is checked by the same
+// validate() and sent through the same submitRunPlan() as `run submit`.
+
+type wizFieldKind int
+
+const (
+	wizText wizFieldKind = iota
+	wizSecret
+	wizSelect
+)
+
+// wizard answer keys
+const (
+	wkEngine     = "engine"
+	wkSourceName = "source_name"
+	wkDSN        = "dsn"
+	wkTable      = "table"
+	wkCursor     = "cursor"
+	wkIncr       = "incremental"
+	wkSQL        = "sql"
+	wkEndpoint   = "endpoint"
+	wkBucket     = "bucket"
+	wkAccessKey  = "access_key"
+	wkSecretKey  = "secret_key"
+	wkRegion     = "region"
+	wkPathStyle  = "path_style"
+	wkJobName    = "job_name"
+	wkNamespace  = "namespace"
+	wkTargetTbl  = "target_table"
+	wkIceberg    = "iceberg"
+	wkIceEngine  = "iceberg_engine"
+	wkIceURI     = "iceberg_uri"
+	wkIceTable   = "iceberg_table"
+	wkReview     = "review"
+)
+
+const (
+	optYes          = "Yes"
+	optNo           = "No"
+	optFullExport   = "No — export the whole table"
+	optIncremental  = "Yes — only rows newer than the last run"
+	optSubmit       = "Submit and watch the run"
+	optSaveYAML     = "Save as a YAML spec (for /submit later)"
+	optEdit         = "Change answers (starts from the first question)"
+	optCancelWizard = "Cancel"
+)
+
+var wizSteps = []string{"Source", "Data", "Storage", "Destination", "Review"}
+
+type wizField struct {
+	Key         string
+	Step        int // index into wizSteps
+	Label       string
+	Help        string
+	Kind        wizFieldKind
+	Options     []string
+	Placeholder string
+	Optional    bool
+	// Default proposes a value from earlier answers (or the environment).
+	Default func(a map[string]string) string
+}
+
+// wizardEngines lists the engines `run submit` can handle: engines with an
+// ordered cursor, plus FlightSQL. Others are rejected by validate().
+func wizardEngines() []string {
+	var out []string
+	for _, e := range connectors.KnownSourceEngines() {
+		if e == "flightsql" || connectors.SupportsOrderedCursor(e) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func wizardTablePlaceholder(engine string) string {
+	switch engine {
+	case "clickhouse":
+		return "default.orders"
+	case "postgres":
+		return "public.orders"
+	case "mssql":
+		return "SalesDB.dbo.Orders"
+	case "mysql", "mariadb":
+		return "shop.orders"
+	case "oracle":
+		return "APP.ORDERS"
+	case "trino":
+		return "catalog.schema.orders"
+	case "mongodb":
+		return "shop.orders (database.collection)"
+	case "cassandra":
+		return "shop.orders (keyspace.table)"
+	}
+	return "schema.table"
+}
+
+var nonIdentChars = regexp.MustCompile(`[^a-z0-9_]+`)
+
+// lastTablePart turns "default.orders" or `"Sales"."Orders"` into "orders".
+func lastTablePart(table string) string {
+	table = strings.TrimSpace(table)
+	if i := strings.LastIndex(table, "."); i >= 0 {
+		table = table[i+1:]
+	}
+	table = strings.ToLower(strings.Trim(table, "\"`[] "))
+	return strings.Trim(nonIdentChars.ReplaceAllString(table, "_"), "_")
+}
+
+func envDefault(key string) func(map[string]string) string {
+	return func(map[string]string) string { return strings.TrimSpace(os.Getenv(key)) }
+}
+
+func isFlightSQL(a map[string]string) bool { return a[wkEngine] == "flightsql" }
+
+// datasetName is the export's short name: the table, or for FlightSQL the
+// dataset label typed in place of a table.
+func datasetName(a map[string]string) string {
+	if n := lastTablePart(a[wkTable]); n != "" {
+		return n
+	}
+	return "export"
+}
+
+// wizardFields returns the questions to ask for the current answers; it is
+// recomputed after every answer, so choices such as FlightSQL or "no
+// Iceberg" add or remove the questions that depend on them.
+func wizardFields(a map[string]string) []wizField {
+	f := []wizField{
+		{Key: wkEngine, Step: 0, Label: "Database engine", Help: "The database to export from.", Kind: wizSelect, Options: wizardEngines()},
+		{Key: wkDSN, Step: 0, Label: "Connection URL (DSN)",
+			Help:        "Used by the workers, not this shell: localhost means the worker's own container.",
+			Placeholder: defaultSourceDSN(a[wkEngine], "")},
+		{Key: wkSourceName, Step: 0, Label: "Connection name",
+			Help:    "Saved on the master under this name; reusing a name updates that connection.",
+			Default: func(a map[string]string) string { return a[wkEngine] }},
+	}
+
+	if isFlightSQL(a) {
+		f = append(f,
+			wizField{Key: wkSQL, Step: 1, Label: "SQL query", Help: "Query text sent to the FlightSQL server.", Placeholder: "SELECT * FROM orders"},
+			wizField{Key: wkTable, Step: 1, Label: "Dataset label", Help: "Short name used for the S3 prefix and table names.", Placeholder: "orders"},
+		)
+	} else {
+		f = append(f,
+			wizField{Key: wkTable, Step: 1, Label: "Source table", Placeholder: wizardTablePlaceholder(a[wkEngine])},
+			wizField{Key: wkCursor, Step: 1, Label: "Cursor column",
+				Help:        "A column that only grows (id, created_at). Used to split the work and for incremental runs.",
+				Placeholder: map[bool]string{true: "_id", false: "id"}[a[wkEngine] == "mongodb"]},
+			wizField{Key: wkIncr, Step: 1, Label: "Incremental?", Kind: wizSelect, Options: []string{optFullExport, optIncremental}},
+		)
+	}
+
+	f = append(f,
+		wizField{Key: wkEndpoint, Step: 2, Label: "S3 / MinIO endpoint",
+			Help: "As the workers reach it, e.g. http://minio:9000 on the same Docker network.", Placeholder: "http://minio:9000",
+			Default: envDefault("ORABBIT_DEFAULT_S3_ENDPOINT")},
+		wizField{Key: wkBucket, Step: 2, Label: "Bucket", Help: "Must already exist.", Placeholder: "orabbit"},
+		wizField{Key: wkAccessKey, Step: 2, Label: "Access key ID", Default: envDefault("ORABBIT_DEFAULT_S3_ACCESS_KEY_ID")},
+		wizField{Key: wkSecretKey, Step: 2, Label: "Secret access key", Kind: wizSecret, Default: envDefault("ORABBIT_DEFAULT_S3_SECRET_ACCESS_KEY")},
+		wizField{Key: wkRegion, Step: 2, Label: "Region", Default: func(map[string]string) string {
+			if r := strings.TrimSpace(os.Getenv("ORABBIT_DEFAULT_S3_REGION")); r != "" {
+				return r
+			}
+			return "us-east-1"
+		}},
+		wizField{Key: wkPathStyle, Step: 2, Label: "Path-style URLs?", Help: "Yes for MinIO and most self-hosted S3.", Kind: wizSelect, Options: []string{optYes, optNo}},
+
+		wizField{Key: wkJobName, Step: 3, Label: "Job name", Help: "Saved on the master; reusing a name updates that job.",
+			Default: func(a map[string]string) string { return a[wkEngine] + "-" + datasetName(a) }},
+		wizField{Key: wkNamespace, Step: 3, Label: "Target namespace", Default: func(a map[string]string) string { return a[wkEngine] }},
+		wizField{Key: wkTargetTbl, Step: 3, Label: "Target table", Default: datasetName},
+		wizField{Key: wkIceberg, Step: 3, Label: "Register in Iceberg?", Help: "Makes the files queryable from ClickHouse, Trino or Spark.", Kind: wizSelect, Options: []string{optYes, optNo}},
+	)
+	if a[wkIceberg] != optNo {
+		f = append(f,
+			wizField{Key: wkIceEngine, Step: 3, Label: "Iceberg engine", Kind: wizSelect, Options: []string{"rest-go", "ice"}},
+			wizField{Key: wkIceURI, Step: 3, Label: "Iceberg REST catalog URI", Help: "As the master reaches it (registration runs on the master).", Placeholder: "http://iceberg-rest:8181"},
+			wizField{Key: wkIceTable, Step: 3, Label: "Iceberg table",
+				Default: func(a map[string]string) string { return a[wkNamespace] + "." + a[wkTargetTbl] }},
+		)
+	}
+	f = append(f, wizField{Key: wkReview, Step: 4, Label: "Ready?", Kind: wizSelect, Options: []string{optSubmit, optSaveYAML, optEdit, optCancelWizard}})
+	return f
+}
+
+// buildWizardSpec turns the answers into the same structure `run submit`
+// reads from a file, then validates it with the same rules.
+func buildWizardSpec(a map[string]string, masterHTTP string) (runSubmitFile, error) {
+	incremental := a[wkIncr] == optIncremental
+	autoTune := !isFlightSQL(a) // FlightSQL submissions require auto_tune=false
+	spec := runSubmitFile{
+		Master: runSubmitMasterSpec{HTTP: masterHTTP},
+		Source: runSubmitSourceSpec{Name: a[wkSourceName], Engine: a[wkEngine], DSN: a[wkDSN], SQL: a[wkSQL]},
+		Target: runSubmitTargetSpec{
+			Name:            "s3",
+			Endpoint:        a[wkEndpoint],
+			Region:          a[wkRegion],
+			Bucket:          a[wkBucket],
+			ForcePathStyle:  a[wkPathStyle] != optNo,
+			AccessKeyID:     a[wkAccessKey],
+			SecretAccessKey: a[wkSecretKey],
+		},
+		Job: runSubmitJobSpec{
+			Name:            a[wkJobName],
+			TargetNamespace: a[wkNamespace],
+			TargetTable:     a[wkTargetTbl],
+			Incremental:     &incremental,
+			Table:           a[wkTable],
+			CursorColumn:    a[wkCursor],
+			AutoTune:        &autoTune,
+		},
+	}
+	if a[wkIceberg] != optNo {
+		uri := a[wkIceURI]
+		spec.Iceberg = runSubmitIcebergSpec{Enabled: true, Engine: a[wkIceEngine], Table: a[wkIceTable]}
+		spec.Iceberg.Options.URI = &uri
+	}
+	if err := spec.validate(); err != nil {
+		return runSubmitFile{}, err
+	}
+	return spec, nil
+}
+
+// runWizard is the wizard's state. tuiModel owns at most one and forwards
+// keys to it while it is open.
+type runWizard struct {
+	answers map[string]string
+	pos     int // index into wizardFields(answers)
+	input   textinput.Model
+	choice  int // highlighted option of a select field
+	err     string
+	notice  string // e.g. where a YAML spec was saved
+}
+
+func newRunWizard(previous map[string]string) *runWizard {
+	w := &runWizard{answers: map[string]string{}}
+	for k, v := range previous { // reuse the last wizard's answers this session
+		if k != wkReview {
+			w.answers[k] = v
+		}
+	}
+	w.input = textinput.New()
+	w.input.Prompt = tuiStylePrompt.Render("› ")
+	w.input.Focus()
+	w.enterField()
+	return w
+}
+
+func (w *runWizard) field() wizField { return wizardFields(w.answers)[w.pos] }
+
+// enterField loads the current answer (or its default) into the editor.
+func (w *runWizard) enterField() {
+	f := w.field()
+	w.err = ""
+	cur, answered := w.answers[f.Key]
+	if !answered && f.Default != nil {
+		cur = f.Default(w.answers)
+	}
+	switch f.Kind {
+	case wizSelect:
+		w.choice = 0
+		for i, o := range f.Options {
+			if o == cur {
+				w.choice = i
+			}
+		}
+	default:
+		w.input.SetValue(cur)
+		w.input.Placeholder = f.Placeholder
+		w.input.EchoMode = textinput.EchoNormal
+		if f.Kind == wizSecret {
+			w.input.EchoMode = textinput.EchoPassword
+			w.input.EchoCharacter = '•'
+		}
+		w.input.CursorEnd()
+	}
+}
+
+// wizAction tells the shell what to do after a key press.
+type wizAction int
+
+const (
+	wizContinue wizAction = iota
+	wizClose
+	wizSubmit
+	wizSave
+)
+
+func (w *runWizard) handleKey(msg tea.KeyMsg) (wizAction, tea.Cmd) {
+	f := w.field()
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		return wizClose, nil
+	case tea.KeyEsc:
+		if w.pos == 0 {
+			return wizClose, nil
+		}
+		w.pos--
+		w.enterField()
+		return wizContinue, nil
+	case tea.KeyEnter:
+		return w.commit(f)
+	}
+
+	if f.Kind == wizSelect {
+		switch msg.Type {
+		case tea.KeyUp:
+			w.choice = (w.choice - 1 + len(f.Options)) % len(f.Options)
+		case tea.KeyDown, tea.KeyTab:
+			w.choice = (w.choice + 1) % len(f.Options)
+		}
+		return wizContinue, nil
+	}
+	var cmd tea.Cmd
+	w.input, cmd = w.input.Update(msg)
+	w.err = ""
+	return wizContinue, cmd
+}
+
+// commit stores the answer for f and moves on, or reports what is wrong.
+func (w *runWizard) commit(f wizField) (wizAction, tea.Cmd) {
+	var v string
+	if f.Kind == wizSelect {
+		v = f.Options[w.choice]
+	} else {
+		v = strings.TrimSpace(w.input.Value())
+		if v == "" && !f.Optional {
+			w.err = f.Label + " is required"
+			return wizContinue, nil
+		}
+	}
+
+	if f.Key == wkReview {
+		switch v {
+		case optSubmit:
+			return wizSubmit, nil
+		case optSaveYAML:
+			return wizSave, nil
+		case optEdit:
+			w.pos = 0
+			w.notice = ""
+			w.enterField()
+			return wizContinue, nil
+		default:
+			return wizClose, nil
+		}
+	}
+
+	// Changing the engine invalidates the engine-specific answers.
+	if f.Key == wkEngine && w.answers[wkEngine] != v {
+		for _, k := range []string{wkDSN, wkSourceName, wkTable, wkCursor, wkSQL, wkJobName, wkNamespace, wkTargetTbl, wkIceTable} {
+			delete(w.answers, k)
+		}
+	}
+	// A new table changes the derived names, unless the user already typed one.
+	if f.Key == wkTable && w.answers[wkTable] != v {
+		for _, k := range []string{wkJobName, wkTargetTbl, wkIceTable} {
+			delete(w.answers, k)
+		}
+	}
+	w.answers[f.Key] = v
+
+	if w.pos+1 < len(wizardFields(w.answers)) {
+		w.pos++
+	}
+	w.enterField()
+	return wizContinue, nil
+}
+
+// view renders the current step: a header with progress, the answers
+// already given in this step, and the current question.
+func (w *runWizard) view() string {
+	fields := wizardFields(w.answers)
+	f := fields[w.pos]
+	var b strings.Builder
+
+	b.WriteString(tuiStyleTitle.Render(fmt.Sprintf("Step %d/%d · %s", f.Step+1, len(wizSteps), wizSteps[f.Step])))
+	b.WriteString(tuiStyleDim.Render("   " + wizardStepTrail(f.Step)))
+	b.WriteString("\n\n")
+
+	if f.Key == wkReview {
+		b.WriteString(w.reviewSummary(fields))
+		b.WriteString("\n")
+	} else {
+		for _, prev := range fields[:w.pos] {
+			if prev.Step == f.Step {
+				b.WriteString(tuiStyleOK.Render("✓ ") + tuiStyleDim.Render(prev.Label+": ") + displayAnswer(prev, w.answers[prev.Key]) + "\n")
+			}
+		}
+	}
+
+	b.WriteString(lipglossBold(f.Label) + "\n")
+	if f.Help != "" {
+		b.WriteString(tuiStyleDim.Render("  "+f.Help) + "\n")
+	}
+	if f.Kind == wizSelect {
+		for i, o := range f.Options {
+			if i == w.choice {
+				b.WriteString(tuiStylePrompt.Render("› ") + tuiStyleSelected.Render(o) + "\n")
+			} else {
+				b.WriteString("  " + o + "\n")
+			}
+		}
+	} else {
+		b.WriteString(w.input.View() + "\n")
+	}
+	if w.err != "" {
+		b.WriteString(tuiStyleErr.Render("  ✗ "+w.err) + "\n")
+	}
+	if w.notice != "" {
+		b.WriteString(tuiStyleOK.Render("  "+w.notice) + "\n")
+	}
+	keys := "Enter next · Esc back · Ctrl+C cancel"
+	if f.Kind == wizSelect {
+		keys = "↑↓ choose · " + keys
+	}
+	b.WriteString(tuiStyleDim.Render(keys) + "\n")
+	return b.String()
+}
+
+func wizardStepTrail(current int) string {
+	parts := make([]string, len(wizSteps))
+	for i, s := range wizSteps {
+		switch {
+		case i < current:
+			parts[i] = "✓ " + s
+		case i == current:
+			parts[i] = "● " + s
+		default:
+			parts[i] = "○ " + s
+		}
+	}
+	return strings.Join(parts, "  ")
+}
+
+func (w *runWizard) reviewSummary(fields []wizField) string {
+	var b strings.Builder
+	step := -1
+	for _, f := range fields {
+		if f.Key == wkReview {
+			continue
+		}
+		if f.Step != step {
+			step = f.Step
+			b.WriteString(tuiStyleCmd.Render(wizSteps[step]) + "\n")
+		}
+		fmt.Fprintf(&b, "  %-26s %s\n", f.Label, displayAnswer(f, w.answers[f.Key]))
+	}
+	return b.String()
+}
+
+// displayAnswer masks secrets, including passwords inside DSNs, so they
+// never appear on screen or in the scrollback.
+func displayAnswer(f wizField, v string) string {
+	switch {
+	case f.Kind == wizSecret && v != "":
+		return "••••••••"
+	case f.Key == wkDSN:
+		return redactDSN(v)
+	case v == "":
+		return tuiStyleDim.Render("(empty)")
+	}
+	return v
+}
+
+var dsnPassword = regexp.MustCompile(`(://[^:/@]+:)[^@]*@`)
+
+func redactDSN(dsn string) string {
+	return dsnPassword.ReplaceAllString(dsn, "${1}••••@")
+}
+
+func lipglossBold(s string) string { return tuiStyleTitle.UnsetForeground().Render(s) }
+
+// --- commands the wizard triggers ------------------------------------------
+
+type tuiWizardSubmittedMsg struct {
+	runID string
+	tasks int
+	err   error
+}
+
+func (m tuiModel) submitWizardCmd(spec runSubmitFile) tea.Cmd {
+	base := m.base
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 2*tuiRequestTimeout)
+		defer cancel()
+		_, runID, tasks, err := submitRunPlan(ctx, spec.toRanConfig(base))
+		return tuiWizardSubmittedMsg{runID: runID, tasks: tasks, err: err}
+	}
+}
+
+// saveWizardSpec writes the spec as YAML next to the shell's working
+// directory. The file holds the source DSN and S3 secret, so it is created
+// with owner-only permissions and never overwrites an existing file.
+func saveWizardSpec(spec runSubmitFile) (string, error) {
+	spec.Master = runSubmitMasterSpec{} // the shell passes --master-http on /submit
+	raw, err := yaml.Marshal(spec)
+	if err != nil {
+		return "", fmt.Errorf("encode spec: %w", err)
+	}
+	name := lastTablePart(spec.Job.Name)
+	if name == "" {
+		name = "run"
+	}
+	path, err := filepath.Abs(name + ".run.yaml")
+	if err != nil {
+		return "", err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return "", fmt.Errorf("%s already exists; rename or remove it first", path)
+		}
+		return "", err
+	}
+	if _, err := f.Write(raw); err != nil {
+		_ = f.Close()
+		return "", err
+	}
+	return path, f.Close()
+}

@@ -45,8 +45,9 @@ func TestTUIMenuItemsCommands(t *testing.T) {
 
 func TestTUIMenuItemsRunFlags(t *testing.T) {
 	items := tuiMenuItems("/run ")
-	if len(items) != len(tuiCompletionSpecs["run"].Flags) {
-		t.Fatalf("/run lists %d flags, want all %d", len(items), len(tuiCompletionSpecs["run"].Flags))
+	// "interactive" and "classic" first, then every flag.
+	if want := 2 + len(tuiCompletionSpecs["run"].Flags); len(items) != want {
+		t.Fatalf("/run lists %d items, want %d", len(items), want)
 	}
 	// Prefix filtering works with one or two dashes.
 	for _, line := range []string{"/run --ice", "/run -ice"} {
@@ -237,7 +238,8 @@ func TestTUIMenuScrollWindow(t *testing.T) {
 	if rows := strings.Count(out, "\n"); rows > tuiMenuMaxRows+1 {
 		t.Fatalf("menu has %d rows, cap is %d plus a footer", rows, tuiMenuMaxRows)
 	}
-	last := tuiCompletionSpecs["run"].Flags[n-1].Name
+	flags := tuiCompletionSpecs["run"].Flags
+	last := flags[len(flags)-1].Name
 	if !strings.Contains(out, "--"+last) {
 		t.Fatalf("highlighted last flag --%s is not visible:\n%s", last, out)
 	}
@@ -304,5 +306,25 @@ func TestTUICompletionMatchesRealFlags(t *testing.T) {
 				t.Fatalf("completion flags differ from the CLI\n spec: %v\n real: %v", got, real)
 			}
 		})
+	}
+}
+
+func TestTUIRunInteractiveChoice(t *testing.T) {
+	got := menuLabels(tuiMenuItems("/run "))
+	if len(got) == 0 || got[0] != "interactive" {
+		t.Fatalf("/run menu should start with interactive, got %v", got)
+	}
+	got = menuInserts(tuiMenuItems("/run int"))
+	if len(got) != 1 || got[0] != "/run interactive " {
+		t.Fatalf("/run int inserts %v", got)
+	}
+	// Only as the first argument, and flags still follow it.
+	for _, l := range menuLabels(tuiMenuItems("/run interactive ")) {
+		if l == "interactive" {
+			t.Fatal("interactive offered twice")
+		}
+	}
+	if len(tuiMenuItems("/run interactive --adv")) != 1 {
+		t.Fatal("flags should be offered after interactive")
 	}
 }
