@@ -1057,6 +1057,14 @@ levonghukas/orabbit:latest-worker
 Both run as the unprivileged user `orabbit` (uid/gid `10001`). Because the tag
 never changes, run `docker compose pull` to update a server.
 
+The master image also contains `orabbit-client`. Inside the container it
+reaches the master on `127.0.0.1:9100` and uses the container's
+`ORABBIT_HTTP_AUTH_TOKEN`, so the interactive shell needs no setup:
+
+```sh
+docker exec -it <master-container> orabbit-client
+```
+
 **Split deployment.** Master, workers and MinIO run as separate Compose
 projects, configured by environment files:
 
