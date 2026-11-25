@@ -38,6 +38,11 @@ const (
 // It exists to dispatch subcommands and return process exit codes.
 func Main(args []string) int {
 	if len(args) < 1 {
+		// No arguments in a real terminal opens the interactive shell. Pipes,
+		// scripts and CI keep the previous behavior (usage + exit code 2).
+		if stdioIsTerminal() {
+			return runTUI()
+		}
 		usage(os.Stderr)
 		return exitUsage
 	}

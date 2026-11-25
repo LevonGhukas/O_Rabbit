@@ -208,6 +208,23 @@ ordered-cursor support are exported as one task.
 
 Run `orabbit-client help <command> <subcommand>` for every flag.
 
+**Interactive shell.** Run `orabbit-client` with no arguments in a terminal to
+open a shell with slash commands, Tab completion, command history and a live
+progress bar for runs:
+
+```sh
+orabbit-client                                         # local master on :9100
+ORABBIT_MASTER_HTTP=http://master:9100 orabbit-client  # a remote master
+```
+
+Type `/help` inside it. `/status`, `/runs`, `/watch <run-id>`, `/cancel` (asks
+for confirmation) and `/diagnose` call the master directly. `/run`, `/submit`,
+`/recover`, `/stack` and `/maintenance` run the matching subcommand below, and
+pass the shell's master URL along. `/connect <url>` switches masters. Esc stops
+watching without stopping the run, and Ctrl+D exits. When stdin or stdout is not
+a terminal, no arguments still prints usage and exits with code 2, so scripts
+are unaffected.
+
 **Guided run.** An interactive flow that can start a local master and workers,
 asks for the source, target, performance and Iceberg settings, then streams
 the run's events:
@@ -1007,7 +1024,9 @@ token flag so the token does not appear in process arguments.
 | `ORABBIT_{POSTGRES,MYSQL,MARIADB,MSSQL,TRINO}_ORDERED_RANGE_READS` | Enable engine-specific ordered range reads |
 
 `orabbit-client` sends `ORABBIT_HTTP_AUTH_TOKEN` as its bearer token. API
-callers may set `X-Orabbit-Actor` to name themselves in audit records.
+callers may set `X-Orabbit-Actor` to name themselves in audit records. The
+interactive shell (`orabbit-client` with no arguments) reads
+`ORABBIT_MASTER_HTTP` as its master URL (default `http://127.0.0.1:9100`).
 
 </details>
 
