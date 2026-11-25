@@ -71,23 +71,6 @@ func TestLookupTUICommandAliases(t *testing.T) {
 	}
 }
 
-func TestCompleteTUIInput(t *testing.T) {
-	tests := map[string]string{
-		"/wa":           "/watch ",
-		"wa":            "/watch ", // slash is added
-		"/st":           "/sta",    // status and stack share "sta"
-		"/r":            "/r",      // runs, run, recover: no longer common prefix
-		"/zzz":          "/zzz",
-		"/watch run-1":  "/watch run-1", // arguments are left alone
-		"/maintenance ": "/maintenance ",
-	}
-	for in, want := range tests {
-		if got := completeTUIInput(in); got != want {
-			t.Errorf("completeTUIInput(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func TestSuggestTUICommand(t *testing.T) {
 	for in, want := range map[string]string{"wach": "watch", "stauts": "status", "cancle": "cancel", "exti": "exit"} {
 		got, ok := suggestTUICommand(in)

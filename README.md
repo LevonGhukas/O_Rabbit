@@ -209,8 +209,11 @@ ordered-cursor support are exported as one task.
 Run `orabbit-client help <command> <subcommand>` for every flag.
 
 **Interactive shell.** Run `orabbit-client` with no arguments in a terminal to
-open a shell with slash commands, Tab completion, command history and a live
-progress bar for runs:
+open a shell with slash commands, a completion menu, command history and a
+live progress bar for runs. Typing `/` opens the menu: ↑/↓ moves through it and
+Tab or Enter picks an item. After a command it offers that command's
+subcommands, flags and, for flags such as `--iceberg-engine` or `--action`, the
+accepted values. With the menu closed, ↑/↓ browses history:
 
 ```sh
 orabbit-client                                         # local master on :9100

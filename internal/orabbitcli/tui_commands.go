@@ -62,43 +62,6 @@ func matchTUICommands(prefix string) []tuiCommand {
 	return out
 }
 
-// completeTUIInput implements Tab completion for the command word.
-// A unique match is completed fully (with a trailing space); several matches
-// are completed up to their longest common prefix. Input that already has
-// arguments is returned unchanged.
-func completeTUIInput(line string) string {
-	trimmed := strings.TrimLeft(line, " ")
-	word := strings.TrimPrefix(trimmed, "/")
-	if strings.ContainsAny(word, " \t") {
-		return line
-	}
-	matches := matchTUICommands(word)
-	switch len(matches) {
-	case 0:
-		return line
-	case 1:
-		return "/" + matches[0].Name + " "
-	}
-	names := make([]string, len(matches))
-	for i, m := range matches {
-		names[i] = m.Name
-	}
-	return "/" + longestCommonPrefix(names)
-}
-
-func longestCommonPrefix(words []string) string {
-	if len(words) == 0 {
-		return ""
-	}
-	prefix := words[0]
-	for _, w := range words[1:] {
-		for !strings.HasPrefix(w, prefix) {
-			prefix = prefix[:len(prefix)-1]
-		}
-	}
-	return prefix
-}
-
 // suggestTUICommand returns the closest known command for a typo, if any is
 // close enough (edit distance <= 2) to be a plausible intent.
 func suggestTUICommand(name string) (string, bool) {

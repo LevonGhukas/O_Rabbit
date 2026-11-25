@@ -34,13 +34,14 @@ const (
 )
 
 var (
-	tuiStyleTitle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
-	tuiStyleDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	tuiStyleOK     = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	tuiStyleErr    = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	tuiStyleWarn   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	tuiStyleCmd    = lipgloss.NewStyle().Foreground(lipgloss.Color("81"))
-	tuiStylePrompt = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
+	tuiStyleTitle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+	tuiStyleDim      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	tuiStyleOK       = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	tuiStyleErr      = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	tuiStyleWarn     = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	tuiStyleCmd      = lipgloss.NewStyle().Foreground(lipgloss.Color("81"))
+	tuiStylePrompt   = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
+	tuiStyleSelected = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
 )
 
 // stdioIsTerminal reports whether both stdin and stdout are a terminal.
@@ -133,6 +134,10 @@ type tuiModel struct {
 	watch         *tuiWatch
 	pendingCancel string // run ID waiting for y/N confirmation
 
+	menuIndex       int  // highlighted completion menu row
+	menuNavigated   bool // the user moved the highlight with the arrows
+	browsingHistory bool // ↑/↓ recalled a history entry; the menu stays hidden
+
 	masterHealthy *bool
 	workers       int
 }
@@ -223,6 +228,8 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Println(tuiStyleDim.Render("cancel aborted"))
 		case m.input.Value() != "":
 			m.input.SetValue("")
+			m.resetMenu()
+			m.browsingHistory = false
 			return m, nil
 		case msg.Type == tea.KeyCtrlC:
 			return m, tea.Quit
@@ -230,19 +237,30 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyTab:
-		if m.pendingCancel == "" {
-			m.input.SetValue(completeTUIInput(m.input.Value()))
-			m.input.CursorEnd()
+		if items := m.menuItems(); len(items) > 0 {
+			m.applyMenuItem(items)
 		}
 		return m, nil
 
 	case tea.KeyUp, tea.KeyDown:
+		// Arrows move through the menu while it is open, and through history
+		// otherwise (or once the user has started browsing history).
+		if items := m.menuItems(); len(items) > 0 {
+			m.moveMenu(len(items), msg.Type == tea.KeyUp)
+			return m, nil
+		}
 		m.browseHistory(msg.Type == tea.KeyUp)
 		return m, nil
 
 	case tea.KeyEnter:
+		if items := m.menuItems(); len(items) > 0 && m.enterAppliesMenu() {
+			m.applyMenuItem(items)
+			return m, nil
+		}
 		line := strings.TrimSpace(m.input.Value())
 		m.input.SetValue("")
+		m.resetMenu()
+		m.browsingHistory = false
 		if m.pendingCancel != "" {
 			return m.confirmCancel(line)
 		}
@@ -259,9 +277,61 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return model, tea.Sequence(echo, cmd)
 	}
 
+	// Any other key edits the line: the menu starts over at the top and the
+	// line stops being a history entry.
+	before := m.input.Value()
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	if m.input.Value() != before {
+		m.resetMenu()
+		m.browsingHistory = false
+	}
 	return m, cmd
+}
+
+// menuItems returns the completion menu for the current line, or nil when
+// it is hidden (confirming a cancel, or browsing history).
+func (m tuiModel) menuItems() []tuiMenuItem {
+	if m.pendingCancel != "" || m.browsingHistory {
+		return nil
+	}
+	return tuiMenuItems(m.input.Value())
+}
+
+func (m *tuiModel) moveMenu(n int, up bool) {
+	if up {
+		m.menuIndex = (m.menuIndex - 1 + n) % n
+	} else {
+		m.menuIndex = (m.menuIndex + 1) % n
+	}
+	m.menuNavigated = true
+}
+
+func (m *tuiModel) applyMenuItem(items []tuiMenuItem) {
+	m.input.SetValue(items[min(m.menuIndex, len(items)-1)].Insert)
+	m.input.CursorEnd()
+	m.resetMenu()
+}
+
+func (m *tuiModel) resetMenu() {
+	m.menuIndex = 0
+	m.menuNavigated = false
+}
+
+// enterAppliesMenu decides whether Enter picks the highlighted menu item or
+// runs the line. It picks when the user moved through the menu, or when the
+// command word is still unfinished (/wa); a complete line such as `/runs` or
+// `/run --advanced ` runs as typed.
+func (m tuiModel) enterAppliesMenu() bool {
+	if m.menuNavigated {
+		return true
+	}
+	v := strings.TrimSpace(m.input.Value())
+	if strings.ContainsAny(v, " \t") {
+		return false
+	}
+	_, exact := lookupTUICommand(strings.TrimPrefix(v, "/"))
+	return !exact
 }
 
 func (m *tuiModel) pushHistory(line string) {
@@ -285,10 +355,13 @@ func (m *tuiModel) browseHistory(up bool) {
 	}
 	if m.historyPos == len(m.history) {
 		m.input.SetValue("")
+		m.browsingHistory = false
 	} else {
 		m.input.SetValue(m.history[m.historyPos])
+		m.browsingHistory = true
 	}
 	m.input.CursorEnd()
+	m.resetMenu()
 }
 
 // dispatch runs one shell line. Native commands talk to the master API
@@ -467,16 +540,36 @@ func (m tuiModel) View() string {
 	return b.String()
 }
 
-// renderSuggestions shows matching commands while the user types the
-// command word, like the slash-command menu in Claude Code.
+// tuiMenuMaxRows caps the menu height; the visible window follows the
+// highlight so long flag lists stay usable on small terminals.
+const tuiMenuMaxRows = 8
+
+// renderSuggestions draws the completion menu under the prompt, like the
+// slash-command menu in Claude Code, with the highlighted row marked.
 func (m tuiModel) renderSuggestions() string {
-	v := strings.TrimLeft(m.input.Value(), " ")
-	if !strings.HasPrefix(v, "/") || strings.ContainsAny(v, " \t") {
+	items := m.menuItems()
+	if len(items) == 0 {
 		return ""
 	}
+	sel := min(m.menuIndex, len(items)-1)
+	start := 0
+	if sel >= tuiMenuMaxRows {
+		start = sel - tuiMenuMaxRows + 1
+	}
+	end := min(start+tuiMenuMaxRows, len(items))
+
 	var b strings.Builder
-	for _, c := range matchTUICommands(strings.TrimPrefix(v, "/")) {
-		fmt.Fprintf(&b, "  %s %s\n", tuiStyleCmd.Render(fmt.Sprintf("%-44s", c.Usage)), tuiStyleDim.Render(c.Summary))
+	for i := start; i < end; i++ {
+		it := items[i]
+		label := fmt.Sprintf("%-44s", it.Label)
+		if i == sel {
+			fmt.Fprintf(&b, "%s %s %s\n", tuiStylePrompt.Render("›"), tuiStyleSelected.Render(label), tuiStyleDim.Render(it.Summary))
+		} else {
+			fmt.Fprintf(&b, "  %s %s\n", tuiStyleCmd.Render(label), tuiStyleDim.Render(it.Summary))
+		}
+	}
+	if len(items) > end-start {
+		b.WriteString(tuiStyleDim.Render(fmt.Sprintf("  %d/%d · ↑↓ select · Tab/Enter choose", sel+1, len(items))) + "\n")
 	}
 	return b.String()
 }
@@ -490,7 +583,7 @@ func (m tuiModel) renderFooter() string {
 			state = tuiStyleErr.Render("●")
 		}
 	}
-	return state + tuiStyleDim.Render(" "+m.base+" · Tab complete · ↑↓ history · /help · Ctrl+D exit")
+	return state + tuiStyleDim.Render(" "+m.base+" · Tab complete · ↑↓ menu/history · /help · Ctrl+D exit")
 }
 
 func (m tuiModel) renderStatus(msg tuiStatusMsg) string {
