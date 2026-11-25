@@ -44,13 +44,12 @@ func TestTUIMenuItemsCommands(t *testing.T) {
 }
 
 func TestTUIMenuItemsRunFlags(t *testing.T) {
-	items := tuiMenuItems("/run ")
-	// "interactive" and "classic" first, then every flag.
-	if want := 2 + len(tuiCompletionSpecs["run"].Flags); len(items) != want {
-		t.Fatalf("/run lists %d items, want %d", len(items), want)
+	items := tuiMenuItems("/run classic ")
+	if len(items) != len(runClassicFlags) {
+		t.Fatalf("/run classic lists %d flags, want %d", len(items), len(runClassicFlags))
 	}
 	// Prefix filtering works with one or two dashes.
-	for _, line := range []string{"/run --ice", "/run -ice"} {
+	for _, line := range []string{"/run classic --ice", "/run classic -ice"} {
 		labels := menuLabels(tuiMenuItems(line))
 		for _, l := range labels {
 			if !strings.HasPrefix(l, "--ice") {
@@ -62,12 +61,12 @@ func TestTUIMenuItemsRunFlags(t *testing.T) {
 		}
 	}
 	// Choosing keeps earlier words and adds the flag.
-	got := menuInserts(tuiMenuItems("/run --advanced --loc"))
-	if len(got) != 1 || got[0] != "/run --advanced --local-workers " {
+	got := menuInserts(tuiMenuItems("/run classic --advanced --loc"))
+	if len(got) != 1 || got[0] != "/run classic --advanced --local-workers " {
 		t.Fatalf("inserts = %v", got)
 	}
 	// Flags already used are not offered again.
-	for _, l := range menuLabels(tuiMenuItems("/run --advanced ")) {
+	for _, l := range menuLabels(tuiMenuItems("/run classic --advanced ")) {
 		if l == "--advanced" {
 			t.Fatal("--advanced offered twice")
 		}
@@ -75,12 +74,12 @@ func TestTUIMenuItemsRunFlags(t *testing.T) {
 }
 
 func TestTUIMenuItemsFlagValues(t *testing.T) {
-	got := menuLabels(tuiMenuItems("/run --local-workers "))
+	got := menuLabels(tuiMenuItems("/run classic --local-workers "))
 	if strings.Join(got, ",") != "true,false" {
 		t.Fatalf("--local-workers values = %v", got)
 	}
-	got = menuInserts(tuiMenuItems("/run --iceberg-engine i"))
-	if len(got) != 1 || got[0] != "/run --iceberg-engine ice " {
+	got = menuInserts(tuiMenuItems("/run classic --iceberg-engine i"))
+	if len(got) != 1 || got[0] != "/run classic --iceberg-engine ice " {
 		t.Fatalf("--iceberg-engine i inserts = %v", got)
 	}
 	got = menuLabels(tuiMenuItems("/recover r1 --action "))
@@ -88,15 +87,15 @@ func TestTUIMenuItemsFlagValues(t *testing.T) {
 		t.Fatalf("--action values = %v", got)
 	}
 	// Free-form values (URLs, paths) get no menu: the user types them.
-	if items := tuiMenuItems("/run --ice-uri "); items != nil {
+	if items := tuiMenuItems("/run classic --ice-uri "); items != nil {
 		t.Fatalf("--ice-uri offered %v", menuLabels(items))
 	}
 	// With --flag=value the value is done; the next flags are offered.
-	if items := tuiMenuItems("/run --iceberg-engine=ice "); len(items) == 0 {
+	if items := tuiMenuItems("/run classic --iceberg-engine=ice "); len(items) == 0 {
 		t.Fatal("no flags offered after --flag=value")
 	}
 	// After the value, flags come back.
-	if items := tuiMenuItems("/run --iceberg-engine ice "); len(items) == 0 {
+	if items := tuiMenuItems("/run classic --iceberg-engine ice "); len(items) == 0 {
 		t.Fatal("no flags offered after a flag value")
 	}
 }
@@ -178,9 +177,9 @@ func TestTUIArrowsNavigateMenu(t *testing.T) {
 
 func TestTUITabAndEnterPickFlag(t *testing.T) {
 	m := newTestTUIModel("http://127.0.0.1:1")
-	m.input.SetValue("/run --adv")
+	m.input.SetValue("/run classic --adv")
 	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyTab})
-	if m.input.Value() != "/run --advanced " {
+	if m.input.Value() != "/run classic --advanced " {
 		t.Fatalf("tab inserted %q", m.input.Value())
 	}
 	// A complete line runs on Enter even though the flag menu is open.
@@ -229,8 +228,8 @@ func TestTUIHistoryHidesMenu(t *testing.T) {
 
 func TestTUIMenuScrollWindow(t *testing.T) {
 	m := newTestTUIModel("http://127.0.0.1:1")
-	m.input.SetValue("/run ")
-	n := len(tuiMenuItems("/run "))
+	m.input.SetValue("/run classic ")
+	n := len(tuiMenuItems("/run classic "))
 	for range n - 1 { // move to the last flag
 		m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyDown})
 	}
@@ -238,7 +237,7 @@ func TestTUIMenuScrollWindow(t *testing.T) {
 	if rows := strings.Count(out, "\n"); rows > tuiMenuMaxRows+1 {
 		t.Fatalf("menu has %d rows, cap is %d plus a footer", rows, tuiMenuMaxRows)
 	}
-	flags := tuiCompletionSpecs["run"].Flags
+	flags := runClassicFlags
 	last := flags[len(flags)-1].Name
 	if !strings.Contains(out, "--"+last) {
 		t.Fatalf("highlighted last flag --%s is not visible:\n%s", last, out)
@@ -286,7 +285,7 @@ func TestTUICompletionMatchesRealFlags(t *testing.T) {
 		run   func(context.Context, []string) int
 		flags []tuiFlag
 	}{
-		{"run interactive", cmdRunInteractive, tuiCompletionSpecs["run"].Flags},
+		{"run interactive", cmdRunInteractive, runClassicFlags},
 		{"run submit", cmdRunSubmit, tuiCompletionSpecs["submit"].Flags},
 		{"run recover", cmdRunRecover, tuiCompletionSpecs["recover"].Flags},
 		{"stack start", cmdStart, sub("stack", "start")},
@@ -310,21 +309,32 @@ func TestTUICompletionMatchesRealFlags(t *testing.T) {
 }
 
 func TestTUIRunInteractiveChoice(t *testing.T) {
+	// Only "interactive" is advertised; "classic" works but is hidden.
 	got := menuLabels(tuiMenuItems("/run "))
-	if len(got) == 0 || got[0] != "interactive" {
-		t.Fatalf("/run menu should start with interactive, got %v", got)
+	if strings.Join(got, ",") != "interactive" {
+		t.Fatalf("/run menu = %v, want only interactive", got)
 	}
 	got = menuInserts(tuiMenuItems("/run int"))
 	if len(got) != 1 || got[0] != "/run interactive " {
 		t.Fatalf("/run int inserts %v", got)
 	}
-	// Only as the first argument, and flags still follow it.
-	for _, l := range menuLabels(tuiMenuItems("/run interactive ")) {
-		if l == "interactive" {
-			t.Fatal("interactive offered twice")
-		}
+	if items := tuiMenuItems("/run interactive "); items != nil {
+		t.Fatalf("the wizard takes no flags, menu offered %v", menuLabels(items))
 	}
-	if len(tuiMenuItems("/run interactive --adv")) != 1 {
-		t.Fatal("flags should be offered after interactive")
+	if len(tuiMenuItems("/run classic --adv")) != 1 {
+		t.Fatal("hidden classic should still complete its flags")
+	}
+}
+
+func TestTUIGhostSuggestion(t *testing.T) {
+	m := newTestTUIModel("http://127.0.0.1:1")
+	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/wa")})
+	if got := m.input.AvailableSuggestions(); len(got) != 1 || got[0] != "/watch " {
+		t.Fatalf("ghost suggestion = %v, want /watch", got)
+	}
+	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")})
+	if got := m.input.AvailableSuggestions(); len(got) != 0 {
+		t.Fatalf("no match should clear the ghost, got %v", got)
 	}
 }

@@ -2,15 +2,18 @@ package orabbitcli
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 var (
@@ -77,6 +80,7 @@ func fillClickHouse(t *testing.T, w *runWizard) {
 		{wkIceEngine, "rest-go"},
 		{wkIceURI, "http://iceberg-rest:8181"},
 		{wkIceTable, ""}, // default: clickhouse.orders
+		{wkAdvanced, optNo},
 	}
 	for _, s := range steps {
 		if got := w.field().Key; got != s.key {
@@ -363,4 +367,145 @@ func TestLastTablePart(t *testing.T) {
 			t.Errorf("lastTablePart(%q) = %q, want %q", in, got, want)
 		}
 	}
+}
+
+func TestWizardAdvancedManualTuning(t *testing.T) {
+	clearWizardEnv(t)
+	w := newRunWizard(nil)
+	fillClickHouse(t, w)
+	// Go back from the review to the advanced question and turn it on.
+	w.handleKey(keyEsc)
+	answer(t, w, optYes)
+	answer(t, w, "exports/ch") // S3 prefix
+	answer(t, w, optNo)        // auto-tune off
+	if w.field().Key != wkMaxFlight {
+		t.Fatalf("manual tuning should ask for max in flight, got %s", w.field().Key)
+	}
+	w.input.SetValue("0")
+	w.handleKey(keyEnter)
+	if w.field().Key != wkMaxFlight || !strings.Contains(w.err, "at least 1") {
+		t.Fatalf("0 accepted: field=%s err=%q", w.field().Key, w.err)
+	}
+	answer(t, w, "4")
+	answer(t, w, "8")     // planned tasks
+	answer(t, w, "")      // rows per task: optional
+	answer(t, w, "20000") // fetch size
+
+	spec, err := buildWizardSpec(w.answers, "http://127.0.0.1:9100")
+	if err != nil {
+		t.Fatalf("spec invalid: %v", err)
+	}
+	if *spec.Job.AutoTune || spec.Job.MaxInFlightTasks != 4 || spec.Job.PlannedTasks != 8 || spec.Job.FetchLimit != 20000 || spec.Target.Prefix != "exports/ch" {
+		t.Fatalf("advanced settings not applied: %+v %+v", spec.Job, spec.Target)
+	}
+}
+
+func TestWizardAdvancedSkippedForFlightSQL(t *testing.T) {
+	a := map[string]string{wkEngine: "flightsql", wkAdvanced: optYes, wkAutoTune: optNo}
+	for _, f := range wizardFields(a) {
+		if f.Key == wkAutoTune || f.Key == wkMaxFlight || f.Key == wkFetch {
+			t.Fatalf("FlightSQL must not be asked %s", f.Key)
+		}
+	}
+}
+
+func TestWizardTabUsesExample(t *testing.T) {
+	clearWizardEnv(t)
+	w := newRunWizard(nil)
+	answer(t, w, "mongodb")
+	answer(t, w, "mongodb://u:p@h:27017")
+	answer(t, w, "") // connection name default
+	if w.field().Key != wkTable {
+		t.Fatalf("at %s", w.field().Key)
+	}
+	w.handleKey(tea.KeyMsg{Type: tea.KeyTab})
+	// The explanation in the placeholder is not part of the value.
+	if w.input.Value() != "shop.orders" {
+		t.Fatalf("tab filled %q", w.input.Value())
+	}
+	w.handleKey(keyEnter)
+	w.handleKey(keyEnter) // empty cursor column: required
+	if !strings.Contains(w.err, "press Tab") {
+		t.Fatalf("required error should mention Tab, got %q", w.err)
+	}
+}
+
+func TestParseMasterErrorAndHints(t *testing.T) {
+	raw := `submit: http 503: {
+  "error": {"code": "run_planning_failed", "message": "run planning failed",
+    "details": {"error": "open source reader (engine=clickhouse): dial tcp: lookup ex-clickhouse on 127.0.0.11:53: server misbehaving"},
+    "failure_class": "NETWORK_CONNECTION_FAILED", "retryable": true}
+}`
+	e, ok := parseMasterError(errors.New(raw))
+	if !ok || e.Status != "503" || e.Message != "run planning failed" || !e.Retryable {
+		t.Fatalf("parsed = %+v, %v", e, ok)
+	}
+	hints := strings.Join(errorHints(e), "\n")
+	for _, want := range []string{`"ex-clickhouse"`, "docker network connect orabbit-control-plane ex-clickhouse", "both must reach", "retryable"} {
+		if !strings.Contains(hints, want) {
+			t.Errorf("hints miss %q:\n%s", want, hints)
+		}
+	}
+	// Collapse the box's wrapping and borders before searching.
+	block := strings.Join(strings.FieldsFunc(renderErrorBlock(80, "Submit failed", errors.New(raw)), func(r rune) bool {
+		return r == ' ' || r == '\n' || r == '│'
+	}), " ")
+	for _, want := range []string{"Submit failed", "run planning failed", "NETWORK_CONNECTION_FAILED", "clickhouse on 127.0.0.11:53"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("block misses %q:\n%q", want, block)
+		}
+	}
+	if strings.Contains(block, `"error":`) {
+		t.Error("raw JSON should not be shown")
+	}
+	if _, ok := parseMasterError(errors.New("dial tcp: connection refused")); ok {
+		t.Error("a plain error is not a master error")
+	}
+}
+
+func TestErrorBlockRedactsDSN(t *testing.T) {
+	raw := `http 400: {"error":{"message":"bad dsn","details":{"dsn":"clickhouse://default:hunter2@h:9000/db"}}}`
+	if block := renderErrorBlock(80, "x", errors.New(raw)); strings.Contains(block, "hunter2") {
+		t.Fatalf("password leaked:\n%s", block)
+	}
+}
+
+func TestRenderBoxFitsWidth(t *testing.T) {
+	for _, width := range []int{0, 40, 80, 200} {
+		out := renderBox(width, tuiColorBorder, "Title", "body line")
+		for _, line := range strings.Split(out, "\n") {
+			if w := lipgloss.Width(line); w > boxWidth(width) {
+				t.Fatalf("width %d: line is %d wide, max %d", width, w, boxWidth(width))
+			}
+		}
+	}
+}
+
+func TestShellPrintsSummaryBeforeSubmit(t *testing.T) {
+	clearWizardEnv(t)
+	m := newTestTUIModel("http://127.0.0.1:1")
+	m, _ = m.dispatchModel(t, "/run")
+	fillClickHouse(t, m.wizard)
+	m.wizard.choice = 0 // optSubmit
+	_, cmd := update(t, m, keyEnter)
+	// tea.Sequence returns a message holding its commands in order.
+	first := firstSequenced(t, cmd)
+	if !strings.Contains(first, "Run configuration") || !strings.Contains(first, "default.orders") || strings.Contains(first, "minio-secret") {
+		t.Fatalf("summary printed first should list the answers without secrets:\n%s", first)
+	}
+}
+
+// firstSequenced runs the first command of a tea.Sequence and returns what it prints.
+func firstSequenced(t *testing.T, cmd tea.Cmd) string {
+	t.Helper()
+	msg := cmd()
+	v := reflect.ValueOf(msg)
+	if v.Kind() != reflect.Slice || v.Len() == 0 {
+		t.Fatalf("not a sequence: %T", msg)
+	}
+	first, ok := v.Index(0).Interface().(tea.Cmd)
+	if !ok {
+		t.Fatalf("sequence element is %T", v.Index(0).Interface())
+	}
+	return fmtMsg(first())
 }

@@ -139,6 +139,9 @@ type tuiModel struct {
 	browsingHistory bool // ↑/↓ recalled a history entry; the menu stays hidden
 	execing         bool // a child CLI process owns the terminal
 
+	width    int  // terminal width, from WindowSizeMsg
+	welcomed bool // the welcome banner was printed
+
 	wizard     *runWizard        // the guided /run wizard, while it is open
 	lastWizard map[string]string // answers of the last wizard, to prefill the next
 
@@ -158,24 +161,42 @@ func newTUIModel(ctx context.Context, base string, explicit bool) tuiModel {
 	return tuiModel{ctx: ctx, base: base, explicit: explicit, input: in, spinner: sp}
 }
 
+// Init starts the cursor and spinner and checks the master. The welcome
+// banner waits for the first WindowSizeMsg so it can be drawn full width.
 func (m tuiModel) Init() tea.Cmd {
-	banner := tuiStyleTitle.Render("O_Rabbit") + tuiStyleDim.Render(" interactive shell · master "+m.base) +
-		"\n" + tuiStyleDim.Render("Type /help for commands. Existing subcommands (orabbit-client run submit ...) still work for scripts.")
-	return tea.Batch(textinput.Blink, m.spinner.Tick, tea.Println(banner), m.statusCmd())
+	return tea.Batch(textinput.Blink, m.spinner.Tick, m.statusCmd())
 }
 
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.input.Width = max(10, boxWidth(m.width)-8)
+		if m.wizard != nil {
+			m.wizard.input.Width = m.input.Width
+		}
+		if !m.welcomed {
+			m.welcomed = true
+			return m, tea.Println(renderWelcome(m.width, m.base))
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.wizard != nil {
 			return m.handleWizardKey(msg)
 		}
-		return m.handleKey(msg)
+		next, cmd := m.handleKey(msg)
+		if tm, ok := next.(tuiModel); ok {
+			tm.syncSuggestion()
+			return tm, cmd
+		}
+		return next, cmd
 
 	case tuiWizardSubmittedMsg:
 		m.busy = ""
 		if msg.err != nil {
-			return m, printErr(fmt.Errorf("submit failed: %w — /run reopens the wizard with your answers", msg.err))
+			return m, tea.Println(renderErrorBlock(m.width, "Submit failed", msg.err) + "\n" +
+				tuiStyleDim.Render("  /run reopens the wizard with your answers"))
 		}
 		m.watch = &tuiWatch{runID: msg.runID}
 		note := tuiStyleOK.Render(fmt.Sprintf("✓ submitted run %s (%d tasks) — watching it, Esc stops watching", msg.runID, msg.tasks))
@@ -189,7 +210,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tuiResultMsg:
 		m.busy = ""
 		if msg.err != nil {
-			return m, tea.Println(tuiStyleErr.Render("✗ " + msg.err.Error()))
+			return m, tea.Println(renderErrorBlock(m.width, "Request failed", msg.err))
 		}
 		return m, tea.Println(msg.text)
 
@@ -252,11 +273,15 @@ func (m tuiModel) handleWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.wizard.notice = "saved " + path + " (contains secrets, owner-only) — run it later with /submit " + path
-			return m, nil
+			summary := renderBox(m.width, tuiColorInfo, "Saved run spec · "+path, m.wizard.reviewSummary(wizardFields(m.wizard.answers)))
+			return m, tea.Println(summary)
 		}
-		m.wizard = nil
 		m.busy = "submitting run"
-		return m, tea.Sequence(tea.Println(tuiStyleDim.Render("submitting "+spec.Job.Name+" to "+m.base+"…")), m.submitWizardCmd(spec))
+		// Print the answers first, so the scrollback shows what was submitted
+		// even when the submit fails.
+		summary := renderBox(m.width, tuiColorInfo, "Run configuration · "+spec.Job.Name, m.wizard.reviewSummary(wizardFields(m.wizard.answers)))
+		m.wizard = nil
+		return m, tea.Sequence(tea.Println(summary), tea.Println(tuiStyleDim.Render("submitting to "+m.base+"…")), m.submitWizardCmd(spec))
 	}
 	return m, cmd
 }
@@ -339,6 +364,18 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.browsingHistory = false
 	}
 	return m, cmd
+}
+
+// syncSuggestion shows the rest of the highlighted menu item as dim text
+// after the cursor (ghost text); Tab accepts it.
+func (m *tuiModel) syncSuggestion() {
+	m.input.ShowSuggestions = true
+	items := m.menuItems()
+	if len(items) == 0 {
+		m.input.SetSuggestions(nil)
+		return
+	}
+	m.input.SetSuggestions([]string{items[min(m.menuIndex, len(items)-1)].Insert})
 }
 
 // menuItems returns the completion menu for the current line, or nil when
@@ -495,6 +532,8 @@ func (m tuiModel) dispatch(line string) (tea.Model, tea.Cmd) {
 		// CLI's line-by-line prompts, which is where those flags apply.
 		if len(args) == 0 {
 			m.wizard = newRunWizard(m.lastWizard)
+			// Without a width the input wraps long DSNs over several lines.
+			m.wizard.input.Width = max(10, boxWidth(m.width)-8)
 			return m, textinput.Blink
 		}
 		if args[0] == "classic" {
@@ -550,7 +589,7 @@ func (m tuiModel) handleWatchUpdate(msg tuiWatchMsg) (tea.Model, tea.Cmd) {
 		if !w.loaded {
 			// The first fetch failed (typo in the ID, master down): give up.
 			m.watch = nil
-			return m, printErr(fmt.Errorf("watch %s: %w", msg.runID, msg.err))
+			return m, tea.Println(renderErrorBlock(m.width, "Watch "+msg.runID+" failed", msg.err))
 		}
 		// Transient error mid-watch: keep the last progress and retry.
 		w.lastErr = msg.err
@@ -582,7 +621,7 @@ func (m tuiModel) View() string {
 		return ""
 	}
 	if m.wizard != nil {
-		return m.wizard.view() + m.renderFooter()
+		return renderBox(m.width, tuiColorAccent, "", m.wizard.view()) + "\n" + m.renderFooter()
 	}
 	var b strings.Builder
 
@@ -604,9 +643,9 @@ func (m tuiModel) View() string {
 	}
 
 	if m.pendingCancel != "" {
-		b.WriteString(tuiStyleWarn.Render("Cancel run "+m.pendingCancel+"? [y/N] ") + m.input.Value() + "\n")
+		b.WriteString(renderBox(m.width, tuiColorWarn, "", tuiStyleWarn.Render("Cancel run "+m.pendingCancel+"? [y/N] ")+m.input.Value()) + "\n")
 	} else {
-		b.WriteString(m.input.View() + "\n")
+		b.WriteString(renderBox(m.width, tuiColorBorder, "", m.input.View()) + "\n")
 		b.WriteString(m.renderSuggestions())
 	}
 	b.WriteString(m.renderFooter())

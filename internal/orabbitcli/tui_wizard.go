@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -51,6 +52,13 @@ const (
 	wkIceEngine  = "iceberg_engine"
 	wkIceURI     = "iceberg_uri"
 	wkIceTable   = "iceberg_table"
+	wkAdvanced   = "advanced"
+	wkAutoTune   = "auto_tune"
+	wkMaxFlight  = "max_in_flight"
+	wkPlanned    = "planned_tasks"
+	wkRowsTask   = "rows_per_task"
+	wkFetch      = "fetch_size"
+	wkPrefix     = "s3_prefix"
 	wkReview     = "review"
 )
 
@@ -65,7 +73,12 @@ const (
 	optCancelWizard = "Cancel"
 )
 
-var wizSteps = []string{"Source", "Data", "Storage", "Destination", "Review"}
+var wizSteps = []string{"Source", "Data", "Storage", "Destination", "Advanced", "Review"}
+
+const (
+	stepAdvanced = 4
+	stepReview   = 5
+)
 
 type wizField struct {
 	Key         string
@@ -78,6 +91,26 @@ type wizField struct {
 	Optional    bool
 	// Default proposes a value from earlier answers (or the environment).
 	Default func(a map[string]string) string
+	// Validate checks a non-empty text answer; nil accepts anything.
+	Validate func(string) error
+}
+
+// tabValue is what Tab fills into an empty text field: the example without
+// explanations such as "shop.orders (database.collection)".
+func (f wizField) tabValue() string {
+	v, _, _ := strings.Cut(f.Placeholder, " (")
+	return strings.TrimSpace(v)
+}
+
+// positiveInt validates whole numbers >= min, for the tuning fields.
+func positiveInt(min int64) func(string) error {
+	return func(v string) error {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < min {
+			return fmt.Errorf("enter a whole number of at least %d", min)
+		}
+		return nil
+	}
 }
 
 // wizardEngines lists the engines `run submit` can handle: engines with an
@@ -199,7 +232,31 @@ func wizardFields(a map[string]string) []wizField {
 				Default: func(a map[string]string) string { return a[wkNamespace] + "." + a[wkTargetTbl] }},
 		)
 	}
-	f = append(f, wizField{Key: wkReview, Step: 4, Label: "Ready?", Kind: wizSelect, Options: []string{optSubmit, optSaveYAML, optEdit, optCancelWizard}})
+	f = append(f, wizField{Key: wkAdvanced, Step: stepAdvanced, Label: "Change advanced settings?",
+		Help: "Performance tuning and the S3 prefix. The defaults suit most exports.", Kind: wizSelect,
+		Options: []string{optNo, optYes}})
+	if a[wkAdvanced] == optYes {
+		f = append(f, wizField{Key: wkPrefix, Step: stepAdvanced, Label: "S3 prefix override", Optional: true,
+			Help: "Leave empty to derive it from the engine and table."})
+		// FlightSQL submissions take no planning settings at all.
+		if !isFlightSQL(a) {
+			f = append(f, wizField{Key: wkAutoTune, Step: stepAdvanced, Label: "Automatic performance tuning?",
+				Help: "Lets the planner choose chunking and concurrency.", Kind: wizSelect, Options: []string{optYes, optNo}})
+			if a[wkAutoTune] == optNo {
+				f = append(f,
+					wizField{Key: wkMaxFlight, Step: stepAdvanced, Label: "Max tasks in flight", Help: "How many tasks run at the same time.",
+						Placeholder: "4", Validate: positiveInt(1)},
+					wizField{Key: wkPlanned, Step: stepAdvanced, Label: "Planned tasks", Optional: true, Validate: positiveInt(1),
+						Help: "Split the table into this many tasks. Set this or rows per task."},
+					wizField{Key: wkRowsTask, Step: stepAdvanced, Label: "Target rows per task", Optional: true, Validate: positiveInt(1),
+						Placeholder: "200000"},
+				)
+			}
+			f = append(f, wizField{Key: wkFetch, Step: stepAdvanced, Label: "Fetch size", Optional: true, Validate: positiveInt(1),
+				Help: "Rows per source round-trip (Oracle, Cassandra, ClickHouse, MongoDB). Empty keeps the engine default."})
+		}
+	}
+	f = append(f, wizField{Key: wkReview, Step: stepReview, Label: "Ready?", Kind: wizSelect, Options: []string{optSubmit, optSaveYAML, optEdit, optCancelWizard}})
 	return f
 }
 
@@ -207,7 +264,9 @@ func wizardFields(a map[string]string) []wizField {
 // reads from a file, then validates it with the same rules.
 func buildWizardSpec(a map[string]string, masterHTTP string) (runSubmitFile, error) {
 	incremental := a[wkIncr] == optIncremental
-	autoTune := !isFlightSQL(a) // FlightSQL submissions require auto_tune=false
+	// FlightSQL submissions require auto_tune=false; otherwise it is on unless
+	// the advanced step turned it off.
+	autoTune := !isFlightSQL(a) && !(a[wkAdvanced] == optYes && a[wkAutoTune] == optNo)
 	spec := runSubmitFile{
 		Master: runSubmitMasterSpec{HTTP: masterHTTP},
 		Source: runSubmitSourceSpec{Name: a[wkSourceName], Engine: a[wkEngine], DSN: a[wkDSN], SQL: a[wkSQL]},
@@ -230,6 +289,15 @@ func buildWizardSpec(a map[string]string, masterHTTP string) (runSubmitFile, err
 			AutoTune:        &autoTune,
 		},
 	}
+	if a[wkAdvanced] == optYes {
+		spec.Target.Prefix = a[wkPrefix]
+		spec.Job.FetchLimit = int(atoiOrZero(a[wkFetch]))
+		if !autoTune && !isFlightSQL(a) {
+			spec.Job.MaxInFlightTasks = int(atoiOrZero(a[wkMaxFlight]))
+			spec.Job.PlannedTasks = int(atoiOrZero(a[wkPlanned]))
+			spec.Job.TargetRowsPerTask = atoiOrZero(a[wkRowsTask])
+		}
+	}
 	if a[wkIceberg] != optNo {
 		uri := a[wkIceURI]
 		spec.Iceberg = runSubmitIcebergSpec{Enabled: true, Engine: a[wkIceEngine], Table: a[wkIceTable]}
@@ -239,6 +307,12 @@ func buildWizardSpec(a map[string]string, masterHTTP string) (runSubmitFile, err
 		return runSubmitFile{}, err
 	}
 	return spec, nil
+}
+
+// atoiOrZero reads an answer already checked by positiveInt; empty is 0.
+func atoiOrZero(v string) int64 {
+	n, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+	return n
 }
 
 // runWizard is the wizard's state. tuiModel owns at most one and forwards
@@ -287,6 +361,14 @@ func (w *runWizard) enterField() {
 	default:
 		w.input.SetValue(cur)
 		w.input.Placeholder = f.Placeholder
+		// Typing the start of the example shows the rest as dim text that
+		// Tab accepts, the same way as in the shell prompt.
+		w.input.ShowSuggestions = true
+		if tv := f.tabValue(); tv != "" {
+			w.input.SetSuggestions([]string{tv})
+		} else {
+			w.input.SetSuggestions(nil)
+		}
 		w.input.EchoMode = textinput.EchoNormal
 		if f.Kind == wizSecret {
 			w.input.EchoMode = textinput.EchoPassword
@@ -322,6 +404,15 @@ func (w *runWizard) handleKey(msg tea.KeyMsg) (wizAction, tea.Cmd) {
 		return w.commit(f)
 	}
 
+	// Tab on an empty text field takes the example; with text typed, the
+	// input itself completes the suggestion.
+	if msg.Type == tea.KeyTab && f.Kind != wizSelect && w.input.Value() == "" && f.tabValue() != "" {
+		w.input.SetValue(f.tabValue())
+		w.input.CursorEnd()
+		w.err = ""
+		return wizContinue, nil
+	}
+
 	if f.Kind == wizSelect {
 		switch msg.Type {
 		case tea.KeyUp:
@@ -346,7 +437,16 @@ func (w *runWizard) commit(f wizField) (wizAction, tea.Cmd) {
 		v = strings.TrimSpace(w.input.Value())
 		if v == "" && !f.Optional {
 			w.err = f.Label + " is required"
+			if f.tabValue() != "" {
+				w.err += " — press Tab to use the example"
+			}
 			return wizContinue, nil
+		}
+		if v != "" && f.Validate != nil {
+			if err := f.Validate(v); err != nil {
+				w.err = err.Error()
+				return wizContinue, nil
+			}
 		}
 	}
 
@@ -431,26 +531,33 @@ func (w *runWizard) view() string {
 		b.WriteString(tuiStyleOK.Render("  "+w.notice) + "\n")
 	}
 	keys := "Enter next · Esc back · Ctrl+C cancel"
-	if f.Kind == wizSelect {
+	switch {
+	case f.Kind == wizSelect:
 		keys = "↑↓ choose · " + keys
+	case f.tabValue() != "":
+		keys = "Tab use example · " + keys
+	case f.Optional:
+		keys = "Enter skips when empty · " + keys
 	}
 	b.WriteString(tuiStyleDim.Render(keys) + "\n")
 	return b.String()
 }
 
+// wizardStepTrail is a compact progress line such as ✓ ✓ ● ○ ○ ○, short
+// enough not to wrap on narrow terminals.
 func wizardStepTrail(current int) string {
 	parts := make([]string, len(wizSteps))
-	for i, s := range wizSteps {
+	for i := range wizSteps {
 		switch {
 		case i < current:
-			parts[i] = "✓ " + s
+			parts[i] = "✓"
 		case i == current:
-			parts[i] = "● " + s
+			parts[i] = "●"
 		default:
-			parts[i] = "○ " + s
+			parts[i] = "○"
 		}
 	}
-	return strings.Join(parts, "  ")
+	return strings.Join(parts, " ")
 }
 
 func (w *runWizard) reviewSummary(fields []wizField) string {
