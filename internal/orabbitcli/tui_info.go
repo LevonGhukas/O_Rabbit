@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -439,9 +440,70 @@ func renderDiagnosis(width int, d tuiDiagnosis, note string) string {
 // only erases the old frame under lines narrower than the terminal, and a
 // line the terminal wraps on its own throws off its line count, which left
 // pieces of the prompt box glued to long table rows.
+//
+// It wraps at word boundaries (a word longer than a line is the only thing
+// split), and each line restarts the color that was active where it began
+// and resets at its end. Bubble Tea writes lines one by one, so without that
+// a colored word broken across lines came out half colored.
 func fitWidth(text string, termWidth int) string {
 	if termWidth <= 1 {
 		return text
 	}
-	return ansi.Hardwrap(text, termWidth-1, true)
+	limit := termWidth - 1
+	lines := strings.Split(wrapAtSpaces(text, limit), "\n")
+	active := ""
+	for i, line := range lines {
+		prefix := active
+		for _, seq := range sgrSeq.FindAllString(line, -1) {
+			if seq == "\x1b[m" || seq == "\x1b[0m" {
+				active = ""
+			} else {
+				active += seq
+			}
+		}
+		if prefix != "" {
+			line = prefix + line
+		}
+		if active != "" {
+			line += "\x1b[0m"
+		}
+		lines[i] = line
+	}
+	return strings.Join(lines, "\n")
+}
+
+// sgrSeq matches ANSI color/style sequences such as "\x1b[38;5;245m".
+var sgrSeq = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// wrapAtSpaces word-wraps at spaces only. The x/ansi wrappers also break
+// after "-", which split flags such as --execute. A word longer than a whole
+// line (an ID or URL) is the only thing cut. Widths ignore color codes.
+func wrapAtSpaces(text string, limit int) string {
+	var out []string
+	for _, line := range strings.Split(text, "\n") {
+		if ansi.StringWidth(line) <= limit {
+			out = append(out, line)
+			continue
+		}
+		cur, curW := "", 0
+		for _, word := range strings.Split(line, " ") {
+			w := ansi.StringWidth(word)
+			switch {
+			case curW == 0 && cur == "":
+				cur, curW = word, w
+			case curW+1+w <= limit:
+				cur, curW = cur+" "+word, curW+1+w
+			default:
+				out = append(out, cur)
+				cur, curW = word, w
+			}
+			for curW > limit { // a single word wider than the line
+				out = append(out, ansi.Truncate(cur, limit, ""))
+				cur = ansi.TruncateLeft(cur, limit, "")
+				curW = ansi.StringWidth(cur)
+			}
+		}
+		out = append(out, cur)
+	}
+	return strings.Join(out, "\n")
 }

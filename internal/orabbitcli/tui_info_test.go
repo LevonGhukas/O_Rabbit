@@ -123,3 +123,22 @@ func TestFitWidthKeepsLinesNarrower(t *testing.T) {
 		}
 	}
 }
+
+// A colored word must never be split by wrapping, and every wrapped line
+// must carry its own color so Bubble Tea's per-line redraw keeps it.
+func TestFitWidthKeepsWordsWholeAndColored(t *testing.T) {
+	dim := "\x1b[38;5;245m"
+	in := dim + "submit is a dry run unless --execute is given. list prints nothing" + "\x1b[0m"
+	out := fitWidth(in, 30)
+	if !strings.Contains(out, "--execute") {
+		t.Fatalf("word was split:\n%q", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, dim) {
+			t.Errorf("line lost its color: %q", line)
+		}
+		if ansi.StringWidth(line) >= 30 {
+			t.Errorf("line too wide: %q", line)
+		}
+	}
+}
