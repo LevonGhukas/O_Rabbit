@@ -65,6 +65,9 @@ var runClassicFlags = []tuiFlag{
 }
 
 var tuiCompletionSpecs = map[string]tuiCommandSpec{
+	"runs":     {Flags: []tuiFlag{{Name: "job", Value: "id|name", Summary: "Only this job's runs"}}},
+	"diagnose": {Flags: []tuiFlag{{Name: "json", Summary: "Print the master's raw diagnosis JSON"}}},
+	"workers":  {Flags: []tuiFlag{{Name: "all", Summary: "Include workers that stopped heartbeating"}}},
 	// `/run` and `/run interactive` open the wizard. `/run classic` keeps the
 	// CLI's line-by-line prompts for their flags; it is not advertised.
 	"run": {Subcommands: []tuiSubcommand{

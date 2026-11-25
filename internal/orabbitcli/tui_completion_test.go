@@ -128,7 +128,7 @@ func TestTUIMenuItemsSubcommands(t *testing.T) {
 }
 
 func TestTUIMenuItemsNoSpec(t *testing.T) {
-	for _, line := range []string{"/watch ", "/runs ", "/zzz ", `/recover r1 --reason "open`} {
+	for _, line := range []string{"/watch ", "/show ", "/zzz ", `/recover r1 --reason "open`} {
 		if items := tuiMenuItems(line); items != nil {
 			t.Errorf("%q offered %v", line, menuLabels(items))
 		}

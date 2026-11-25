@@ -2,14 +2,11 @@ package orabbitcli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -212,7 +209,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m, tea.Println(renderErrorBlock(m.width, "Request failed", msg.err))
 		}
-		return m, tea.Println(msg.text)
+		return m, tea.Println(fitWidth(msg.text, m.width))
 
 	case tuiStatusMsg:
 		m.busy = ""
@@ -470,9 +467,23 @@ func (m tuiModel) dispatch(line string) (tea.Model, tea.Cmd) {
 		return m, printErr(errors.New(hint + " (type /help)"))
 	}
 
+	// `/<cmd> --help`, `-h` or `help` shows that command's own help. Commands
+	// that run the CLI used to get this from its flag parser; now every
+	// command answers the same way, with the flags the menu knows about.
+	if cmd.Name != "help" && wantsHelp(args) {
+		return m, tea.Println(fitWidth(renderTUICommandHelp(cmd), m.width))
+	}
+
 	switch cmd.Name {
 	case "help":
-		return m, tea.Println(renderTUIHelp())
+		if len(args) == 1 {
+			c, ok := lookupTUICommand(strings.TrimPrefix(args[0], "/"))
+			if !ok {
+				return m, printErr(fmt.Errorf("unknown command %q (type /help)", args[0]))
+			}
+			return m, tea.Println(fitWidth(renderTUICommandHelp(c), m.width))
+		}
+		return m, tea.Println(fitWidth(renderTUIHelp(), m.width))
 	case "exit":
 		return m, tea.Quit
 	case "clear":
@@ -490,19 +501,31 @@ func (m tuiModel) dispatch(line string) (tea.Model, tea.Cmd) {
 		m.busy = "connecting"
 		return m, m.statusCmd()
 	case "runs":
-		limit := tuiDefaultRuns
-		if len(args) > 1 {
-			return m, usageErr(cmd)
-		}
-		if len(args) == 1 {
-			n, err := strconv.Atoi(args[0])
-			if err != nil || n <= 0 {
-				return m, printErr(errors.New("limit must be a positive number"))
-			}
-			limit = n
+		limit, job, err := parseRunsArgs(args)
+		if err != nil {
+			return m, printErr(err)
 		}
 		m.busy = "loading runs"
-		return m, m.listRunsCmd(limit)
+		return m, m.listRunsCmd(limit, job)
+	case "jobs":
+		if len(args) != 0 {
+			return m, usageErr(cmd)
+		}
+		m.busy = "loading jobs"
+		return m, m.listJobsCmd()
+	case "workers":
+		all := len(args) == 1 && (args[0] == "--all" || args[0] == "-all")
+		if len(args) != 0 && !all {
+			return m, usageErr(cmd)
+		}
+		m.busy = "loading workers"
+		return m, m.listWorkersCmd(all)
+	case "show":
+		if len(args) != 1 {
+			return m, usageErr(cmd)
+		}
+		m.busy = "loading run " + args[0]
+		return m, m.showRunCmd(args[0])
 	case "watch":
 		if len(args) != 1 {
 			return m, usageErr(cmd)
@@ -516,11 +539,18 @@ func (m tuiModel) dispatch(line string) (tea.Model, tea.Cmd) {
 		m.pendingCancel = args[0]
 		return m, nil
 	case "diagnose":
-		if len(args) != 1 {
+		rawJSON := hasFlag(args, "json")
+		var refs []string
+		for _, a := range args {
+			if !strings.HasPrefix(a, "-") {
+				refs = append(refs, a)
+			}
+		}
+		if len(refs) != 1 {
 			return m, usageErr(cmd)
 		}
-		m.busy = "diagnosing " + args[0]
-		return m, m.diagnoseCmd(args[0])
+		m.busy = "diagnosing " + refs[0]
+		return m, m.diagnoseCmd(refs[0], rawJSON)
 	case "run":
 		// Accept `/run interactive` like the CLI's `run interactive`. Passing the
 		// word through would make the flag parser stop there and silently
@@ -710,16 +740,6 @@ func (m tuiModel) renderStatus(msg tuiStatusMsg) string {
 	return out + tuiStyleDim.Render(fmt.Sprintf("  active workers: %d", msg.workers))
 }
 
-func renderTUIHelp() string {
-	var b strings.Builder
-	b.WriteString(tuiStyleTitle.Render("Commands") + "\n")
-	for _, c := range tuiCommands {
-		fmt.Fprintf(&b, "  %s %s\n", tuiStyleCmd.Render(fmt.Sprintf("%-44s", c.Usage)), tuiStyleDim.Render(c.Summary))
-	}
-	b.WriteString(tuiStyleDim.Render("Keys: Tab completes · ↑↓ history · Esc/Ctrl+C stops the current activity · Ctrl+D exits"))
-	return b.String()
-}
-
 // --- background commands -------------------------------------------------
 // Each returns a tea.Cmd: a function Bubble Tea runs off the UI goroutine,
 // whose return value comes back to Update as a message.
@@ -750,41 +770,6 @@ type tuiRunSummary struct {
 	ErrorSummary *string `json:"error_summary"`
 }
 
-func (m tuiModel) listRunsCmd(limit int) tea.Cmd {
-	base := m.base
-	return func() tea.Msg {
-		ctx, cancel := m.requestCtx()
-		defer cancel()
-		var runs []tuiRunSummary
-		url := fmt.Sprintf("%s%s/runs?limit=%d", base, apiV1, limit)
-		if err := httpJSON(ctx, http.MethodGet, url, nil, &runs); err != nil {
-			return tuiResultMsg{err: fmt.Errorf("list runs: %w", err)}
-		}
-		return tuiResultMsg{text: formatRunsTable(runs)}
-	}
-}
-
-func formatRunsTable(runs []tuiRunSummary) string {
-	if len(runs) == 0 {
-		return tuiStyleDim.Render("no runs yet")
-	}
-	var b strings.Builder
-	b.WriteString(tuiStyleDim.Render(fmt.Sprintf("%-38s %-12s %-22s %s", "RUN ID", "STATUS", "STARTED", "JOB")))
-	for _, r := range runs {
-		status := fmt.Sprintf("%-12s", r.Status)
-		switch strings.ToUpper(r.Status) {
-		case "SUCCEEDED":
-			status = tuiStyleOK.Render(status)
-		case "FAILED", "CANCELED":
-			status = tuiStyleErr.Render(status)
-		default:
-			status = tuiStyleWarn.Render(status)
-		}
-		fmt.Fprintf(&b, "\n%-38s %s %-22s %s", r.ID, status, r.StartedAt, r.JobID)
-	}
-	return b.String()
-}
-
 func (m tuiModel) fetchWatchCmd(runID string) tea.Cmd {
 	base := m.base
 	return func() tea.Msg {
@@ -810,23 +795,6 @@ func (m tuiModel) cancelCmd(runID string) tea.Cmd {
 		}
 		return tuiResultMsg{text: tuiStyleOK.Render(fmt.Sprintf("✓ run %s: status=%s canceled=%t pending tasks canceled=%d",
 			runID, resp.Run.Status, resp.Canceled, resp.PendingTasksCanceled))}
-	}
-}
-
-func (m tuiModel) diagnoseCmd(runID string) tea.Cmd {
-	base := m.base
-	return func() tea.Msg {
-		ctx, cancel := m.requestCtx()
-		defer cancel()
-		d, err := diagnoseRun(ctx, base, runID)
-		if err != nil {
-			return tuiResultMsg{err: fmt.Errorf("diagnose %s: %w", runID, err)}
-		}
-		b, err := json.MarshalIndent(d, "", "  ")
-		if err != nil {
-			return tuiResultMsg{err: fmt.Errorf("format diagnosis: %w", err)}
-		}
-		return tuiResultMsg{text: string(b)}
 	}
 }
 

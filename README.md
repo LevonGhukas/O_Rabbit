@@ -220,8 +220,12 @@ orabbit-client                                         # local master on :9100
 ORABBIT_MASTER_HTTP=http://master:9100 orabbit-client  # a remote master
 ```
 
-Type `/help` inside it. `/status`, `/runs`, `/watch <run-id>`, `/cancel` (asks
-for confirmation) and `/diagnose` call the master directly.
+Type `/help` inside it; `/help <command>` or `/<command> --help` shows a
+command's flags and examples. `/status`, `/runs [limit] [--job <id|name>]`,
+`/jobs`, `/workers [--all]`, `/show <run-id>`, `/watch <run-id>`, `/cancel`
+(asks for confirmation) and `/diagnose <run-id|job> [--json]` call the master
+directly. `/diagnose` accepts a job ID or name too and then explains that
+job's latest run.
 
 `/run` (or `/run interactive`) opens a step-by-step wizard: source, data,
 storage, destination, optional advanced settings (S3 prefix, manual
