@@ -1,6 +1,8 @@
-package orabbitcli
+package tui
 
 import (
+	"github.com/LevonGhukas/O_Rabbit/internal/orabbitcli"
+
 	"context"
 	"errors"
 	"fmt"
@@ -15,21 +17,21 @@ import (
 // These tests drive the model the way Bubble Tea would: feed a message to
 // Update, then inspect the returned model and run the returned command.
 
-func newTestTUIModel(base string) tuiModel {
-	return newTUIModel(context.Background(), base, false)
+func newTestModel(base string) model {
+	return newModel(context.Background(), base, false)
 }
 
-func update(t *testing.T, m tuiModel, msg tea.Msg) (tuiModel, tea.Cmd) {
+func update(t *testing.T, m model, msg tea.Msg) (model, tea.Cmd) {
 	t.Helper()
 	next, cmd := m.Update(msg)
-	tm, ok := next.(tuiModel)
+	tm, ok := next.(model)
 	if !ok {
-		t.Fatalf("Update returned %T, want tuiModel", next)
+		t.Fatalf("Update returned %T, want model", next)
 	}
 	return tm, cmd
 }
 
-func typeLine(t *testing.T, m tuiModel, line string) (tuiModel, tea.Cmd) {
+func typeLine(t *testing.T, m model, line string) (model, tea.Cmd) {
 	t.Helper()
 	m.input.SetValue(line)
 	return update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
@@ -44,11 +46,11 @@ func isQuit(cmd tea.Cmd) bool {
 	return ok
 }
 
-func TestTUICtrlCEscalates(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
+func TestCtrlCEscalates(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
 	ctrlC := tea.KeyMsg{Type: tea.KeyCtrlC}
 
-	m.watch = &tuiWatch{runID: "r1"}
+	m.watch = &watchState{runID: "r1"}
 	m.input.SetValue("draft")
 	m, cmd := update(t, m, ctrlC)
 	if m.watch != nil || isQuit(cmd) {
@@ -69,14 +71,14 @@ func TestTUICtrlCEscalates(t *testing.T) {
 	}
 }
 
-func TestTUIEscDoesNotQuit(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
+func TestEscDoesNotQuit(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
 	if _, cmd := update(t, m, tea.KeyMsg{Type: tea.KeyEsc}); isQuit(cmd) {
 		t.Fatal("Esc on an empty prompt must not quit")
 	}
 }
 
-func TestTUICancelRequiresConfirmation(t *testing.T) {
+func TestCancelRequiresConfirmation(t *testing.T) {
 	var canceled int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/runs/r1/cancel" {
@@ -88,7 +90,7 @@ func TestTUICancelRequiresConfirmation(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	m := newTestTUIModel(srv.URL)
+	m := newTestModel(srv.URL)
 	m, _ = typeLine(t, m, "/cancel r1")
 	if m.pendingCancel != "r1" {
 		t.Fatalf("pendingCancel = %q, want r1", m.pendingCancel)
@@ -108,7 +110,7 @@ func TestTUICancelRequiresConfirmation(t *testing.T) {
 		t.Fatal("'yes' should start the cancel request")
 	}
 	msg := cmd()
-	res, ok := msg.(tuiResultMsg)
+	res, ok := msg.(resultMsg)
 	if !ok || res.err != nil || !strings.Contains(res.text, "canceled=true") {
 		t.Fatalf("cancel result = %#v", msg)
 	}
@@ -117,19 +119,19 @@ func TestTUICancelRequiresConfirmation(t *testing.T) {
 	}
 }
 
-func TestTUIWatchFirstErrorStops(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
-	m.watch = &tuiWatch{runID: "r1"}
-	m, _ = update(t, m, tuiWatchMsg{runID: "r1", err: errors.New("http 404: not found")})
+func TestWatchFirstErrorStops(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
+	m.watch = &watchState{runID: "r1"}
+	m, _ = update(t, m, watchMsg{runID: "r1", err: errors.New("http 404: not found")})
 	if m.watch != nil {
 		t.Fatal("a failing first fetch should stop the watch")
 	}
 }
 
-func TestTUIWatchLaterErrorRetries(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
-	m.watch = &tuiWatch{runID: "r1", loaded: true, status: "RUNNING"}
-	m, cmd := update(t, m, tuiWatchMsg{runID: "r1", err: errors.New("connection reset")})
+func TestWatchLaterErrorRetries(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
+	m.watch = &watchState{runID: "r1", loaded: true, status: "RUNNING"}
+	m, cmd := update(t, m, watchMsg{runID: "r1", err: errors.New("connection reset")})
 	if m.watch == nil || m.watch.lastErr == nil || cmd == nil {
 		t.Fatal("a mid-watch error should keep watching and schedule a retry")
 	}
@@ -138,12 +140,12 @@ func TestTUIWatchLaterErrorRetries(t *testing.T) {
 	}
 }
 
-func TestTUIWatchProgressAndCompletion(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
-	m.watch = &tuiWatch{runID: "r1"}
+func TestWatchProgressAndCompletion(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
+	m.watch = &watchState{runID: "r1"}
 
-	running := runDetails{Run: runState{ID: "r1", Status: "RUNNING"}, Tasks: []taskInfo{{Status: "SUCCEEDED"}, {Status: "RUNNING"}}}
-	m, cmd := update(t, m, tuiWatchMsg{runID: "r1", details: running})
+	running := orabbitcli.RunDetails{Run: orabbitcli.RunState{ID: "r1", Status: "RUNNING"}, Tasks: []orabbitcli.TaskInfo{{Status: "SUCCEEDED"}, {Status: "RUNNING"}}}
+	m, cmd := update(t, m, watchMsg{runID: "r1", details: running})
 	if m.watch == nil || !m.watch.loaded || cmd == nil {
 		t.Fatal("a running run should stay watched and schedule the next poll")
 	}
@@ -151,27 +153,27 @@ func TestTUIWatchProgressAndCompletion(t *testing.T) {
 		t.Fatalf("view lacks progress: %q", v)
 	}
 
-	done := runDetails{Run: runState{ID: "r1", Status: "SUCCEEDED"}, Tasks: []taskInfo{{Status: "SUCCEEDED"}, {Status: "SUCCEEDED"}}}
-	m, _ = update(t, m, tuiWatchMsg{runID: "r1", details: done})
+	done := orabbitcli.RunDetails{Run: orabbitcli.RunState{ID: "r1", Status: "SUCCEEDED"}, Tasks: []orabbitcli.TaskInfo{{Status: "SUCCEEDED"}, {Status: "SUCCEEDED"}}}
+	m, _ = update(t, m, watchMsg{runID: "r1", details: done})
 	if m.watch != nil {
 		t.Fatal("a terminal status should end the watch")
 	}
 }
 
-func TestTUIWatchIgnoresStaleMessages(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
-	m.watch = &tuiWatch{runID: "new"}
-	m, cmd := update(t, m, tuiWatchMsg{runID: "old", details: runDetails{Run: runState{Status: "SUCCEEDED"}}})
+func TestWatchIgnoresStaleMessages(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
+	m.watch = &watchState{runID: "new"}
+	m, cmd := update(t, m, watchMsg{runID: "old", details: orabbitcli.RunDetails{Run: orabbitcli.RunState{Status: "SUCCEEDED"}}})
 	if m.watch == nil || m.watch.runID != "new" || cmd != nil {
 		t.Fatal("a message for a previous watch must not affect the current one")
 	}
-	if _, cmd := update(t, m, tuiWatchTickMsg{runID: "old"}); cmd != nil {
+	if _, cmd := update(t, m, watchTickMsg{runID: "old"}); cmd != nil {
 		t.Fatal("a tick for a previous watch must not poll")
 	}
 }
 
-func TestTUIBusyKeepsInput(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
+func TestBusyKeepsInput(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
 	m.busy = "loading runs"
 	m, _ = typeLine(t, m, "/status")
 	if m.input.Value() != "/status" {
@@ -182,8 +184,8 @@ func TestTUIBusyKeepsInput(t *testing.T) {
 	}
 }
 
-func TestTUIUnknownCommandSuggests(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
+func TestUnknownCommandSuggests(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
 	_, cmd := m.dispatch("/wach r1")
 	if cmd == nil {
 		t.Fatal("expected an error message command")
@@ -194,11 +196,11 @@ func TestTUIUnknownCommandSuggests(t *testing.T) {
 	}
 }
 
-func TestTUIUsageErrors(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
+func TestUsageErrors(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
 	for _, line := range []string{"/watch", "/watch a b", "/cancel", "/runs x y", "/connect", "/submit"} {
 		next, cmd := m.dispatch(line)
-		tm := next.(tuiModel)
+		tm := next.(model)
 		if tm.watch != nil || tm.pendingCancel != "" || tm.busy != "" {
 			t.Errorf("%q changed state on a usage error", line)
 		}
@@ -211,8 +213,8 @@ func TestTUIUsageErrors(t *testing.T) {
 	}
 }
 
-func TestTUIHistoryNavigation(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
+func TestHistoryNavigation(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
 	m.pushHistory("/runs")
 	m.pushHistory("/status")
 	m.pushHistory("/status") // consecutive duplicates are stored once
@@ -234,7 +236,7 @@ func TestTUIHistoryNavigation(t *testing.T) {
 	}
 }
 
-func TestTUIListRuns(t *testing.T) {
+func TestListRuns(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/runs" || r.URL.Query().Get("limit") != "5" {
 			http.NotFound(w, r)
@@ -244,12 +246,12 @@ func TestTUIListRuns(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	m := newTestTUIModel(srv.URL)
+	m := newTestModel(srv.URL)
 	m, cmd := m.dispatchModel(t, "/runs 5")
 	if m.busy == "" {
 		t.Fatal("/runs should mark the shell busy")
 	}
-	res, ok := cmd().(tuiResultMsg)
+	res, ok := cmd().(resultMsg)
 	if !ok || res.err != nil || !strings.Contains(res.text, "run-a") || !strings.Contains(res.text, "job-1") {
 		t.Fatalf("result = %#v", res)
 	}
@@ -259,7 +261,7 @@ func TestTUIListRuns(t *testing.T) {
 	}
 }
 
-func TestTUIStatus(t *testing.T) {
+func TestStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/healthz":
@@ -272,8 +274,8 @@ func TestTUIStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	m := newTestTUIModel(srv.URL)
-	msg, ok := m.statusCmd()().(tuiStatusMsg)
+	m := newTestModel(srv.URL)
+	msg, ok := m.statusCmd()().(statusMsg)
 	if !ok || !msg.healthy || msg.workers != 2 || msg.err != nil {
 		t.Fatalf("status = %#v", msg)
 	}
@@ -282,22 +284,22 @@ func TestTUIStatus(t *testing.T) {
 		t.Fatal("model should record a healthy master")
 	}
 
-	down := newTestTUIModel("http://127.0.0.1:1") // nothing listens on port 1
-	if msg := down.statusCmd()().(tuiStatusMsg); msg.healthy {
+	down := newTestModel("http://127.0.0.1:1") // nothing listens on port 1
+	if msg := down.statusCmd()().(statusMsg); msg.healthy {
 		t.Fatal("unreachable master reported healthy")
 	}
 }
 
-func TestTUIConnectMarksExplicit(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:9100")
+func TestConnectMarksExplicit(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:9100")
 	m, _ = m.dispatchModel(t, "/connect master.example.internal:9100")
 	if !m.explicit || !strings.Contains(m.base, "master.example.internal:9100") {
 		t.Fatalf("base=%q explicit=%v", m.base, m.explicit)
 	}
 }
 
-func TestTUISuggestionsMenu(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
+func TestSuggestionsMenu(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
 	m.input.SetValue("/wa")
 	if s := m.renderSuggestions(); !strings.Contains(s, "/watch") || strings.Contains(s, "/status") {
 		t.Fatalf("suggestions for /wa = %q", s)
@@ -309,10 +311,10 @@ func TestTUISuggestionsMenu(t *testing.T) {
 }
 
 // dispatchModel is dispatch with the model type asserted, for brevity.
-func (m tuiModel) dispatchModel(t *testing.T, line string) (tuiModel, tea.Cmd) {
+func (m model) dispatchModel(t *testing.T, line string) (model, tea.Cmd) {
 	t.Helper()
 	next, cmd := m.dispatch(line)
-	return next.(tuiModel), cmd
+	return next.(model), cmd
 }
 
 // printed runs a tea.Println command and returns the text it would print.

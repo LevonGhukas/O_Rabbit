@@ -28,13 +28,13 @@ func TestRenderBenchReportFormatsRequestedSections(t *testing.T) {
 		},
 		"run-123",
 		"SUCCEEDED",
-		runDetails{
-			Run: runState{
+		RunDetails{
+			Run: RunState{
 				ID:        "run-123",
 				Status:    "SUCCEEDED",
 				StartedAt: "2026-04-17T12:00:00Z",
 			},
-			Tasks: []taskInfo{
+			Tasks: []TaskInfo{
 				{
 					ID:             "task-1",
 					TaskIndex:      1,
@@ -179,8 +179,8 @@ func TestPrintBenchReportWritesSingleBufferedBlock(t *testing.T) {
 		Source:             "mssql SalesDB.dbo.Orders",
 		Target:             "s3://bucket1/mssql/SalesDB__dbo__Orders",
 		RegistrationEnable: false,
-	}, "run-buffered", "SUCCEEDED", runDetails{
-		Tasks: []taskInfo{{
+	}, "run-buffered", "SUCCEEDED", RunDetails{
+		Tasks: []TaskInfo{{
 			ID:             "task-1",
 			Status:         "SUCCEEDED",
 			RowsRead:       4,

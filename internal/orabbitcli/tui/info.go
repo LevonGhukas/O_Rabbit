@@ -1,11 +1,12 @@
-package orabbitcli
+package tui
 
 import (
+	"github.com/LevonGhukas/O_Rabbit/internal/orabbitcli"
+
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"regexp"
 	"sort"
 	"strings"
@@ -18,8 +19,8 @@ import (
 // Read-only views of the master's state: jobs, workers, one run, and a
 // readable diagnosis. They call the API directly and print formatted text.
 
-// tuiJob is the subset of the master's job record the shell shows.
-type tuiJob struct {
+// jobRecord is the subset of the master's job record the shell shows.
+type jobRecord struct {
 	ID              string `json:"id"`
 	Name            string `json:"name"`
 	TargetNamespace string `json:"target_namespace"`
@@ -28,7 +29,7 @@ type tuiJob struct {
 	CreatedAt       string `json:"created_at"`
 }
 
-type tuiWorker struct {
+type workerRecord struct {
 	ID            string `json:"id"`
 	Addr          string `json:"addr"`
 	Status        string `json:"status"`
@@ -36,8 +37,8 @@ type tuiWorker struct {
 	RunningTasks  int    `json:"running_tasks"`
 }
 
-// tuiDiagnosis mirrors db.RunDiagnosis, keeping only what the view prints.
-type tuiDiagnosis struct {
+// diagnosis mirrors db.RunDiagnosis, keeping only what the view prints.
+type diagnosis struct {
 	RunID               string         `json:"run_id"`
 	Status              string         `json:"status"`
 	CommitPhase         string         `json:"commit_phase"`
@@ -67,27 +68,27 @@ type tuiDiagnosis struct {
 	SuggestedNextAction string `json:"suggested_next_action"`
 }
 
-// tuiRunListMax is how far back /runs --job and job lookups search.
-const tuiRunListMax = 200
+// runListMax is how far back /runs --job and job lookups search.
+const runListMax = 200
 
-func listJobs(ctx context.Context, base string) ([]tuiJob, error) {
-	var jobs []tuiJob
-	if err := httpJSON(ctx, http.MethodGet, base+apiV1+"/jobs", nil, &jobs); err != nil {
+func listJobs(ctx context.Context, base string) ([]jobRecord, error) {
+	var jobs []jobRecord
+	if err := orabbitcli.GetJSON(ctx, base+orabbitcli.APIPrefix+"/jobs", &jobs); err != nil {
 		return nil, fmt.Errorf("list jobs: %w", err)
 	}
 	return jobs, nil
 }
 
-func listRuns(ctx context.Context, base string, limit int) ([]tuiRunSummary, error) {
-	var runs []tuiRunSummary
-	if err := httpJSON(ctx, http.MethodGet, fmt.Sprintf("%s%s/runs?limit=%d", base, apiV1, limit), nil, &runs); err != nil {
+func listRuns(ctx context.Context, base string, limit int) ([]runSummary, error) {
+	var runs []runSummary
+	if err := orabbitcli.GetJSON(ctx, fmt.Sprintf("%s%s/runs?limit=%d", base, orabbitcli.APIPrefix, limit), &runs); err != nil {
 		return nil, fmt.Errorf("list runs: %w", err)
 	}
 	return runs, nil
 }
 
 // findJob matches a job by exact ID or by name, so users can type either.
-func findJob(jobs []tuiJob, ref string) (tuiJob, bool) {
+func findJob(jobs []jobRecord, ref string) (jobRecord, bool) {
 	for _, j := range jobs {
 		if j.ID == ref {
 			return j, true
@@ -98,10 +99,10 @@ func findJob(jobs []tuiJob, ref string) (tuiJob, bool) {
 			return j, true
 		}
 	}
-	return tuiJob{}, false
+	return jobRecord{}, false
 }
 
-func jobNames(jobs []tuiJob) map[string]string {
+func jobNames(jobs []jobRecord) map[string]string {
 	names := make(map[string]string, len(jobs))
 	for _, j := range jobs {
 		names[j.ID] = j.Name
@@ -128,7 +129,7 @@ func isNotFound(err error) bool {
 
 // --- /runs ------------------------------------------------------------------
 
-func (m tuiModel) listRunsCmd(limit int, jobRef string) tea.Cmd {
+func (m model) listRunsCmd(limit int, jobRef string) tea.Cmd {
 	base := m.base
 	return func() tea.Msg {
 		ctx, cancel := m.requestCtx()
@@ -137,21 +138,21 @@ func (m tuiModel) listRunsCmd(limit int, jobRef string) tea.Cmd {
 		jobs, jobsErr := listJobs(ctx, base)
 		fetch := limit
 		if jobRef != "" {
-			fetch = tuiRunListMax
+			fetch = runListMax
 		}
 		runs, err := listRuns(ctx, base, fetch)
 		if err != nil {
-			return tuiResultMsg{err: err}
+			return resultMsg{err: err}
 		}
 		if jobRef != "" {
 			if jobsErr != nil {
-				return tuiResultMsg{err: jobsErr}
+				return resultMsg{err: jobsErr}
 			}
 			job, ok := findJob(jobs, jobRef)
 			if !ok {
-				return tuiResultMsg{err: fmt.Errorf("no job with ID or name %q (see /jobs)", jobRef)}
+				return resultMsg{err: fmt.Errorf("no job with ID or name %q (see /jobs)", jobRef)}
 			}
-			var kept []tuiRunSummary
+			var kept []runSummary
 			for _, r := range runs {
 				if r.JobID == job.ID && len(kept) < limit {
 					kept = append(kept, r)
@@ -159,25 +160,25 @@ func (m tuiModel) listRunsCmd(limit int, jobRef string) tea.Cmd {
 			}
 			runs = kept
 		}
-		return tuiResultMsg{text: formatRunsTable(runs, jobNames(jobs))}
+		return resultMsg{text: formatRunsTable(runs, jobNames(jobs))}
 	}
 }
 
-func formatRunsTable(runs []tuiRunSummary, names map[string]string) string {
+func formatRunsTable(runs []runSummary, names map[string]string) string {
 	if len(runs) == 0 {
-		return tuiStyleDim.Render("no runs found")
+		return styleDim.Render("no runs found")
 	}
 	var b strings.Builder
-	b.WriteString(tuiStyleDim.Render(fmt.Sprintf("%-32s  %-10s  %-19s  %s", "RUN ID", "STATUS", "STARTED (UTC)", "JOB")))
+	b.WriteString(styleDim.Render(fmt.Sprintf("%-32s  %-10s  %-19s  %s", "RUN ID", "STATUS", "STARTED (UTC)", "JOB")))
 	for _, r := range runs {
 		status := fmt.Sprintf("%-10s", r.Status)
 		switch strings.ToUpper(r.Status) {
 		case "SUCCEEDED":
-			status = tuiStyleOK.Render(status)
+			status = styleOK.Render(status)
 		case "FAILED", "CANCELED":
-			status = tuiStyleErr.Render(status)
+			status = styleErr.Render(status)
 		default:
-			status = tuiStyleWarn.Render(status)
+			status = styleWarn.Render(status)
 		}
 		job := r.JobID
 		if n := names[r.JobID]; n != "" {
@@ -185,10 +186,10 @@ func formatRunsTable(runs []tuiRunSummary, names map[string]string) string {
 		}
 		fmt.Fprintf(&b, "\n%-32s  %s  %-19s  %s", r.ID, status, shortTime(r.StartedAt), job)
 		if r.ErrorSummary != nil && strings.TrimSpace(*r.ErrorSummary) != "" {
-			b.WriteString("\n" + tuiStyleDim.Render("  └ "+ansi.Truncate(oneLine(redactDSN(*r.ErrorSummary)), 100, "…")))
+			b.WriteString("\n" + styleDim.Render("  └ "+ansi.Truncate(oneLine(redactDSN(*r.ErrorSummary)), 100, "…")))
 		}
 	}
-	b.WriteString("\n" + tuiStyleDim.Render("/show <run-id> for details · /diagnose <run-id|job> explains a failure"))
+	b.WriteString("\n" + styleDim.Render("/show <run-id> for details · /diagnose <run-id|job> explains a failure"))
 	return b.String()
 }
 
@@ -196,86 +197,86 @@ func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // --- /jobs and /workers -----------------------------------------------------
 
-func (m tuiModel) listJobsCmd() tea.Cmd {
+func (m model) listJobsCmd() tea.Cmd {
 	base := m.base
 	return func() tea.Msg {
 		ctx, cancel := m.requestCtx()
 		defer cancel()
 		jobs, err := listJobs(ctx, base)
 		if err != nil {
-			return tuiResultMsg{err: err}
+			return resultMsg{err: err}
 		}
 		if len(jobs) == 0 {
-			return tuiResultMsg{text: tuiStyleDim.Render("no jobs yet — /run creates one")}
+			return resultMsg{text: styleDim.Render("no jobs yet — /run creates one")}
 		}
 		sort.Slice(jobs, func(i, j int) bool { return jobs[i].CreatedAt > jobs[j].CreatedAt })
 		var b strings.Builder
-		b.WriteString(tuiStyleDim.Render(fmt.Sprintf("%-32s  %-24s  %-28s  %s", "JOB ID", "NAME", "TARGET", "CREATED (UTC)")))
+		b.WriteString(styleDim.Render(fmt.Sprintf("%-32s  %-24s  %-28s  %s", "JOB ID", "NAME", "TARGET", "CREATED (UTC)")))
 		for _, j := range jobs {
 			target := strings.Trim(j.TargetNamespace+"."+j.TargetTable, ".")
 			fmt.Fprintf(&b, "\n%-32s  %-24s  %-28s  %s", j.ID,
 				ansi.Truncate(j.Name, 24, "…"), ansi.Truncate(target, 28, "…"), shortTime(j.CreatedAt))
 		}
-		b.WriteString("\n" + tuiStyleDim.Render("/runs --job <id|name> lists a job's runs · /diagnose <job> explains its latest run"))
-		return tuiResultMsg{text: b.String()}
+		b.WriteString("\n" + styleDim.Render("/runs --job <id|name> lists a job's runs · /diagnose <job> explains its latest run"))
+		return resultMsg{text: b.String()}
 	}
 }
 
-func (m tuiModel) listWorkersCmd(all bool) tea.Cmd {
+func (m model) listWorkersCmd(all bool) tea.Cmd {
 	base := m.base
 	return func() tea.Msg {
 		ctx, cancel := m.requestCtx()
 		defer cancel()
-		u := base + apiV1 + "/workers"
+		u := base + orabbitcli.APIPrefix + "/workers"
 		if all {
 			u += "?all=1"
 		}
-		var ws []tuiWorker
-		if err := httpJSON(ctx, http.MethodGet, u, nil, &ws); err != nil {
-			return tuiResultMsg{err: fmt.Errorf("list workers: %w", err)}
+		var ws []workerRecord
+		if err := orabbitcli.GetJSON(ctx, u, &ws); err != nil {
+			return resultMsg{err: fmt.Errorf("list workers: %w", err)}
 		}
 		if len(ws) == 0 {
 			hint := "no active workers — start some with /stack start worker, or try /workers --all"
-			return tuiResultMsg{text: tuiStyleWarn.Render(hint)}
+			return resultMsg{text: styleWarn.Render(hint)}
 		}
 		var b strings.Builder
-		b.WriteString(tuiStyleDim.Render(fmt.Sprintf("%-36s  %-10s  %-5s  %-19s  %s", "WORKER ID", "STATUS", "TASKS", "LAST HEARTBEAT", "ADDR")))
+		b.WriteString(styleDim.Render(fmt.Sprintf("%-36s  %-10s  %-5s  %-19s  %s", "WORKER ID", "STATUS", "TASKS", "LAST HEARTBEAT", "ADDR")))
 		for _, w := range ws {
 			fmt.Fprintf(&b, "\n%-36s  %-10s  %-5d  %-19s  %s", ansi.Truncate(w.ID, 36, "…"), w.Status, w.RunningTasks, shortTime(w.LastHeartbeat), w.Addr)
 		}
-		return tuiResultMsg{text: b.String()}
+		return resultMsg{text: b.String()}
 	}
 }
 
 // --- /show ------------------------------------------------------------------
 
-func (m tuiModel) showRunCmd(runID string) tea.Cmd {
+func (m model) showRunCmd(runID string) tea.Cmd {
 	base, width := m.base, m.width
 	return func() tea.Msg {
 		ctx, cancel := m.requestCtx()
 		defer cancel()
-		d, err := getRunDetails(ctx, base, runID)
+		d, err := orabbitcli.GetRunDetails(ctx, base, runID)
 		if err != nil {
-			return tuiResultMsg{err: fmt.Errorf("show %s: %w", runID, err)}
+			return resultMsg{err: fmt.Errorf("show %s: %w", runID, err)}
 		}
-		return tuiResultMsg{text: renderRunDetails(width, d)}
+		return resultMsg{text: renderRunDetails(width, d)}
 	}
 }
 
-func renderRunDetails(width int, d runDetails) string {
+func renderRunDetails(width int, d orabbitcli.RunDetails) string {
 	p := summarizeRunProgress(d)
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s %s\n", tuiStyleDim.Render("status:  "), d.Run.Status)
-	fmt.Fprintf(&b, "%s %s", tuiStyleDim.Render("started: "), shortTime(d.Run.StartedAt))
+	fmt.Fprintf(&b, "%s %s\n", styleDim.Render("status:  "), d.Run.Status)
+	fmt.Fprintf(&b, "%s %s", styleDim.Render("started: "), shortTime(d.Run.StartedAt))
 	if d.Run.FinishedAt != nil {
-		fmt.Fprintf(&b, "   %s %s", tuiStyleDim.Render("finished:"), shortTime(*d.Run.FinishedAt))
+		fmt.Fprintf(&b, "   %s %s", styleDim.Render("finished:"), shortTime(*d.Run.FinishedAt))
 	}
 	b.WriteString("\n" + formatRunProgressLine(d.Run.Status, p, 24) + "\n")
 	if d.Run.ErrorSummary != nil && *d.Run.ErrorSummary != "" {
-		b.WriteString(tuiStyleErr.Render("error: ") + redactDSN(oneLine(*d.Run.ErrorSummary)) + "\n")
+		b.WriteString(styleErr.Render("error: ") + redactDSN(oneLine(*d.Run.ErrorSummary)) + "\n")
 	}
 	if len(d.Tasks) > 0 {
-		b.WriteString("\n" + tuiStyleDim.Render(fmt.Sprintf("%-5s  %-10s  %12s  %10s  %s", "TASK", "STATUS", "ROWS", "WRITTEN", "WORKER")))
+		b.WriteString("\n" + styleDim.Render(fmt.Sprintf("%-5s  %-10s  %12s  %10s  %s", "TASK", "STATUS", "ROWS", "WRITTEN", "WORKER")))
 		for _, t := range d.Tasks {
 			worker := ""
 			if t.WorkerID != nil {
@@ -283,11 +284,11 @@ func renderRunDetails(width int, d runDetails) string {
 			}
 			fmt.Fprintf(&b, "\n%-5d  %-10s  %12s  %10s  %s", t.TaskIndex, t.Status, humanCount(t.RowsRead), humanBytes(t.BytesWritten), worker)
 			if t.ErrorMessage != nil && *t.ErrorMessage != "" {
-				b.WriteString("\n" + tuiStyleErr.Render("  └ "+ansi.Truncate(redactDSN(oneLine(*t.ErrorMessage)), 100, "…")))
+				b.WriteString("\n" + styleErr.Render("  └ "+ansi.Truncate(redactDSN(oneLine(*t.ErrorMessage)), 100, "…")))
 			}
 		}
 	}
-	return renderBox(width, tuiColorInfo, "Run "+d.Run.ID, b.String())
+	return renderBox(width, colorInfo, "Run "+d.Run.ID, b.String())
 }
 
 func humanBytes(n int64) string {
@@ -307,42 +308,42 @@ func humanBytes(n int64) string {
 
 // diagnoseCmd accepts a run ID, a job ID or a job name. For a job it
 // diagnoses that job's most recent run, which is what users usually want.
-func (m tuiModel) diagnoseCmd(ref string, rawJSON bool) tea.Cmd {
+func (m model) diagnoseCmd(ref string, rawJSON bool) tea.Cmd {
 	base, width := m.base, m.width
 	return func() tea.Msg {
 		ctx, cancel := m.requestCtx()
 		defer cancel()
 		runID, note, err := resolveRunRef(ctx, base, ref)
 		if err != nil {
-			return tuiResultMsg{err: err}
+			return resultMsg{err: err}
 		}
-		raw, err := diagnoseRun(ctx, base, runID)
+		raw, err := orabbitcli.DiagnoseRun(ctx, base, runID)
 		if err != nil {
-			return tuiResultMsg{err: fmt.Errorf("diagnose %s: %w", runID, err)}
+			return resultMsg{err: fmt.Errorf("diagnose %s: %w", runID, err)}
 		}
 		if rawJSON {
 			b, err := json.MarshalIndent(raw, "", "  ")
 			if err != nil {
-				return tuiResultMsg{err: fmt.Errorf("format diagnosis: %w", err)}
+				return resultMsg{err: fmt.Errorf("format diagnosis: %w", err)}
 			}
-			return tuiResultMsg{text: string(b)}
+			return resultMsg{text: string(b)}
 		}
 		// Round-trip through JSON to get the typed view of the same body.
-		var d tuiDiagnosis
+		var d diagnosis
 		if b, err := json.Marshal(raw); err == nil {
 			err = json.Unmarshal(b, &d)
 			if err != nil {
-				return tuiResultMsg{err: fmt.Errorf("read diagnosis: %w", err)}
+				return resultMsg{err: fmt.Errorf("read diagnosis: %w", err)}
 			}
 		}
-		return tuiResultMsg{text: renderDiagnosis(width, d, note)}
+		return resultMsg{text: renderDiagnosis(width, d, note)}
 	}
 }
 
 // resolveRunRef turns a run ID, job ID or job name into a run ID. note
 // explains a job lookup so the output says which run was picked.
 func resolveRunRef(ctx context.Context, base, ref string) (runID, note string, err error) {
-	_, runErr := getRunDetails(ctx, base, ref)
+	_, runErr := orabbitcli.GetRunDetails(ctx, base, ref)
 	if runErr == nil {
 		return ref, "", nil
 	}
@@ -357,7 +358,7 @@ func resolveRunRef(ctx context.Context, base, ref string) (runID, note string, e
 	if !ok {
 		return "", "", fmt.Errorf("%q is neither a run ID nor a job ID/name (see /runs and /jobs)", ref)
 	}
-	runs, err := listRuns(ctx, base, tuiRunListMax)
+	runs, err := listRuns(ctx, base, runListMax)
 	if err != nil {
 		return "", "", err
 	}
@@ -366,18 +367,18 @@ func resolveRunRef(ctx context.Context, base, ref string) (runID, note string, e
 			return r.ID, fmt.Sprintf("latest run of job %s (%s)", job.Name, job.ID), nil
 		}
 	}
-	return "", "", errors.New("job " + job.Name + " has no runs in the last " + fmt.Sprint(tuiRunListMax) + " runs")
+	return "", "", errors.New("job " + job.Name + " has no runs in the last " + fmt.Sprint(runListMax) + " runs")
 }
 
-func renderDiagnosis(width int, d tuiDiagnosis, note string) string {
+func renderDiagnosis(width int, d diagnosis, note string) string {
 	var b strings.Builder
-	label := func(s string) string { return tuiStyleDim.Render(fmt.Sprintf("%-13s", s)) }
+	label := func(s string) string { return styleDim.Render(fmt.Sprintf("%-13s", s)) }
 	if note != "" {
-		b.WriteString(tuiStyleDim.Render(note) + "\n")
+		b.WriteString(styleDim.Render(note) + "\n")
 	}
 	b.WriteString(label("status") + d.Status)
 	if d.CommitPhase != "" {
-		b.WriteString(tuiStyleDim.Render("  commit phase: ") + d.CommitPhase)
+		b.WriteString(styleDim.Render("  commit phase: ") + d.CommitPhase)
 	}
 	b.WriteString("\n")
 	if len(d.TaskCounts) > 0 {
@@ -393,7 +394,7 @@ func renderDiagnosis(width int, d tuiDiagnosis, note string) string {
 		b.WriteString(label("tasks") + strings.Join(parts, " · ") + "\n")
 	}
 	if d.LastClassifiedError != "" {
-		b.WriteString(label("last error") + tuiStyleErr.Render(d.LastClassifiedError) + "\n")
+		b.WriteString(label("last error") + styleErr.Render(d.LastClassifiedError) + "\n")
 	}
 	for _, t := range d.BlockingTasks {
 		line := fmt.Sprintf("task %d %s, attempts %d/%d", t.Index, t.Status, t.AttemptCount, t.MaxAttempts)
@@ -422,14 +423,14 @@ func renderDiagnosis(width int, d tuiDiagnosis, note string) string {
 		b.WriteString(label("iceberg") + line + "\n")
 	}
 	if d.OperatorReview {
-		b.WriteString(label("review") + tuiStyleWarn.Render("operator review required (see /recover --help)") + "\n")
+		b.WriteString(label("review") + styleWarn.Render("operator review required (see /recover --help)") + "\n")
 	}
 	if d.SuggestedNextAction != "" {
-		b.WriteString("\n" + tuiStyleWarn.Render("→ ") + d.SuggestedNextAction)
+		b.WriteString("\n" + styleWarn.Render("→ ") + d.SuggestedNextAction)
 	}
-	color := tuiColorInfo
+	color := colorInfo
 	if strings.EqualFold(d.Status, "FAILED") || d.OperatorReview {
-		color = tuiColorErr
+		color = colorErr
 	}
 	return renderBox(width, color, "Diagnosis · run "+d.RunID, b.String())
 }

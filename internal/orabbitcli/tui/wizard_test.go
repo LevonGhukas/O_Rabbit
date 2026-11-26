@@ -1,6 +1,8 @@
-package orabbitcli
+package tui
 
 import (
+	"github.com/LevonGhukas/O_Rabbit/internal/orabbitcli"
+
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -258,7 +260,7 @@ func TestSaveWizardSpecRoundTrips(t *testing.T) {
 		t.Fatalf("mode = %v, want 0600 (the file holds secrets)", st.Mode().Perm())
 	}
 	// The saved file must load with the strict `run submit` loader.
-	loaded, err := loadRunSubmitFile(path)
+	loaded, err := orabbitcli.LoadRunSubmitFile(path)
 	if err != nil {
 		t.Fatalf("saved spec does not load: %v", err)
 	}
@@ -293,7 +295,7 @@ func TestShellWizardSubmitsAndWatches(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	m := newTestTUIModel(srv.URL)
+	m := newTestModel(srv.URL)
 	m, cmd := m.dispatchModel(t, "/run interactive")
 	if m.wizard == nil || cmd == nil {
 		t.Fatal("/run interactive should open the wizard")
@@ -306,12 +308,12 @@ func TestShellWizardSubmitsAndWatches(t *testing.T) {
 	}
 
 	// Run the submit command directly (tea.Sequence wraps it with a print).
-	var spec runSubmitFile
+	var spec orabbitcli.RunSubmitFile
 	spec, err := buildWizardSpec(m.lastWizard, srv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	msg := m.submitWizardCmd(spec)().(tuiWizardSubmittedMsg)
+	msg := m.submitWizardCmd(spec)().(wizardSubmittedMsg)
 	if msg.err != nil || msg.runID != "run-9" {
 		t.Fatalf("submit result = %+v (calls: %v)", msg, paths)
 	}
@@ -322,7 +324,7 @@ func TestShellWizardSubmitsAndWatches(t *testing.T) {
 }
 
 func TestShellEveryRunFormOpensWizard(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
+	m := newTestModel("http://127.0.0.1:1")
 	for _, line := range []string{"/run classic", "/run interactive", "/run --advanced", "/run classic --count 2"} {
 		next, _ := m.dispatchModel(t, line)
 		if next.wizard == nil || next.execing {
@@ -339,7 +341,7 @@ func TestShellEveryRunFormOpensWizard(t *testing.T) {
 
 func TestShellWizardCloseKeepsAnswers(t *testing.T) {
 	clearWizardEnv(t)
-	m := newTestTUIModel("http://127.0.0.1:1")
+	m := newTestModel("http://127.0.0.1:1")
 	m, _ = m.dispatchModel(t, "/run")
 	answer(t, m.wizard, "clickhouse")
 	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyCtrlC})
@@ -357,6 +359,9 @@ func TestRedactDSN(t *testing.T) {
 		"clickhouse://default:clickhouse@h:9000/db": "clickhouse://default:••••@h:9000/db",
 		"postgresql://u@h/db":                       "postgresql://u@h/db",
 		"grpc+tcp://localhost:32010":                "grpc+tcp://localhost:32010",
+		"uri=grpc+tcp://h:32010;username=u;password=p4ss;authorization_header=Bearer abc.def": "uri=grpc+tcp://h:32010;username=u;password=••••;authorization_header=••••",
+		"sqlserver://h:1433?database=d&password=s3cret&user id=u":                             "sqlserver://h:1433?database=d&password=••••&user id=u",
+		"dial clickhouse://u:pw@db:9000 failed for user@example":                              "dial clickhouse://u:••••@db:9000 failed for user@example",
 	} {
 		if got := redactDSN(in); got != want {
 			t.Errorf("redactDSN(%q) = %q, want %q", in, got, want)
@@ -474,11 +479,15 @@ func TestErrorBlockRedactsDSN(t *testing.T) {
 }
 
 func TestRenderBoxFitsWidth(t *testing.T) {
-	for _, width := range []int{0, 40, 80, 200} {
-		out := renderBox(width, tuiColorBorder, "Title", "body line")
+	for _, width := range []int{0, 40, 80, 109, 110, 111, 200} {
+		out := renderBox(width, colorBorder, "Title", "body line")
 		for _, line := range strings.Split(out, "\n") {
 			if w := lipgloss.Width(line); w > boxWidth(width) {
 				t.Fatalf("width %d: line is %d wide, max %d", width, w, boxWidth(width))
+			}
+			// A full-width box would be wrapped by fitWidth, splitting its border.
+			if width > 0 && lipgloss.Width(line) >= width {
+				t.Fatalf("width %d: box line as wide as the terminal", width)
 			}
 		}
 	}
@@ -486,7 +495,7 @@ func TestRenderBoxFitsWidth(t *testing.T) {
 
 func TestShellPrintsSummaryBeforeSubmit(t *testing.T) {
 	clearWizardEnv(t)
-	m := newTestTUIModel("http://127.0.0.1:1")
+	m := newTestModel("http://127.0.0.1:1")
 	m, _ = m.dispatchModel(t, "/run")
 	fillClickHouse(t, m.wizard)
 	m.wizard.choice = 0 // optSubmit

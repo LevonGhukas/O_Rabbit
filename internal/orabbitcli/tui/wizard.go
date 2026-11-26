@@ -1,6 +1,8 @@
-package orabbitcli
+package tui
 
 import (
+	"github.com/LevonGhukas/O_Rabbit/internal/orabbitcli"
+
 	"context"
 	"errors"
 	"fmt"
@@ -20,7 +22,7 @@ import (
 // The run wizard is the shell's guided path for starting an export. It asks
 // one question at a time, shows real choices instead of free text where it
 // can, and builds a runSubmitFile, so the result is checked by the same
-// validate() and sent through the same submitRunPlan() as `run submit`.
+// Validate() and sent through the same orabbitcli.SubmitRun as `run submit`.
 
 type wizFieldKind int
 
@@ -114,7 +116,7 @@ func positiveInt(min int64) func(string) error {
 }
 
 // wizardEngines lists the engines `run submit` can handle: engines with an
-// ordered cursor, plus FlightSQL. Others are rejected by validate().
+// ordered cursor, plus FlightSQL. Others are rejected by Validate().
 func wizardEngines() []string {
 	var out []string
 	for _, e := range connectors.KnownSourceEngines() {
@@ -182,7 +184,7 @@ func wizardFields(a map[string]string) []wizField {
 		{Key: wkEngine, Step: 0, Label: "Database engine", Help: "The database to export from.", Kind: wizSelect, Options: wizardEngines()},
 		{Key: wkDSN, Step: 0, Label: "Connection URL (DSN)",
 			Help:        "Used by the workers, not this shell: localhost means the worker's own container.",
-			Placeholder: defaultSourceDSN(a[wkEngine], "")},
+			Placeholder: orabbitcli.DefaultSourceDSN(a[wkEngine])},
 		{Key: wkSourceName, Step: 0, Label: "Connection name",
 			Help:    "Saved on the master under this name; reusing a name updates that connection.",
 			Default: func(a map[string]string) string { return a[wkEngine] }},
@@ -262,15 +264,15 @@ func wizardFields(a map[string]string) []wizField {
 
 // buildWizardSpec turns the answers into the same structure `run submit`
 // reads from a file, then validates it with the same rules.
-func buildWizardSpec(a map[string]string, masterHTTP string) (runSubmitFile, error) {
+func buildWizardSpec(a map[string]string, masterHTTP string) (orabbitcli.RunSubmitFile, error) {
 	incremental := a[wkIncr] == optIncremental
 	// FlightSQL submissions require auto_tune=false; otherwise it is on unless
 	// the advanced step turned it off.
 	autoTune := !isFlightSQL(a) && !(a[wkAdvanced] == optYes && a[wkAutoTune] == optNo)
-	spec := runSubmitFile{
-		Master: runSubmitMasterSpec{HTTP: masterHTTP},
-		Source: runSubmitSourceSpec{Name: a[wkSourceName], Engine: a[wkEngine], DSN: a[wkDSN], SQL: a[wkSQL]},
-		Target: runSubmitTargetSpec{
+	spec := orabbitcli.RunSubmitFile{
+		Master: orabbitcli.RunSubmitMasterSpec{HTTP: masterHTTP},
+		Source: orabbitcli.RunSubmitSourceSpec{Name: a[wkSourceName], Engine: a[wkEngine], DSN: a[wkDSN], SQL: a[wkSQL]},
+		Target: orabbitcli.RunSubmitTargetSpec{
 			Name:            "s3",
 			Endpoint:        a[wkEndpoint],
 			Region:          a[wkRegion],
@@ -279,7 +281,7 @@ func buildWizardSpec(a map[string]string, masterHTTP string) (runSubmitFile, err
 			AccessKeyID:     a[wkAccessKey],
 			SecretAccessKey: a[wkSecretKey],
 		},
-		Job: runSubmitJobSpec{
+		Job: orabbitcli.RunSubmitJobSpec{
 			Name:            a[wkJobName],
 			TargetNamespace: a[wkNamespace],
 			TargetTable:     a[wkTargetTbl],
@@ -300,11 +302,11 @@ func buildWizardSpec(a map[string]string, masterHTTP string) (runSubmitFile, err
 	}
 	if a[wkIceberg] != optNo {
 		uri := a[wkIceURI]
-		spec.Iceberg = runSubmitIcebergSpec{Enabled: true, Engine: a[wkIceEngine], Table: a[wkIceTable]}
+		spec.Iceberg = orabbitcli.RunSubmitIcebergSpec{Enabled: true, Engine: a[wkIceEngine], Table: a[wkIceTable]}
 		spec.Iceberg.Options.URI = &uri
 	}
-	if err := spec.validate(); err != nil {
-		return runSubmitFile{}, err
+	if err := spec.Validate(); err != nil {
+		return orabbitcli.RunSubmitFile{}, err
 	}
 	return spec, nil
 }
@@ -315,7 +317,7 @@ func atoiOrZero(v string) int64 {
 	return n
 }
 
-// runWizard is the wizard's state. tuiModel owns at most one and forwards
+// runWizard is the wizard's state. model owns at most one and forwards
 // keys to it while it is open.
 type runWizard struct {
 	answers map[string]string
@@ -334,7 +336,7 @@ func newRunWizard(previous map[string]string) *runWizard {
 		}
 	}
 	w.input = textinput.New()
-	w.input.Prompt = tuiStylePrompt.Render("› ")
+	w.input.Prompt = stylePrompt.Render("› ")
 	w.input.Focus()
 	w.enterField()
 	return w
@@ -494,8 +496,8 @@ func (w *runWizard) view() string {
 	f := fields[w.pos]
 	var b strings.Builder
 
-	b.WriteString(tuiStyleTitle.Render(fmt.Sprintf("Step %d/%d · %s", f.Step+1, len(wizSteps), wizSteps[f.Step])))
-	b.WriteString(tuiStyleDim.Render("   " + wizardStepTrail(f.Step)))
+	b.WriteString(styleTitle.Render(fmt.Sprintf("Step %d/%d · %s", f.Step+1, len(wizSteps), wizSteps[f.Step])))
+	b.WriteString(styleDim.Render("   " + wizardStepTrail(f.Step)))
 	b.WriteString("\n\n")
 
 	if f.Key == wkReview {
@@ -504,19 +506,19 @@ func (w *runWizard) view() string {
 	} else {
 		for _, prev := range fields[:w.pos] {
 			if prev.Step == f.Step {
-				b.WriteString(tuiStyleOK.Render("✓ ") + tuiStyleDim.Render(prev.Label+": ") + displayAnswer(prev, w.answers[prev.Key]) + "\n")
+				b.WriteString(styleOK.Render("✓ ") + styleDim.Render(prev.Label+": ") + displayAnswer(prev, w.answers[prev.Key]) + "\n")
 			}
 		}
 	}
 
 	b.WriteString(lipglossBold(f.Label) + "\n")
 	if f.Help != "" {
-		b.WriteString(tuiStyleDim.Render("  "+f.Help) + "\n")
+		b.WriteString(styleDim.Render("  "+f.Help) + "\n")
 	}
 	if f.Kind == wizSelect {
 		for i, o := range f.Options {
 			if i == w.choice {
-				b.WriteString(tuiStylePrompt.Render("› ") + tuiStyleSelected.Render(o) + "\n")
+				b.WriteString(stylePrompt.Render("› ") + styleSelected.Render(o) + "\n")
 			} else {
 				b.WriteString("  " + o + "\n")
 			}
@@ -525,10 +527,10 @@ func (w *runWizard) view() string {
 		b.WriteString(w.input.View() + "\n")
 	}
 	if w.err != "" {
-		b.WriteString(tuiStyleErr.Render("  ✗ "+w.err) + "\n")
+		b.WriteString(styleErr.Render("  ✗ "+w.err) + "\n")
 	}
 	if w.notice != "" {
-		b.WriteString(tuiStyleOK.Render("  "+w.notice) + "\n")
+		b.WriteString(styleOK.Render("  "+w.notice) + "\n")
 	}
 	keys := "Enter next · Esc back · Ctrl+C cancel"
 	switch {
@@ -539,7 +541,7 @@ func (w *runWizard) view() string {
 	case f.Optional:
 		keys = "Enter skips when empty · " + keys
 	}
-	b.WriteString(tuiStyleDim.Render(keys) + "\n")
+	b.WriteString(styleDim.Render(keys) + "\n")
 	return b.String()
 }
 
@@ -569,7 +571,7 @@ func (w *runWizard) reviewSummary(fields []wizField) string {
 		}
 		if f.Step != step {
 			step = f.Step
-			b.WriteString(tuiStyleCmd.Render(wizSteps[step]) + "\n")
+			b.WriteString(styleCmd.Render(wizSteps[step]) + "\n")
 		}
 		fmt.Fprintf(&b, "  %-26s %s\n", f.Label, displayAnswer(f, w.answers[f.Key]))
 	}
@@ -585,42 +587,51 @@ func displayAnswer(f wizField, v string) string {
 	case f.Key == wkDSN:
 		return redactDSN(v)
 	case v == "":
-		return tuiStyleDim.Render("(empty)")
+		return styleDim.Render("(empty)")
 	}
 	return v
 }
 
-var dsnPassword = regexp.MustCompile(`(://[^:/@]+:)[^@]*@`)
+var (
+	// URL form: scheme://user:password@host.
+	dsnPassword = regexp.MustCompile(`(://[^:/@\s]+:)[^@\s]*@`)
+	// Key/value form, e.g. FlightSQL "username=u;password=p;authorization_header=Bearer t"
+	// or a query string "?password=p&...". The value runs to the next ; & or quote.
+	dsnSecretParam = regexp.MustCompile(`(?i)\b((?:password|pwd|passwd|token|secret|authorization_header)=)(?:Bearer\s+)?[^;&"'\s]*`)
+)
 
+// redactDSN masks passwords and tokens in a DSN, or in error text that
+// quotes one, before it is shown on screen.
 func redactDSN(dsn string) string {
-	return dsnPassword.ReplaceAllString(dsn, "${1}••••@")
+	dsn = dsnPassword.ReplaceAllString(dsn, "${1}••••@")
+	return dsnSecretParam.ReplaceAllString(dsn, "${1}••••")
 }
 
-func lipglossBold(s string) string { return tuiStyleTitle.UnsetForeground().Render(s) }
+func lipglossBold(s string) string { return styleTitle.UnsetForeground().Render(s) }
 
 // --- commands the wizard triggers ------------------------------------------
 
-type tuiWizardSubmittedMsg struct {
+type wizardSubmittedMsg struct {
 	runID string
 	tasks int
 	err   error
 }
 
-func (m tuiModel) submitWizardCmd(spec runSubmitFile) tea.Cmd {
+func (m model) submitWizardCmd(spec orabbitcli.RunSubmitFile) tea.Cmd {
 	base := m.base
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 2*tuiRequestTimeout)
+		ctx, cancel := context.WithTimeout(m.ctx, 2*requestTimeout)
 		defer cancel()
-		_, runID, tasks, err := submitRunPlan(ctx, spec.toRanConfig(base))
-		return tuiWizardSubmittedMsg{runID: runID, tasks: tasks, err: err}
+		runID, tasks, err := orabbitcli.SubmitRun(ctx, base, spec)
+		return wizardSubmittedMsg{runID: runID, tasks: tasks, err: err}
 	}
 }
 
 // saveWizardSpec writes the spec as YAML next to the shell's working
 // directory. The file holds the source DSN and S3 secret, so it is created
 // with owner-only permissions and never overwrites an existing file.
-func saveWizardSpec(spec runSubmitFile) (string, error) {
-	spec.Master = runSubmitMasterSpec{} // the shell passes --master-http on /submit
+func saveWizardSpec(spec orabbitcli.RunSubmitFile) (string, error) {
+	spec.Master = orabbitcli.RunSubmitMasterSpec{} // the shell passes --master-http on /submit
 	raw, err := yaml.Marshal(spec)
 	if err != nil {
 		return "", fmt.Errorf("encode spec: %w", err)

@@ -1,4 +1,4 @@
-package orabbitcli
+package tui
 
 import (
 	"errors"
@@ -8,10 +8,10 @@ import (
 	"strings"
 )
 
-// tuiCommand describes one slash command of the interactive shell.
+// command describes one slash command of the interactive shell.
 // The registry below is plain data so help, completion and "did you mean"
 // suggestions all stay in sync automatically.
-type tuiCommand struct {
+type command struct {
 	Name    string
 	Usage   string
 	Summary string
@@ -30,9 +30,9 @@ const (
 	groupShell   = "Shell"
 )
 
-var tuiHelpGroups = []string{groupRuns, groupInspect, groupOps, groupShell}
+var helpGroups = []string{groupRuns, groupInspect, groupOps, groupShell}
 
-var tuiCommands = []tuiCommand{
+var commands = []command{
 	{Name: "run", Group: groupRuns, Usage: "/run", Summary: "Start a run with the step-by-step wizard",
 		Details:  "Asks for the source, data, storage, destination and optional advanced settings, prints the configuration, submits it and follows the run. Esc closes the wizard and keeps your answers for the next /run.",
 		Examples: []string{"/run"}},
@@ -79,7 +79,7 @@ func wantsHelp(args []string) bool {
 
 // parseRunsArgs reads `/runs [limit] [--job <id|name>]`.
 func parseRunsArgs(args []string) (limit int, job string, err error) {
-	limit = tuiDefaultRuns
+	limit = defaultRuns
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -105,39 +105,39 @@ func parseRunsArgs(args []string) (limit int, job string, err error) {
 	return limit, job, nil
 }
 
-func renderTUIHelp() string {
+func renderHelp() string {
 	var b strings.Builder
-	for gi, g := range tuiHelpGroups {
+	for gi, g := range helpGroups {
 		if gi > 0 {
 			b.WriteString("\n")
 		}
-		b.WriteString(tuiStyleTitle.Render(g) + "\n")
-		for _, c := range tuiCommands {
+		b.WriteString(styleTitle.Render(g) + "\n")
+		for _, c := range commands {
 			if c.Group == g {
-				fmt.Fprintf(&b, "  %s %s\n", tuiStyleCmd.Render(fmt.Sprintf("%-42s", c.Usage)), tuiStyleDim.Render(c.Summary))
+				fmt.Fprintf(&b, "  %s %s\n", styleCmd.Render(fmt.Sprintf("%-42s", c.Usage)), styleDim.Render(c.Summary))
 			}
 		}
 	}
-	b.WriteString("\n" + tuiStyleDim.Render("/help <command> or /<command> --help shows flags and examples"))
-	b.WriteString("\n" + tuiStyleDim.Render("Keys: Tab completes · ↑↓ menu/history · Esc stops the current activity · Ctrl+D exits"))
+	b.WriteString("\n" + styleDim.Render("/help <command> or /<command> --help shows flags and examples"))
+	b.WriteString("\n" + styleDim.Render("Keys: Tab completes · ↑↓ menu/history · Esc stops the current activity · Ctrl+D exits"))
 	return b.String()
 }
 
-// renderTUICommandHelp shows one command: what it does, its subcommands and
+// renderCommandHelp shows one command: what it does, its subcommands and
 // flags (from the completion specs, so they match the real CLI flags) and
 // examples.
-func renderTUICommandHelp(c tuiCommand) string {
+func renderCommandHelp(c command) string {
 	var b strings.Builder
-	b.WriteString(tuiStyleTitle.Render(c.Usage) + "\n")
+	b.WriteString(styleTitle.Render(c.Usage) + "\n")
 	b.WriteString("  " + c.Summary + "\n")
 	if c.Details != "" {
-		b.WriteString("  " + tuiStyleDim.Render(c.Details) + "\n")
+		b.WriteString("  " + styleDim.Render(c.Details) + "\n")
 	}
 	if len(c.Aliases) > 0 {
-		b.WriteString("  " + tuiStyleDim.Render("aliases: /"+strings.Join(c.Aliases, ", /")) + "\n")
+		b.WriteString("  " + styleDim.Render("aliases: /"+strings.Join(c.Aliases, ", /")) + "\n")
 	}
-	spec := tuiCompletionSpecs[c.Name]
-	writeFlags := func(indent string, flags []tuiFlag) {
+	spec := completionSpecs[c.Name]
+	writeFlags := func(indent string, flags []flagSpec) {
 		for _, f := range flags {
 			label := "--" + f.Name
 			if f.Value != "" {
@@ -147,11 +147,11 @@ func renderTUICommandHelp(c tuiCommand) string {
 			if len(f.Values) > 0 {
 				summary += " [" + strings.Join(f.Values, "|") + "]"
 			}
-			fmt.Fprintf(&b, "%s%s %s\n", indent, tuiStyleCmd.Render(fmt.Sprintf("%-30s", label)), tuiStyleDim.Render(summary))
+			fmt.Fprintf(&b, "%s%s %s\n", indent, styleCmd.Render(fmt.Sprintf("%-30s", label)), styleDim.Render(summary))
 		}
 	}
 	if len(spec.Flags) > 0 {
-		b.WriteString("\n" + tuiStyleTitle.Render("Flags") + "\n")
+		b.WriteString("\n" + styleTitle.Render("Flags") + "\n")
 		writeFlags("  ", spec.Flags)
 	}
 	for _, s := range spec.Subcommands {
@@ -162,22 +162,22 @@ func renderTUICommandHelp(c tuiCommand) string {
 		if len(s.Choices) > 0 {
 			head += " [" + strings.Join(s.Choices, "] [") + "]"
 		}
-		fmt.Fprintf(&b, "\n%s  %s\n", tuiStyleTitle.Render(head), tuiStyleDim.Render(s.Summary))
+		fmt.Fprintf(&b, "\n%s  %s\n", styleTitle.Render(head), styleDim.Render(s.Summary))
 		writeFlags("  ", s.Flags)
 	}
 	if len(c.Examples) > 0 {
-		b.WriteString("\n" + tuiStyleTitle.Render("Examples") + "\n")
+		b.WriteString("\n" + styleTitle.Render("Examples") + "\n")
 		for _, e := range c.Examples {
-			b.WriteString("  " + tuiStyleCmd.Render(e) + "\n")
+			b.WriteString("  " + styleCmd.Render(e) + "\n")
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// lookupTUICommand resolves a command name or alias.
-func lookupTUICommand(name string) (tuiCommand, bool) {
+// lookupCommand resolves a command name or alias.
+func lookupCommand(name string) (command, bool) {
 	name = strings.ToLower(strings.TrimSpace(name))
-	for _, c := range tuiCommands {
+	for _, c := range commands {
 		if c.Name == name {
 			return c, true
 		}
@@ -187,15 +187,15 @@ func lookupTUICommand(name string) (tuiCommand, bool) {
 			}
 		}
 	}
-	return tuiCommand{}, false
+	return command{}, false
 }
 
-// matchTUICommands returns the commands whose name starts with prefix,
+// matchCommands returns the commands whose name starts with prefix,
 // in registry order. An empty prefix matches everything.
-func matchTUICommands(prefix string) []tuiCommand {
+func matchCommands(prefix string) []command {
 	prefix = strings.ToLower(strings.TrimSpace(prefix))
-	var out []tuiCommand
-	for _, c := range tuiCommands {
+	var out []command
+	for _, c := range commands {
 		if strings.HasPrefix(c.Name, prefix) {
 			out = append(out, c)
 		}
@@ -203,9 +203,9 @@ func matchTUICommands(prefix string) []tuiCommand {
 	return out
 }
 
-// suggestTUICommand returns the closest known command for a typo, if any is
+// suggestCommand returns the closest known command for a typo, if any is
 // close enough (edit distance <= 2) to be a plausible intent.
-func suggestTUICommand(name string) (string, bool) {
+func suggestCommand(name string) (string, bool) {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if name == "" {
 		return "", false
@@ -215,7 +215,7 @@ func suggestTUICommand(name string) (string, bool) {
 		dist int
 	}
 	var cands []candidate
-	for _, c := range tuiCommands {
+	for _, c := range commands {
 		for _, n := range append([]string{c.Name}, c.Aliases...) {
 			if d := levenshtein(name, n); d <= 2 && d < len(n) {
 				cands = append(cands, candidate{name: c.Name, dist: d})
@@ -254,11 +254,11 @@ func levenshtein(a, b string) int {
 
 var errUnterminatedQuote = errors.New("unterminated quote")
 
-// splitTUIArgs splits a command line into words like a minimal shell:
+// splitArgs splits a command line into words like a minimal shell:
 // whitespace separates words, and single or double quotes group words so
 // `--reason "stale commit"` stays one argument. Backslash escapes the next
 // character outside single quotes.
-func splitTUIArgs(line string) ([]string, error) {
+func splitArgs(line string) ([]string, error) {
 	var (
 		args    []string
 		cur     strings.Builder
@@ -303,10 +303,10 @@ func splitTUIArgs(line string) ([]string, error) {
 	return args, nil
 }
 
-// parseTUIInput turns a shell line into a command name and its arguments.
+// parseInput turns a shell line into a command name and its arguments.
 // The leading "/" is optional so `watch abc` works as well as `/watch abc`.
-func parseTUIInput(line string) (name string, args []string, err error) {
-	words, err := splitTUIArgs(strings.TrimSpace(line))
+func parseInput(line string) (name string, args []string, err error) {
+	words, err := splitArgs(strings.TrimSpace(line))
 	if err != nil {
 		return "", nil, err
 	}

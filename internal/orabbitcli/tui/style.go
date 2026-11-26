@@ -1,4 +1,4 @@
-package orabbitcli
+package tui
 
 import (
 	"encoding/json"
@@ -14,24 +14,27 @@ import (
 // panels for the welcome banner, the prompt, the wizard, summaries and errors.
 
 const (
-	tuiDefaultWidth = 80
-	tuiMaxBoxWidth  = 110
+	defaultWidth = 80
+	maxBoxWidth  = 110
 )
 
 var (
-	tuiColorAccent = lipgloss.Color("212")
-	tuiColorBorder = lipgloss.Color("240")
-	tuiColorInfo   = lipgloss.Color("81")
-	tuiColorErr    = lipgloss.Color("203")
-	tuiColorWarn   = lipgloss.Color("214")
+	colorAccent = lipgloss.Color("212")
+	colorBorder = lipgloss.Color("240")
+	colorInfo   = lipgloss.Color("81")
+	colorErr    = lipgloss.Color("203")
+	colorWarn   = lipgloss.Color("214")
 )
 
 // boxWidth is the outer width of a panel for a terminal of the given width.
+// It stays one column narrower than the terminal: fitWidth wraps any line
+// as wide as the terminal, which would push the right border onto its own
+// line.
 func boxWidth(termWidth int) int {
 	if termWidth <= 0 {
-		termWidth = tuiDefaultWidth
+		termWidth = defaultWidth
 	}
-	return max(20, min(termWidth, tuiMaxBoxWidth))
+	return max(20, min(termWidth-1, maxBoxWidth))
 }
 
 // renderBox draws body in a rounded border. An optional title is shown as
@@ -56,9 +59,9 @@ func renderBox(termWidth int, color lipgloss.Color, title, body string) string {
 }
 
 func renderWelcome(termWidth int, base string) string {
-	body := tuiStyleDim.Render("  /run starts an export · /runs lists runs · /help shows every command") + "\n" +
-		tuiStyleDim.Render("  master: "+base)
-	return renderBox(termWidth, tuiColorAccent, "✻ Welcome to O_Rabbit", "\n"+body)
+	body := styleDim.Render("  /run starts an export · /runs lists runs · /help shows every command") + "\n" +
+		styleDim.Render("  master: "+base)
+	return renderBox(termWidth, colorAccent, "✻ Welcome to O_Rabbit", "\n"+body)
 }
 
 // --- API errors ------------------------------------------------------------
@@ -75,7 +78,7 @@ type masterAPIError struct {
 
 var httpErrPrefix = regexp.MustCompile(`(?s)http (\d{3}): (\{.*\})`)
 
-// parseMasterError extracts the master's structured error from an httpJSON
+// parseMasterError extracts the master's structured error from an orabbitcli.GetJSON
 // error such as `http 503: {"error":{...}}`, wherever it sits in the chain.
 func parseMasterError(err error) (masterAPIError, bool) {
 	if err == nil {
@@ -134,12 +137,12 @@ func errorHints(e masterAPIError) []string {
 func renderErrorBlock(termWidth int, title string, err error) string {
 	e, ok := parseMasterError(err)
 	if !ok {
-		return tuiStyleErr.Render("✗ " + title + ": " + err.Error())
+		return styleErr.Render("✗ " + title + ": " + err.Error())
 	}
 	var b strings.Builder
 	b.WriteString(e.Message)
 	if e.FailureClass != "" || e.Code != "" {
-		b.WriteString(tuiStyleDim.Render(fmt.Sprintf("  (%s, http %s)", firstNonEmpty(e.FailureClass, e.Code), e.Status)))
+		b.WriteString(styleDim.Render(fmt.Sprintf("  (%s, http %s)", firstNonEmpty(e.FailureClass, e.Code), e.Status)))
 	}
 	b.WriteString("\n")
 	keys := make([]string, 0, len(e.Details))
@@ -148,15 +151,15 @@ func renderErrorBlock(termWidth int, title string, err error) string {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		b.WriteString(tuiStyleDim.Render(k+": ") + redactDSN(fmt.Sprint(e.Details[k])) + "\n")
+		b.WriteString(styleDim.Render(k+": ") + redactDSN(fmt.Sprint(e.Details[k])) + "\n")
 	}
 	if hints := errorHints(e); len(hints) > 0 {
 		b.WriteString("\n")
 		for _, h := range hints {
-			b.WriteString(lipgloss.NewStyle().Foreground(tuiColorWarn).Render("→ ") + h + "\n")
+			b.WriteString(lipgloss.NewStyle().Foreground(colorWarn).Render("→ ") + h + "\n")
 		}
 	}
-	return renderBox(termWidth, tuiColorErr, "✗ "+title, b.String())
+	return renderBox(termWidth, colorErr, "✗ "+title, b.String())
 }
 
 func firstNonEmpty(vs ...string) string {

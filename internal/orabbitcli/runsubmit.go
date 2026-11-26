@@ -20,15 +20,15 @@ import (
 
 var ErrRunSubmitSpecInvalid = errors.New("invalid run submit config")
 
-type runSubmitFile struct {
-	Master  runSubmitMasterSpec  `json:"master" yaml:"master"`
-	Source  runSubmitSourceSpec  `json:"source" yaml:"source"`
-	Target  runSubmitTargetSpec  `json:"target" yaml:"target"`
-	Job     runSubmitJobSpec     `json:"job" yaml:"job"`
-	Iceberg runSubmitIcebergSpec `json:"iceberg" yaml:"iceberg"`
+type RunSubmitFile struct {
+	Master  RunSubmitMasterSpec  `json:"master" yaml:"master"`
+	Source  RunSubmitSourceSpec  `json:"source" yaml:"source"`
+	Target  RunSubmitTargetSpec  `json:"target" yaml:"target"`
+	Job     RunSubmitJobSpec     `json:"job" yaml:"job"`
+	Iceberg RunSubmitIcebergSpec `json:"iceberg" yaml:"iceberg"`
 }
 
-type runSubmitIcebergSpec struct {
+type RunSubmitIcebergSpec struct {
 	Enabled      bool                  `json:"enabled" yaml:"enabled"`
 	Engine       string                `json:"engine,omitempty" yaml:"engine,omitempty"`
 	Table        string                `json:"table,omitempty" yaml:"table,omitempty"`
@@ -36,18 +36,18 @@ type runSubmitIcebergSpec struct {
 	Options      icebergreg.RunOptions `json:"options,omitempty" yaml:"options,omitempty"`
 }
 
-type runSubmitMasterSpec struct {
+type RunSubmitMasterSpec struct {
 	HTTP string `json:"http" yaml:"http"`
 }
 
-type runSubmitSourceSpec struct {
+type RunSubmitSourceSpec struct {
 	Name   string `json:"name" yaml:"name"`
 	Engine string `json:"engine" yaml:"engine"`
 	DSN    string `json:"dsn" yaml:"dsn"`
 	SQL    string `json:"sql,omitempty" yaml:"sql,omitempty"`
 }
 
-type runSubmitTargetSpec struct {
+type RunSubmitTargetSpec struct {
 	Name            string `json:"name" yaml:"name"`
 	Endpoint        string `json:"endpoint" yaml:"endpoint"`
 	Region          string `json:"region" yaml:"region"`
@@ -58,7 +58,7 @@ type runSubmitTargetSpec struct {
 	SecretAccessKey string `json:"secret_access_key" yaml:"secret_access_key"`
 }
 
-type runSubmitJobSpec struct {
+type RunSubmitJobSpec struct {
 	Name              string `json:"name" yaml:"name"`
 	TargetNamespace   string `json:"target_namespace" yaml:"target_namespace"`
 	TargetTable       string `json:"target_table" yaml:"target_table"`
@@ -79,32 +79,32 @@ func invalidRunSubmitf(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrRunSubmitSpecInvalid, fmt.Sprintf(format, args...))
 }
 
-func loadRunSubmitFile(path string) (runSubmitFile, error) {
+func loadRunSubmitFile(path string) (RunSubmitFile, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return runSubmitFile{}, invalidRunSubmitf("--file is required")
+		return RunSubmitFile{}, invalidRunSubmitf("--file is required")
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return runSubmitFile{}, invalidRunSubmitf("read %q: %v", path, err)
+		return RunSubmitFile{}, invalidRunSubmitf("read %q: %v", path, err)
 	}
 
-	var spec runSubmitFile
+	var spec RunSubmitFile
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".json":
 		if err := decodeRunSubmitJSON(raw, &spec); err != nil {
-			return runSubmitFile{}, invalidRunSubmitf("parse %q as JSON: %v", path, err)
+			return RunSubmitFile{}, invalidRunSubmitf("parse %q as JSON: %v", path, err)
 		}
 	case ".yaml", ".yml":
 		if err := decodeRunSubmitYAML(raw, &spec); err != nil {
-			return runSubmitFile{}, invalidRunSubmitf("parse %q as YAML: %v", path, err)
+			return RunSubmitFile{}, invalidRunSubmitf("parse %q as YAML: %v", path, err)
 		}
 	default:
-		return runSubmitFile{}, invalidRunSubmitf("unsupported file extension %q for %q; use .json, .yaml, or .yml", filepath.Ext(path), path)
+		return RunSubmitFile{}, invalidRunSubmitf("unsupported file extension %q for %q; use .json, .yaml, or .yml", filepath.Ext(path), path)
 	}
 
-	if err := spec.validate(); err != nil {
-		return runSubmitFile{}, err
+	if err := spec.Validate(); err != nil {
+		return RunSubmitFile{}, err
 	}
 	return spec, nil
 }
@@ -131,7 +131,7 @@ func decodeRunSubmitYAML(raw []byte, out any) error {
 	return dec.Decode(out)
 }
 
-func (s *runSubmitFile) validate() error {
+func (s *RunSubmitFile) Validate() error {
 	if s == nil {
 		return invalidRunSubmitf("empty spec")
 	}
@@ -285,7 +285,7 @@ func (s *runSubmitFile) validate() error {
 	return nil
 }
 
-func (s runSubmitFile) toRanConfig(masterHTTPOverride string) ranConfig {
+func (s RunSubmitFile) toRanConfig(masterHTTPOverride string) ranConfig {
 	base := strings.TrimSpace(masterHTTPOverride)
 	if base == "" {
 		base = s.Master.HTTP

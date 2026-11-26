@@ -16,6 +16,7 @@ The review is based on the current runtime codepaths and deployment assets in:
 - `internal/http`
 - `internal/icebergreg`
 - `internal/orabbitcli`
+- `internal/orabbitcli/tui`
 - `internal/ops`
 - `proto/controlplane.proto`
 - deployment files such as `docker-compose*.yml`, `Dockerfile.orabbit`, `.env.*.example`, `deploy-*.sh`, `.ice.yaml`, and `ice-rest-catalog.yaml`
@@ -177,6 +178,7 @@ Important naming note: the repository directories are `cmd/master` and `cmd/work
 | `internal/http` | REST API, SSE, and remote operations backend | `Server.Handler`, `handleJobByID`, `handleRunEventsStream`, `handleDeployments`, `handleServers` | API covers both ingestion operations and server/deployment management |
 | `internal/icebergreg` | Iceberg registration | `Manager.RegisterRun`, `prepareRESTGoTable`, `runRESTGoRegister`, `runIceCLIRegister` | Run-specific registration config snapshot avoids drift between submission time and completion time |
 | `internal/orabbitcli` | CLI workflow implementation | `Main`, `cmdRunInteractive`, `promptRunConfig`, `buildIcebergRegistrationSnapshot`, `streamSSE` | CLI is the primary user entrypoint; interactive and file-based flows share config-building logic |
+| `internal/orabbitcli/tui` | Interactive shell (no-argument `orabbit-client` in a terminal) | `Run`, `IsTerminal`, the `/run` wizard, `completionSpecs` | Uses only the exported API in `internal/orabbitcli/shell_api.go`; wizard specs go through the same `Validate` and submit path as `run submit` |
 | `internal/ops` | Control-panel backend helpers | SSH, Docker, deployment, and config-editing services | Remote ops are backend-only in this repo; no browser frontend assets were found |
 | `proto` | gRPC schema | `proto/controlplane.proto` | Task assignment carries target file hints and repeated result object keys |
 

@@ -30,12 +30,12 @@ type jobPayload struct {
 	OptionsJSON        map[string]any `json:"options_json"`
 }
 
-type runDetails struct {
-	Run   runState   `json:"run"`
-	Tasks []taskInfo `json:"tasks"`
+type RunDetails struct {
+	Run   RunState   `json:"run"`
+	Tasks []TaskInfo `json:"tasks"`
 }
 
-type runState struct {
+type RunState struct {
 	ID           string  `json:"id"`
 	Status       string  `json:"status"`
 	StartedAt    string  `json:"started_at"`
@@ -43,7 +43,7 @@ type runState struct {
 	ErrorSummary *string `json:"error_summary"`
 }
 
-type taskInfo struct {
+type TaskInfo struct {
 	ID             string          `json:"id"`
 	TaskIndex      int             `json:"task_index"`
 	Status         string          `json:"status"`
@@ -57,8 +57,8 @@ type taskInfo struct {
 	ErrorMessage   *string         `json:"error_message"`
 }
 
-type cancelRunResponse struct {
-	Run                  runState `json:"run"`
+type CancelRunResponse struct {
+	Run                  RunState `json:"run"`
 	Canceled             bool     `json:"canceled"`
 	PendingTasksCanceled int      `json:"pending_tasks_canceled"`
 }
@@ -179,21 +179,21 @@ func getRunStatus(ctx context.Context, base, runID string) (string, error) {
 	return strings.TrimSpace(details.Run.Status), nil
 }
 
-func getRunDetails(ctx context.Context, base, runID string) (runDetails, error) {
+func getRunDetails(ctx context.Context, base, runID string) (RunDetails, error) {
 	var resp struct {
-		Run   runState   `json:"run"`
-		Tasks []taskInfo `json:"tasks"`
+		Run   RunState   `json:"run"`
+		Tasks []TaskInfo `json:"tasks"`
 	}
 	if err := httpJSON(ctx, http.MethodGet, base+apiV1+"/runs/"+runID, nil, &resp); err != nil {
-		return runDetails{}, err
+		return RunDetails{}, err
 	}
-	return runDetails{Run: resp.Run, Tasks: resp.Tasks}, nil
+	return RunDetails{Run: resp.Run, Tasks: resp.Tasks}, nil
 }
 
-func cancelRun(ctx context.Context, base, runID string) (cancelRunResponse, error) {
-	var resp cancelRunResponse
+func cancelRun(ctx context.Context, base, runID string) (CancelRunResponse, error) {
+	var resp CancelRunResponse
 	if err := httpJSON(ctx, http.MethodPost, base+apiV1+"/runs/"+runID+"/cancel", map[string]any{}, &resp); err != nil {
-		return cancelRunResponse{}, err
+		return CancelRunResponse{}, err
 	}
 	return resp, nil
 }

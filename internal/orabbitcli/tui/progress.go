@@ -1,6 +1,8 @@
-package orabbitcli
+package tui
 
 import (
+	"github.com/LevonGhukas/O_Rabbit/internal/orabbitcli"
+
 	"fmt"
 	"strings"
 )
@@ -14,7 +16,7 @@ type runProgress struct {
 	RowsRead int64
 }
 
-func summarizeRunProgress(d runDetails) runProgress {
+func summarizeRunProgress(d orabbitcli.RunDetails) runProgress {
 	p := runProgress{Total: len(d.Tasks)}
 	for _, t := range d.Tasks {
 		p.RowsRead += t.RowsRead

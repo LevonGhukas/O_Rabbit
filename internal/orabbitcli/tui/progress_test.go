@@ -1,6 +1,8 @@
-package orabbitcli
+package tui
 
 import (
+	"github.com/LevonGhukas/O_Rabbit/internal/orabbitcli"
+
 	"strings"
 	"testing"
 )
@@ -25,7 +27,7 @@ func TestRenderProgressBar(t *testing.T) {
 }
 
 func TestSummarizeRunProgress(t *testing.T) {
-	d := runDetails{Tasks: []taskInfo{
+	d := orabbitcli.RunDetails{Tasks: []orabbitcli.TaskInfo{
 		{Status: "SUCCEEDED", RowsRead: 100},
 		{Status: "succeeded", RowsRead: 50},
 		{Status: "FAILED"},

@@ -1,36 +1,36 @@
-package orabbitcli
+package tui
 
 import (
 	"strings"
 )
 
-// tuiFlag describes one flag of a command the shell forwards to the CLI.
+// flagSpec describes one flag of a command the shell forwards to the CLI.
 // Value is a placeholder for flags that take a value ("" for booleans), and
 // Values lists the accepted choices when the flag is an enum.
-type tuiFlag struct {
+type flagSpec struct {
 	Name    string
 	Value   string
 	Summary string
 	Values  []string
 }
 
-// tuiSubcommand is a second command word, such as `stack start`.
-type tuiSubcommand struct {
+// subcommandSpec is a second command word, such as `stack start`.
+type subcommandSpec struct {
 	Name    string
 	Summary string
 	// Hidden subcommands work and complete their flags, but are not listed.
 	Hidden bool
-	Flags  []tuiFlag
+	Flags  []flagSpec
 	// Choices are positional words the subcommand accepts, e.g. master/worker.
 	Choices []string
 }
 
-// tuiCommandSpec is the completion data for one slash command. The flag lists
+// commandSpec is the completion data for one slash command. The flag lists
 // mirror the real flag sets in main.go, process.go and maintenance.go;
 // tui_completion_test.go fails if they drift apart.
-type tuiCommandSpec struct {
-	Flags       []tuiFlag
-	Subcommands []tuiSubcommand
+type commandSpec struct {
+	Flags       []flagSpec
+	Subcommands []subcommandSpec
 }
 
 var (
@@ -38,27 +38,27 @@ var (
 	logFormats = []string{"json", "text"}
 )
 
-var tuiCompletionSpecs = map[string]tuiCommandSpec{
-	"runs":     {Flags: []tuiFlag{{Name: "job", Value: "id|name", Summary: "Only this job's runs"}}},
-	"diagnose": {Flags: []tuiFlag{{Name: "json", Summary: "Print the master's raw diagnosis JSON"}}},
-	"workers":  {Flags: []tuiFlag{{Name: "all", Summary: "Include workers that stopped heartbeating"}}},
+var completionSpecs = map[string]commandSpec{
+	"runs":     {Flags: []flagSpec{{Name: "job", Value: "id|name", Summary: "Only this job's runs"}}},
+	"diagnose": {Flags: []flagSpec{{Name: "json", Summary: "Print the master's raw diagnosis JSON"}}},
+	"workers":  {Flags: []flagSpec{{Name: "all", Summary: "Include workers that stopped heartbeating"}}},
 	// Every /run form opens the wizard, which takes no flags.
-	"run": {Subcommands: []tuiSubcommand{
+	"run": {Subcommands: []subcommandSpec{
 		{Name: "interactive", Summary: "Step-by-step run wizard (same as plain /run)"},
 	}},
-	"submit": {Flags: []tuiFlag{
+	"submit": {Flags: []flagSpec{
 		{Name: "file", Value: "path", Summary: "YAML/JSON run spec (a bare first argument works too)"},
 		{Name: "master-http", Value: "url", Summary: "Master HTTP base URL (the shell passes its own)"},
 		{Name: "quiet", Summary: "Suppress non-essential output"},
 		{Name: "verbose", Summary: "Show additional progress details"},
 	}},
-	"recover": {Flags: []tuiFlag{
+	"recover": {Flags: []flagSpec{
 		{Name: "action", Value: "action", Summary: "Recovery action", Values: []string{"reconcile_commit", "registration_retry", "reconciliation_retry", "acknowledge_quarantine"}},
 		{Name: "reason", Value: "text", Summary: "Operator reason recorded in the audit log (quote it)"},
 		{Name: "master-http", Value: "url", Summary: "Master HTTP base URL (the shell passes its own)"},
 	}},
-	"stack": {Subcommands: []tuiSubcommand{
-		{Name: "start", Summary: "Start local master and/or workers", Choices: []string{"master", "worker"}, Flags: []tuiFlag{
+	"stack": {Subcommands: []subcommandSpec{
+		{Name: "start", Summary: "Start local master and/or workers", Choices: []string{"master", "worker"}, Flags: []flagSpec{
 			{Name: "count", Value: "n", Summary: "Worker process count"},
 			{Name: "master-addr", Value: "addr", Summary: "Master gRPC address for workers"},
 			{Name: "insecure", Value: "bool", Summary: "Disable gRPC TLS (dev)", Values: []string{"true", "false"}},
@@ -78,7 +78,7 @@ var tuiCompletionSpecs = map[string]tuiCommandSpec{
 			{Name: "quiet", Summary: "Suppress non-essential output"},
 			{Name: "verbose", Summary: "Show additional progress details"},
 		}},
-		{Name: "stop", Summary: "Stop local master/worker processes", Flags: []tuiFlag{
+		{Name: "stop", Summary: "Stop local master/worker processes", Flags: []flagSpec{
 			{Name: "dry-run", Summary: "Preview the matched targets; don't signal"},
 			{Name: "force", Summary: "Send SIGKILL (immediate)"},
 			{Name: "all", Summary: "Also stop processes not started with -gocache (Unix only)"},
@@ -86,15 +86,15 @@ var tuiCompletionSpecs = map[string]tuiCommandSpec{
 			{Name: "grpc-addr", Value: "addr", Summary: "Master gRPC address to match with -all"},
 			{Name: "http-addr", Value: "addr", Summary: "Master HTTP addr to match with -all"},
 		}},
-		{Name: "status", Summary: "List local/remote master and worker status", Flags: []tuiFlag{
+		{Name: "status", Summary: "List local/remote master and worker status", Flags: []flagSpec{
 			{Name: "http-base", Value: "url", Summary: "Master HTTP base to query"},
 			{Name: "json", Summary: "Print JSON"},
 			{Name: "v", Summary: "Verbose output"},
 			{Name: "gocache", Value: "dir", Summary: "Managed runtime dir to inspect first"},
 		}},
 	}},
-	"maintenance": {Subcommands: []tuiSubcommand{
-		{Name: "submit", Summary: "Start orphan cleanup or compaction", Flags: []tuiFlag{
+	"maintenance": {Subcommands: []subcommandSpec{
+		{Name: "submit", Summary: "Start orphan cleanup or compaction", Flags: []flagSpec{
 			{Name: "job", Value: "job-id", Summary: "Job whose Iceberg table to maintain (required)"},
 			{Name: "operation", Value: "op", Summary: "Operation (required)", Values: []string{"orphan_cleanup", "compaction"}},
 			{Name: "execute", Summary: "Really delete/compact; without it this is a dry run"},
@@ -105,34 +105,34 @@ var tuiCompletionSpecs = map[string]tuiCommandSpec{
 			{Name: "max-input-files", Value: "n", Summary: "compaction: most files one operation rewrites"},
 			{Name: "master-http", Value: "url", Summary: "Master HTTP base URL (the shell passes its own)"},
 		}},
-		{Name: "show", Summary: "Show one operation and its report", Flags: []tuiFlag{
+		{Name: "show", Summary: "Show one operation and its report", Flags: []flagSpec{
 			{Name: "json", Summary: "Print the full operation and report as JSON"},
 			{Name: "master-http", Value: "url", Summary: "Master HTTP base URL (the shell passes its own)"},
 		}},
-		{Name: "list", Summary: "List maintenance operations", Flags: []tuiFlag{
+		{Name: "list", Summary: "List maintenance operations", Flags: []flagSpec{
 			{Name: "job", Value: "job-id", Summary: "Only this job's operations"},
 			{Name: "master-http", Value: "url", Summary: "Master HTTP base URL (the shell passes its own)"},
 		}},
 	}},
 }
 
-// tuiMenuItem is one row of the completion menu. Insert is the whole input
+// menuItem is one row of the completion menu. Insert is the whole input
 // line after choosing the item, so applying it is a single SetValue.
-type tuiMenuItem struct {
+type menuItem struct {
 	Label   string
 	Summary string
 	Insert  string
 }
 
-// tuiMenuItems computes the completion menu for the current input line:
+// menuItemsFor computes the completion menu for the current input line:
 // commands while the first word is typed, then subcommands, positional
 // choices, flags, and finally the accepted values of an enum flag.
-func tuiMenuItems(line string) []tuiMenuItem {
+func menuItemsFor(line string) []menuItem {
 	trimmed := strings.TrimLeft(line, " ")
 	if !strings.HasPrefix(trimmed, "/") {
 		return nil
 	}
-	words, err := splitTUIArgs(trimmed)
+	words, err := splitArgs(trimmed)
 	if err != nil || len(words) == 0 {
 		return nil // an open quote: the user is typing a value
 	}
@@ -145,21 +145,21 @@ func tuiMenuItems(line string) []tuiMenuItem {
 		partial = words[len(words)-1]
 		done = words[:len(words)-1]
 	}
-	prefix := rebuildTUILine(done)
+	prefix := rebuildLine(done)
 
 	if len(done) == 0 {
-		var items []tuiMenuItem
-		for _, c := range matchTUICommands(strings.TrimPrefix(partial, "/")) {
-			items = append(items, tuiMenuItem{Label: c.Usage, Summary: c.Summary, Insert: "/" + c.Name + " "})
+		var items []menuItem
+		for _, c := range matchCommands(strings.TrimPrefix(partial, "/")) {
+			items = append(items, menuItem{Label: c.Usage, Summary: c.Summary, Insert: "/" + c.Name + " "})
 		}
 		return items
 	}
 
-	cmd, ok := lookupTUICommand(strings.TrimPrefix(done[0], "/"))
+	cmd, ok := lookupCommand(strings.TrimPrefix(done[0], "/"))
 	if !ok {
 		return nil
 	}
-	spec, ok := tuiCompletionSpecs[cmd.Name]
+	spec, ok := completionSpecs[cmd.Name]
 	if !ok {
 		return nil
 	}
@@ -169,15 +169,15 @@ func tuiMenuItems(line string) []tuiMenuItem {
 	var choices []string
 	if len(spec.Subcommands) > 0 {
 		if len(rest) == 0 {
-			var items []tuiMenuItem
+			var items []menuItem
 			for _, s := range spec.Subcommands {
 				if !s.Hidden && strings.HasPrefix(s.Name, partial) {
-					items = append(items, tuiMenuItem{Label: s.Name, Summary: s.Summary, Insert: prefix + s.Name + " "})
+					items = append(items, menuItem{Label: s.Name, Summary: s.Summary, Insert: prefix + s.Name + " "})
 				}
 			}
 			return items
 		}
-		sub, ok := findTUISubcommand(spec.Subcommands, rest[0])
+		sub, ok := findSubcommand(spec.Subcommands, rest[0])
 		if !ok {
 			return nil
 		}
@@ -187,22 +187,22 @@ func tuiMenuItems(line string) []tuiMenuItem {
 	// A value flag that is still waiting for its value: offer its choices,
 	// or nothing at all for free-form values like paths and URLs.
 	if n := len(rest); n > 0 {
-		if f, ok := findTUIFlag(flags, rest[n-1]); ok && f.Value != "" && !strings.Contains(rest[n-1], "=") {
-			var items []tuiMenuItem
+		if f, ok := findFlag(flags, rest[n-1]); ok && f.Value != "" && !strings.Contains(rest[n-1], "=") {
+			var items []menuItem
 			for _, v := range f.Values {
 				if strings.HasPrefix(v, partial) {
-					items = append(items, tuiMenuItem{Label: v, Summary: "value for --" + f.Name, Insert: prefix + v + " "})
+					items = append(items, menuItem{Label: v, Summary: "value for --" + f.Name, Insert: prefix + v + " "})
 				}
 			}
 			return items
 		}
 	}
 
-	var items []tuiMenuItem
+	var items []menuItem
 	if !strings.HasPrefix(partial, "-") {
 		for _, c := range choices {
 			if strings.HasPrefix(c, partial) && !containsWord(rest, c) {
-				items = append(items, tuiMenuItem{Label: c, Summary: "component", Insert: prefix + c + " "})
+				items = append(items, menuItem{Label: c, Summary: "component", Insert: prefix + c + " "})
 			}
 		}
 	}
@@ -216,25 +216,25 @@ func tuiMenuItems(line string) []tuiMenuItem {
 			if f.Value != "" {
 				label += " <" + f.Value + ">"
 			}
-			items = append(items, tuiMenuItem{Label: label, Summary: f.Summary, Insert: prefix + "--" + f.Name + " "})
+			items = append(items, menuItem{Label: label, Summary: f.Summary, Insert: prefix + "--" + f.Name + " "})
 		}
 	}
 	return items
 }
 
-func findTUISubcommand(subs []tuiSubcommand, name string) (tuiSubcommand, bool) {
+func findSubcommand(subs []subcommandSpec, name string) (subcommandSpec, bool) {
 	for _, s := range subs {
 		if s.Name == name {
 			return s, true
 		}
 	}
-	return tuiSubcommand{}, false
+	return subcommandSpec{}, false
 }
 
-// findTUIFlag resolves a typed word such as "--action" or "-action=x".
-func findTUIFlag(flags []tuiFlag, word string) (tuiFlag, bool) {
+// findFlag resolves a typed word such as "--action" or "-action=x".
+func findFlag(flags []flagSpec, word string) (flagSpec, bool) {
 	if !strings.HasPrefix(word, "-") {
-		return tuiFlag{}, false
+		return flagSpec{}, false
 	}
 	name, _, _ := strings.Cut(strings.TrimLeft(word, "-"), "=")
 	for _, f := range flags {
@@ -242,7 +242,7 @@ func findTUIFlag(flags []tuiFlag, word string) (tuiFlag, bool) {
 			return f, true
 		}
 	}
-	return tuiFlag{}, false
+	return flagSpec{}, false
 }
 
 func containsWord(words []string, w string) bool {
@@ -254,9 +254,9 @@ func containsWord(words []string, w string) bool {
 	return false
 }
 
-// rebuildTUILine joins finished words back into a line ending in a space,
+// rebuildLine joins finished words back into a line ending in a space,
 // quoting any word that needs it so the line parses to the same words.
-func rebuildTUILine(words []string) string {
+func rebuildLine(words []string) string {
 	if len(words) == 0 {
 		return ""
 	}

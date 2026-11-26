@@ -1,7 +1,11 @@
-package orabbitcli
+package tui
 
 import (
-	"context"
+	"io"
+	"os"
+
+	"github.com/LevonGhukas/O_Rabbit/internal/orabbitcli"
+
 	"regexp"
 	"sort"
 	"strings"
@@ -10,7 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func menuLabels(items []tuiMenuItem) []string {
+func menuLabels(items []menuItem) []string {
 	out := make([]string, len(items))
 	for i, it := range items {
 		out[i] = it.Label
@@ -18,7 +22,7 @@ func menuLabels(items []tuiMenuItem) []string {
 	return out
 }
 
-func menuInserts(items []tuiMenuItem) []string {
+func menuInserts(items []menuItem) []string {
 	out := make([]string, len(items))
 	for i, it := range items {
 		out[i] = it.Insert
@@ -26,31 +30,31 @@ func menuInserts(items []tuiMenuItem) []string {
 	return out
 }
 
-func TestTUIMenuItemsCommands(t *testing.T) {
-	if items := tuiMenuItems(""); items != nil {
+func TestMenuItemsCommands(t *testing.T) {
+	if items := menuItemsFor(""); items != nil {
 		t.Fatal("empty line should have no menu (arrows browse history)")
 	}
-	if items := tuiMenuItems("runs"); items != nil {
+	if items := menuItemsFor("runs"); items != nil {
 		t.Fatal("menu appears only after a leading slash")
 	}
-	all := tuiMenuItems("/")
-	if len(all) != len(tuiCommands) {
-		t.Fatalf("'/' lists %d commands, want %d", len(all), len(tuiCommands))
+	all := menuItemsFor("/")
+	if len(all) != len(commands) {
+		t.Fatalf("'/' lists %d commands, want %d", len(all), len(commands))
 	}
-	got := menuInserts(tuiMenuItems("/wa"))
+	got := menuInserts(menuItemsFor("/wa"))
 	if len(got) != 1 || got[0] != "/watch " {
 		t.Fatalf("/wa inserts %v", got)
 	}
 }
 
-func TestTUIMenuItemsSubcommandFlags(t *testing.T) {
-	items := tuiMenuItems("/stack start --")
+func TestMenuItemsSubcommandFlags(t *testing.T) {
+	items := menuItemsFor("/stack start --")
 	if want := len(subFlags(t, "stack", "start")); len(items) != want {
 		t.Fatalf("/stack start -- lists %d flags, want %d", len(items), want)
 	}
 	// Prefix filtering works with one or two dashes.
 	for _, line := range []string{"/stack start --worker-", "/stack start -worker-"} {
-		labels := menuLabels(tuiMenuItems(line))
+		labels := menuLabels(menuItemsFor(line))
 		for _, l := range labels {
 			if !strings.HasPrefix(l, "--worker-") {
 				t.Fatalf("%q offered %q", line, l)
@@ -61,84 +65,84 @@ func TestTUIMenuItemsSubcommandFlags(t *testing.T) {
 		}
 	}
 	// Choosing keeps earlier words and adds the flag.
-	got := menuInserts(tuiMenuItems("/stack start --quiet --verb"))
+	got := menuInserts(menuItemsFor("/stack start --quiet --verb"))
 	if len(got) != 1 || got[0] != "/stack start --quiet --verbose " {
 		t.Fatalf("inserts = %v", got)
 	}
 	// Flags already used are not offered again.
-	for _, l := range menuLabels(tuiMenuItems("/stack start --quiet ")) {
+	for _, l := range menuLabels(menuItemsFor("/stack start --quiet ")) {
 		if l == "--quiet" {
 			t.Fatal("--quiet offered twice")
 		}
 	}
 }
 
-func TestTUIMenuItemsFlagValues(t *testing.T) {
-	got := menuLabels(tuiMenuItems("/stack start --insecure "))
+func TestMenuItemsFlagValues(t *testing.T) {
+	got := menuLabels(menuItemsFor("/stack start --insecure "))
 	if strings.Join(got, ",") != "true,false" {
 		t.Fatalf("--insecure values = %v", got)
 	}
-	got = menuInserts(tuiMenuItems("/stack start --worker-log-format t"))
+	got = menuInserts(menuItemsFor("/stack start --worker-log-format t"))
 	if len(got) != 1 || got[0] != "/stack start --worker-log-format text " {
 		t.Fatalf("--worker-log-format t inserts = %v", got)
 	}
-	got = menuLabels(tuiMenuItems("/recover r1 --action "))
+	got = menuLabels(menuItemsFor("/recover r1 --action "))
 	if len(got) != 4 {
 		t.Fatalf("--action values = %v", got)
 	}
 	// Free-form values (URLs, paths) get no menu: the user types them.
-	if items := tuiMenuItems("/stack start --db "); items != nil {
+	if items := menuItemsFor("/stack start --db "); items != nil {
 		t.Fatalf("--db offered %v", menuLabels(items))
 	}
 	// With --flag=value the value is done; the next flags are offered.
-	if items := tuiMenuItems("/stack start --insecure=true "); len(items) == 0 {
+	if items := menuItemsFor("/stack start --insecure=true "); len(items) == 0 {
 		t.Fatal("no flags offered after --flag=value")
 	}
 	// After the value, flags come back.
-	if items := tuiMenuItems("/stack start --insecure true "); len(items) == 0 {
+	if items := menuItemsFor("/stack start --insecure true "); len(items) == 0 {
 		t.Fatal("no flags offered after a flag value")
 	}
 }
 
-func TestTUIMenuItemsSubcommands(t *testing.T) {
-	got := menuLabels(tuiMenuItems("/stack "))
+func TestMenuItemsSubcommands(t *testing.T) {
+	got := menuLabels(menuItemsFor("/stack "))
 	if strings.Join(got, ",") != "start,stop,status" {
 		t.Fatalf("/stack subcommands = %v", got)
 	}
-	got = menuLabels(tuiMenuItems("/stack st"))
+	got = menuLabels(menuItemsFor("/stack st"))
 	if len(got) != 3 {
 		t.Fatalf("/stack st = %v", got)
 	}
 	// Positional components come before flags, and are not repeated.
-	got = menuLabels(tuiMenuItems("/stack start "))
+	got = menuLabels(menuItemsFor("/stack start "))
 	if got[0] != "master" || got[1] != "worker" {
 		t.Fatalf("/stack start = %v", got[:2])
 	}
-	got = menuLabels(tuiMenuItems("/stack start master "))
+	got = menuLabels(menuItemsFor("/stack start master "))
 	if got[0] != "worker" {
 		t.Fatalf("/stack start master = %v", got[:1])
 	}
-	got = menuLabels(tuiMenuItems("/maintenance submit --operation "))
+	got = menuLabels(menuItemsFor("/maintenance submit --operation "))
 	if strings.Join(got, ",") != "orphan_cleanup,compaction" {
 		t.Fatalf("--operation values = %v", got)
 	}
-	if items := tuiMenuItems("/stack nope "); items != nil {
+	if items := menuItemsFor("/stack nope "); items != nil {
 		t.Fatal("unknown subcommand should have no menu")
 	}
 }
 
-func TestTUIMenuItemsNoSpec(t *testing.T) {
+func TestMenuItemsNoSpec(t *testing.T) {
 	for _, line := range []string{"/watch ", "/show ", "/zzz ", `/recover r1 --reason "open`} {
-		if items := tuiMenuItems(line); items != nil {
+		if items := menuItemsFor(line); items != nil {
 			t.Errorf("%q offered %v", line, menuLabels(items))
 		}
 	}
 }
 
-func TestRebuildTUILineRoundTrips(t *testing.T) {
+func TestRebuildLineRoundTrips(t *testing.T) {
 	words := []string{"/recover", "r1", "--reason", `stale "commit" \ now`, ""}
-	line := rebuildTUILine(words)
-	got, err := splitTUIArgs(line)
+	line := rebuildLine(words)
+	got, err := splitArgs(line)
 	if err != nil {
 		t.Fatalf("split: %v", err)
 	}
@@ -149,8 +153,8 @@ func TestRebuildTUILineRoundTrips(t *testing.T) {
 
 // --- key handling ----------------------------------------------------------
 
-func TestTUIArrowsNavigateMenu(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
+func TestArrowsNavigateMenu(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
 	m.pushHistory("/status")
 	m.input.SetValue("/")
 	up := tea.KeyMsg{Type: tea.KeyUp}
@@ -164,19 +168,19 @@ func TestTUIArrowsNavigateMenu(t *testing.T) {
 	m, _ = update(t, m, up)
 	m, _ = update(t, m, up)
 	m, _ = update(t, m, up) // wraps to the last command
-	if m.menuIndex != len(tuiCommands)-1 {
+	if m.menuIndex != len(commands)-1 {
 		t.Fatalf("wrap-around index = %d", m.menuIndex)
 	}
 
 	// Enter picks the highlighted command instead of running "/".
 	m, cmd := update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
-	if want := "/" + tuiCommands[len(tuiCommands)-1].Name + " "; m.input.Value() != want || cmd != nil {
+	if want := "/" + commands[len(commands)-1].Name + " "; m.input.Value() != want || cmd != nil {
 		t.Fatalf("enter inserted %q, want %q", m.input.Value(), want)
 	}
 }
 
-func TestTUITabAndEnterPickFlag(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
+func TestTabAndEnterPickFlag(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
 	m.input.SetValue("/stack start --verb")
 	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyTab})
 	if m.input.Value() != "/stack start --verbose " {
@@ -191,8 +195,8 @@ func TestTUITabAndEnterPickFlag(t *testing.T) {
 	}
 }
 
-func TestTUIEnterCompletesPartialCommand(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
+func TestEnterCompletesPartialCommand(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
 	m.input.SetValue("/sta")
 	m, cmd := update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
 	if m.input.Value() != "/status " || cmd != nil {
@@ -205,8 +209,8 @@ func TestTUIEnterCompletesPartialCommand(t *testing.T) {
 	}
 }
 
-func TestTUIHistoryHidesMenu(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
+func TestHistoryHidesMenu(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
 	m.pushHistory("/runs")
 	m.pushHistory("/status")
 	up := tea.KeyMsg{Type: tea.KeyUp}
@@ -226,16 +230,16 @@ func TestTUIHistoryHidesMenu(t *testing.T) {
 	}
 }
 
-func TestTUIMenuScrollWindow(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
+func TestMenuScrollWindow(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
 	m.input.SetValue("/stack start --")
-	n := len(tuiMenuItems("/stack start --"))
+	n := len(menuItemsFor("/stack start --"))
 	for range n - 1 { // move to the last flag
 		m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyDown})
 	}
 	out := m.renderSuggestions()
-	if rows := strings.Count(out, "\n"); rows > tuiMenuMaxRows+1 {
-		t.Fatalf("menu has %d rows, cap is %d plus a footer", rows, tuiMenuMaxRows)
+	if rows := strings.Count(out, "\n"); rows > menuMaxRows+1 {
+		t.Fatalf("menu has %d rows, cap is %d plus a footer", rows, menuMaxRows)
 	}
 	flags := subFlags(t, "stack", "start")
 	last := flags[len(flags)-1].Name
@@ -248,10 +252,13 @@ func TestTUIMenuScrollWindow(t *testing.T) {
 
 var helpFlagLine = regexp.MustCompile(`(?m)^  -([A-Za-z0-9-]+)`)
 
-// helpFlags runs a CLI command with --help and returns the flags it lists.
-func helpFlags(t *testing.T, run func(context.Context, []string) int) []string {
+// helpFlags runs `orabbit-client <command...> --help` through the real CLI
+// and returns the flags it lists.
+func helpFlags(t *testing.T, command string) []string {
 	t.Helper()
-	_, stdout, _ := captureCommandOutput(t, func() int { return run(context.Background(), []string{"--help"}) })
+	stdout := captureStdout(t, func() {
+		orabbitcli.Main(append(strings.Fields(command), "--help"))
+	})
 	var names []string
 	for _, m := range helpFlagLine.FindAllStringSubmatch(stdout, -1) {
 		names = append(names, m[1])
@@ -260,7 +267,7 @@ func helpFlags(t *testing.T, run func(context.Context, []string) int) []string {
 	return names
 }
 
-func specFlagNames(flags []tuiFlag) []string {
+func specFlagNames(flags []flagSpec) []string {
 	names := make([]string, len(flags))
 	for i, f := range flags {
 		names[i] = f.Name
@@ -269,12 +276,12 @@ func specFlagNames(flags []tuiFlag) []string {
 	return names
 }
 
-// TestTUICompletionMatchesRealFlags fails when a CLI flag is added, removed
-// or renamed without updating tuiCompletionSpecs, so the menu never offers a
+// TestCompletionMatchesRealFlags fails when a CLI flag is added, removed
+// or renamed without updating completionSpecs, so the menu never offers a
 // flag the command would reject, or misses a new one.
-func TestTUICompletionMatchesRealFlags(t *testing.T) {
-	sub := func(cmd, name string) []tuiFlag {
-		s, ok := findTUISubcommand(tuiCompletionSpecs[cmd].Subcommands, name)
+func TestCompletionMatchesRealFlags(t *testing.T) {
+	sub := func(cmd, name string) []flagSpec {
+		s, ok := findSubcommand(completionSpecs[cmd].Subcommands, name)
 		if !ok {
 			t.Fatalf("no spec for %s %s", cmd, name)
 		}
@@ -282,21 +289,20 @@ func TestTUICompletionMatchesRealFlags(t *testing.T) {
 	}
 	cases := []struct {
 		name  string
-		run   func(context.Context, []string) int
-		flags []tuiFlag
+		flags []flagSpec
 	}{
-		{"run submit", cmdRunSubmit, tuiCompletionSpecs["submit"].Flags},
-		{"run recover", cmdRunRecover, tuiCompletionSpecs["recover"].Flags},
-		{"stack start", cmdStart, sub("stack", "start")},
-		{"stack stop", cmdStop, sub("stack", "stop")},
-		{"stack status", cmdStackStatus, sub("stack", "status")},
-		{"maintenance submit", cmdMaintenanceSubmit, sub("maintenance", "submit")},
-		{"maintenance show", cmdMaintenanceShow, sub("maintenance", "show")},
-		{"maintenance list", cmdMaintenanceList, sub("maintenance", "list")},
+		{"run submit", completionSpecs["submit"].Flags},
+		{"run recover", completionSpecs["recover"].Flags},
+		{"stack start", sub("stack", "start")},
+		{"stack stop", sub("stack", "stop")},
+		{"stack status", sub("stack", "status")},
+		{"maintenance submit", sub("maintenance", "submit")},
+		{"maintenance show", sub("maintenance", "show")},
+		{"maintenance list", sub("maintenance", "list")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			real := helpFlags(t, tc.run)
+			real := helpFlags(t, tc.name)
 			if len(real) == 0 {
 				t.Fatal("help printed no flags; did the help format change?")
 			}
@@ -307,26 +313,26 @@ func TestTUICompletionMatchesRealFlags(t *testing.T) {
 	}
 }
 
-func TestTUIRunInteractiveChoice(t *testing.T) {
+func TestRunInteractiveChoice(t *testing.T) {
 	// Only "interactive" is offered; the old "classic" also opens the wizard.
-	got := menuLabels(tuiMenuItems("/run "))
+	got := menuLabels(menuItemsFor("/run "))
 	if strings.Join(got, ",") != "interactive" {
 		t.Fatalf("/run menu = %v, want only interactive", got)
 	}
-	got = menuInserts(tuiMenuItems("/run int"))
+	got = menuInserts(menuItemsFor("/run int"))
 	if len(got) != 1 || got[0] != "/run interactive " {
 		t.Fatalf("/run int inserts %v", got)
 	}
-	if items := tuiMenuItems("/run interactive "); items != nil {
+	if items := menuItemsFor("/run interactive "); items != nil {
 		t.Fatalf("the wizard takes no flags, menu offered %v", menuLabels(items))
 	}
-	if items := tuiMenuItems("/run classic "); items != nil {
+	if items := menuItemsFor("/run classic "); items != nil {
 		t.Fatalf("/run classic should offer no flags, got %v", menuLabels(items))
 	}
 }
 
-func TestTUIGhostSuggestion(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
+func TestGhostSuggestion(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
 	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/wa")})
 	if got := m.input.AvailableSuggestions(); len(got) != 1 || got[0] != "/watch " {
 		t.Fatalf("ghost suggestion = %v, want /watch", got)
@@ -339,11 +345,31 @@ func TestTUIGhostSuggestion(t *testing.T) {
 }
 
 // subFlags returns the completion flags of a subcommand such as `stack start`.
-func subFlags(t *testing.T, cmd, name string) []tuiFlag {
+func subFlags(t *testing.T, cmd, name string) []flagSpec {
 	t.Helper()
-	s, ok := findTUISubcommand(tuiCompletionSpecs[cmd].Subcommands, name)
+	s, ok := findSubcommand(completionSpecs[cmd].Subcommands, name)
 	if !ok {
 		t.Fatalf("no subcommand %s %s", cmd, name)
 	}
 	return s.Flags
+}
+
+// captureStdout returns what fn writes to os.Stdout.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	done := make(chan string)
+	go func() {
+		b, _ := io.ReadAll(r)
+		done <- string(b)
+	}()
+	defer func() { os.Stdout = old }()
+	fn()
+	_ = w.Close()
+	return <-done
 }

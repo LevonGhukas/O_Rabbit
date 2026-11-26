@@ -1,4 +1,4 @@
-package orabbitcli
+package tui
 
 import (
 	"errors"
@@ -36,8 +36,8 @@ func fakeInfoMaster(t *testing.T) *httptest.Server {
 	return srv
 }
 
-func TestTUIDiagnoseAcceptsJobNameOrID(t *testing.T) {
-	m := newTestTUIModel(fakeInfoMaster(t).URL)
+func TestDiagnoseAcceptsJobNameOrID(t *testing.T) {
+	m := newTestModel(fakeInfoMaster(t).URL)
 	for _, ref := range []string{"r2", "j1", "orders"} {
 		out := fmtMsg(m.diagnoseCmd(ref, false)())
 		for _, want := range []string{"Diagnosis · run r2", "FAILED 1 · SUCCEEDED 3", "NETWORK_CONNECTION_FAILED", "task 2 FAILED, attempts 3/3", "fix the source"} {
@@ -49,7 +49,7 @@ func TestTUIDiagnoseAcceptsJobNameOrID(t *testing.T) {
 			t.Errorf("/diagnose %s should say which run was picked", ref)
 		}
 	}
-	if res := m.diagnoseCmd("nope", false)().(tuiResultMsg); res.err == nil || !strings.Contains(res.err.Error(), "neither a run ID nor a job") {
+	if res := m.diagnoseCmd("nope", false)().(resultMsg); res.err == nil || !strings.Contains(res.err.Error(), "neither a run ID nor a job") {
 		t.Errorf("unknown ref: %v", res.err)
 	}
 	if out := fmtMsg(m.diagnoseCmd("r2", true)()); !strings.Contains(out, `"run_id": "r2"`) {
@@ -57,8 +57,8 @@ func TestTUIDiagnoseAcceptsJobNameOrID(t *testing.T) {
 	}
 }
 
-func TestTUIRunsShowsJobNamesAndFilters(t *testing.T) {
-	m := newTestTUIModel(fakeInfoMaster(t).URL)
+func TestRunsShowsJobNamesAndFilters(t *testing.T) {
+	m := newTestModel(fakeInfoMaster(t).URL)
 	out := fmtMsg(m.listRunsCmd(10, "")())
 	for _, want := range []string{"orders", "users", "2026-11-25 14:02:14", "└ dial"} {
 		if !strings.Contains(out, want) {
@@ -74,8 +74,8 @@ func TestTUIRunsShowsJobNamesAndFilters(t *testing.T) {
 	}
 }
 
-func TestTUICommandHelp(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
+func TestCommandHelp(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
 	for line, want := range map[string]string{
 		"/watch --help":       "/watch <run-id>",
 		"/maintenance -h":     "--operation <op>",
@@ -146,12 +146,17 @@ func TestFitWidthKeepsWordsWholeAndColored(t *testing.T) {
 
 // The live view (watch line, prompt, footer) must never be as wide as the
 // terminal, or Bubble Tea leaves pieces of the old frame on screen.
-func TestTUIViewFitsTerminal(t *testing.T) {
-	m := newTestTUIModel("http://127.0.0.1:1")
+func TestViewFitsTerminal(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
 	m.width = 60
-	m.watch = &tuiWatch{runID: "42c244d7694d6fa087c4f51b1cac20d5", loaded: true, status: "RUNNING"}
+	m.watch = &watchState{runID: "42c244d7694d6fa087c4f51b1cac20d5", loaded: true, status: "RUNNING"}
 	m.watch.lastErr = errors.New(strings.Repeat("very long transient error ", 10))
-	for _, line := range strings.Split(m.View(), "\n") {
+	lines := strings.Split(m.View(), "\n")
+	for _, line := range lines {
+		// A lone border character means fitWidth split a box.
+		if trimmed := strings.TrimSpace(ansi.Strip(line)); trimmed == "╮" || trimmed == "│" || trimmed == "╯" {
+			t.Fatalf("box border was wrapped onto its own line:\n%s", strings.Join(lines, "\n"))
+		}
 		if w := ansi.StringWidth(line); w >= 60 {
 			t.Fatalf("view line is %d wide on a 60-column terminal: %q", w, line)
 		}
