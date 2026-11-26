@@ -636,7 +636,7 @@ func (m tuiModel) handleWatchUpdate(msg tuiWatchMsg) (tea.Model, tea.Cmd) {
 		if s := msg.details.Run.ErrorSummary; s != nil && strings.TrimSpace(*s) != "" {
 			out += "\n" + tuiStyleErr.Render("  error: "+strings.TrimSpace(*s))
 		}
-		return m, tea.Println(out)
+		return m, tea.Println(fitWidth(out, m.width))
 	}
 	return m, m.watchTickCmd(msg.runID)
 }
@@ -646,7 +646,7 @@ func (m tuiModel) View() string {
 		return ""
 	}
 	if m.wizard != nil {
-		return renderBox(m.width, tuiColorAccent, "", m.wizard.view()) + "\n" + m.renderFooter()
+		return fitWidth(renderBox(m.width, tuiColorAccent, "", m.wizard.view())+"\n"+m.renderFooter(), m.width)
 	}
 	var b strings.Builder
 
@@ -674,7 +674,10 @@ func (m tuiModel) View() string {
 		b.WriteString(m.renderSuggestions())
 	}
 	b.WriteString(m.renderFooter())
-	return b.String()
+	// Every line must be narrower than the terminal: Bubble Tea erases the
+	// previous frame by counting lines, and a line the terminal wraps by
+	// itself leaves old text behind (e.g. "rows" + "s watching").
+	return fitWidth(b.String(), m.width)
 }
 
 // tuiMenuMaxRows caps the menu height; the visible window follows the

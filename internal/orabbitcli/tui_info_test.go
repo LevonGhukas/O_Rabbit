@@ -1,6 +1,7 @@
 package orabbitcli
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -139,6 +140,20 @@ func TestFitWidthKeepsWordsWholeAndColored(t *testing.T) {
 		}
 		if ansi.StringWidth(line) >= 30 {
 			t.Errorf("line too wide: %q", line)
+		}
+	}
+}
+
+// The live view (watch line, prompt, footer) must never be as wide as the
+// terminal, or Bubble Tea leaves pieces of the old frame on screen.
+func TestTUIViewFitsTerminal(t *testing.T) {
+	m := newTestTUIModel("http://127.0.0.1:1")
+	m.width = 60
+	m.watch = &tuiWatch{runID: "42c244d7694d6fa087c4f51b1cac20d5", loaded: true, status: "RUNNING"}
+	m.watch.lastErr = errors.New(strings.Repeat("very long transient error ", 10))
+	for _, line := range strings.Split(m.View(), "\n") {
+		if w := ansi.StringWidth(line); w >= 60 {
+			t.Fatalf("view line is %d wide on a 60-column terminal: %q", w, line)
 		}
 	}
 }
