@@ -272,6 +272,13 @@ func renderRunDetails(width int, d orabbitcli.RunDetails) string {
 		fmt.Fprintf(&b, "   %s %s", styleDim.Render("finished:"), shortTime(*d.Run.FinishedAt))
 	}
 	b.WriteString("\n" + formatRunProgressLine(d.Run.Status, p, 24) + "\n")
+	if d.Run.CatalogStatus != "" {
+		b.WriteString(styleDim.Render("iceberg: ") + " " + d.Run.CatalogStatus)
+		if d.Run.RegistrationLastErrorClass != "" {
+			b.WriteString(" (" + d.Run.RegistrationLastErrorClass + ")")
+		}
+		b.WriteString("\n")
+	}
 	if d.Run.ErrorSummary != nil && *d.Run.ErrorSummary != "" {
 		b.WriteString(styleErr.Render("error: ") + redactDSN(oneLine(*d.Run.ErrorSummary)) + "\n")
 	}

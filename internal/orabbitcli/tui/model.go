@@ -119,7 +119,19 @@ type watchState struct {
 	prog    runProgress
 	loaded  bool
 	lastErr error
+
+	// iceberg is set when the run was submitted with registration, so the
+	// watch waits for it even before the master has recorded one.
+	iceberg      bool
+	icebergTable string
+	run          orabbitcli.RunState
+	// succeededAt is when the export finished; registration starts after.
+	succeededAt time.Time
 }
+
+// registering reports whether the export is done and /watch is now waiting
+// for Iceberg registration.
+func (w *watchState) registering() bool { return !w.succeededAt.IsZero() }
 
 type model struct {
 	ctx      context.Context
@@ -200,7 +212,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Println(renderErrorBlock(m.width, "Submit failed", msg.err) + "\n" +
 				styleDim.Render("  /run reopens the wizard with your answers"))
 		}
-		m.watch = &watchState{runID: msg.runID}
+		m.watch = &watchState{runID: msg.runID, iceberg: msg.iceberg, icebergTable: msg.icebergTable}
 		note := styleOK.Render(fmt.Sprintf("✓ submitted run %s (%d tasks) — watching it, Esc stops watching", msg.runID, msg.tasks))
 		return m, tea.Sequence(tea.Println(note), m.fetchWatchCmd(msg.runID))
 
@@ -630,7 +642,21 @@ func (m model) handleWatchUpdate(msg watchMsg) (tea.Model, tea.Cmd) {
 	w.status = msg.details.Run.Status
 	w.prog = summarizeRunProgress(msg.details)
 
+	w.run = msg.details.Run
+
 	if isTerminalRunStatus(w.status) {
+		// A successful export with Iceberg registration is not finished yet:
+		// the master registers the files afterwards, and `run submit` waits
+		// for that too. Keep watching until the catalog status is final.
+		if strings.EqualFold(w.status, "SUCCEEDED") && (w.iceberg || w.run.CatalogStatus != "") {
+			if w.succeededAt.IsZero() {
+				w.succeededAt = time.Now()
+			}
+			waitedOut := w.run.CatalogStatus == "" && time.Since(w.succeededAt) > registrationTimeout
+			if !registrationFinal(w.run.CatalogStatus) && !waitedOut {
+				return m, m.watchTickCmd(msg.runID)
+			}
+		}
 		m.watch = nil
 		line := "Run " + msg.runID + "  " + formatRunProgressLine(w.status, w.prog, progressWidth)
 		style := styleOK
@@ -639,7 +665,10 @@ func (m model) handleWatchUpdate(msg watchMsg) (tea.Model, tea.Cmd) {
 		}
 		out := style.Render(line)
 		if s := msg.details.Run.ErrorSummary; s != nil && strings.TrimSpace(*s) != "" {
-			out += "\n" + styleErr.Render("  error: "+strings.TrimSpace(*s))
+			out += "\n" + styleErr.Render("  error: "+redactDSN(strings.TrimSpace(*s)))
+		}
+		if w.registering() {
+			out += "\n" + formatRegistrationLine(w.run, w.icebergTable)
 		}
 		return m, tea.Println(fitWidth(out, m.width))
 	}
@@ -661,6 +690,13 @@ func (m model) View() string {
 		b.WriteString(m.spinner.View() + " Run " + w.runID + "  ")
 		if w.loaded {
 			b.WriteString(formatRunProgressLine(w.status, w.prog, progressWidth))
+			if w.registering() {
+				state := w.run.CatalogStatus
+				if state == "" {
+					state = "waiting for the master to start it"
+				}
+				b.WriteString("\n  " + styleWarn.Render("Iceberg registration: "+state+"…"))
+			}
 		} else {
 			b.WriteString(styleDim.Render("loading…"))
 		}

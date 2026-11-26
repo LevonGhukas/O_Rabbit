@@ -5,6 +5,7 @@ import (
 
 	"fmt"
 	"strings"
+	"time"
 )
 
 // runProgress is a task-level summary of one run, used by /watch.
@@ -12,6 +13,7 @@ type runProgress struct {
 	Total    int
 	Done     int // tasks in a terminal state (succeeded, failed or canceled)
 	Failed   int
+	Canceled int
 	Running  int
 	RowsRead int64
 }
@@ -23,9 +25,12 @@ func summarizeRunProgress(d orabbitcli.RunDetails) runProgress {
 		switch strings.ToUpper(strings.TrimSpace(t.Status)) {
 		case "SUCCEEDED":
 			p.Done++
-		case "FAILED", "CANCELED":
+		case "FAILED":
 			p.Done++
 			p.Failed++
+		case "CANCELED":
+			p.Done++
+			p.Canceled++
 		case "RUNNING":
 			p.Running++
 		}
@@ -78,6 +83,9 @@ func formatRunProgressLine(status string, p runProgress, barWidth int) string {
 	if p.Failed > 0 {
 		fmt.Fprintf(&b, " · %d failed", p.Failed)
 	}
+	if p.Canceled > 0 {
+		fmt.Fprintf(&b, " · %d canceled", p.Canceled)
+	}
 	fmt.Fprintf(&b, " · %s rows", humanCount(p.RowsRead))
 	return b.String()
 }
@@ -93,4 +101,51 @@ func humanCount(n int64) string {
 		return fmt.Sprintf("%.1fk", float64(n)/1e3)
 	}
 	return fmt.Sprintf("%d", n)
+}
+
+// Iceberg registration ------------------------------------------------------
+
+// registrationTimeout bounds how long /watch waits for a registration to be
+// recorded after a successful export, so a master that never queues one
+// does not keep the shell watching forever.
+const registrationTimeout = 60 * time.Second
+
+// registrationFinal says whether a catalog status is final for /watch.
+// RETRY_REQUIRED and RECONCILING keep the master working, so the watch
+// continues; BLOCKED waits on an earlier run and is reported as such.
+func registrationFinal(status string) bool {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "REGISTERED", "FAILED", "QUARANTINED", "CANCELED", "BLOCKED":
+		return true
+	}
+	return false
+}
+
+// formatRegistrationLine is the Iceberg line under a finished run.
+func formatRegistrationLine(r orabbitcli.RunState, table string) string {
+	status := strings.ToUpper(strings.TrimSpace(r.CatalogStatus))
+	target := ""
+	if table != "" {
+		target = " " + table
+	}
+	switch status {
+	case "REGISTERED":
+		return styleOK.Render("✓ Iceberg: registered" + target)
+	case "":
+		return styleWarn.Render("! Iceberg: no registration was recorded for this run — check the master log for \"iceberg registration\"")
+	}
+	line := "Iceberg: registration " + status + target
+	if r.RegistrationLastErrorClass != "" {
+		line += " (" + r.RegistrationLastErrorClass + ")"
+	}
+	if r.RegistrationBlockedBy != "" {
+		line += ", waiting on registration " + r.RegistrationBlockedBy
+	}
+	style := styleErr
+	if status == "BLOCKED" {
+		style = styleWarn
+	}
+	return style.Render("✗ "+line) + "\n" + styleDim.Render(
+		"  the Parquet files are in S3; /diagnose "+r.ID+" explains it, and /recover "+r.ID+
+			" --action registration_retry --reason \"…\" retries it after the cause is fixed")
 }

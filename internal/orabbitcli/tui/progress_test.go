@@ -36,7 +36,7 @@ func TestSummarizeRunProgress(t *testing.T) {
 		{Status: "PENDING"},
 	}}
 	got := summarizeRunProgress(d)
-	want := runProgress{Total: 6, Done: 4, Failed: 2, Running: 1, RowsRead: 157}
+	want := runProgress{Total: 6, Done: 4, Failed: 1, Canceled: 1, Running: 1, RowsRead: 157}
 	if got != want {
 		t.Fatalf("summarizeRunProgress = %+v, want %+v", got, want)
 	}

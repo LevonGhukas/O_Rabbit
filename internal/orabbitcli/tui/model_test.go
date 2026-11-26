@@ -2,6 +2,7 @@ package tui
 
 import (
 	"github.com/LevonGhukas/O_Rabbit/internal/orabbitcli"
+	"time"
 
 	"context"
 	"errors"
@@ -329,4 +330,64 @@ func printed(cmd tea.Cmd) string {
 // unexported, but its printed text shows up in the formatted struct.
 func fmtMsg(msg tea.Msg) string {
 	return fmt.Sprintf("%v", msg)
+}
+
+// A successful export with Iceberg registration is only done once the
+// catalog status is final; /watch must keep going and report the outcome.
+func TestWatchWaitsForIcebergRegistration(t *testing.T) {
+	succeeded := func(catalog, class string) watchMsg {
+		return watchMsg{runID: "r1", details: orabbitcli.RunDetails{
+			Run:   orabbitcli.RunState{ID: "r1", Status: "SUCCEEDED", CatalogStatus: catalog, RegistrationLastErrorClass: class},
+			Tasks: []orabbitcli.TaskInfo{{Status: "SUCCEEDED"}},
+		}}
+	}
+	m := newTestModel("http://127.0.0.1:1")
+	m.watch = &watchState{runID: "r1", iceberg: true, icebergTable: "shop.orders"}
+
+	// Exported, registration not recorded yet: keep watching.
+	m, cmd := update(t, m, succeeded("", ""))
+	if m.watch == nil || cmd == nil {
+		t.Fatal("watch ended before Iceberg registration")
+	}
+	if v := m.View(); !strings.Contains(v, "Iceberg registration") {
+		t.Fatalf("view should say it waits for registration:\n%s", v)
+	}
+	// Retrying is not final either.
+	if m, _ = update(t, m, succeeded("RETRY_REQUIRED", "CATALOG_UNAVAILABLE")); m.watch == nil {
+		t.Fatal("RETRY_REQUIRED should keep the watch going")
+	}
+	// A failure ends the watch and is reported with its class and next steps.
+	m, cmd = update(t, m, succeeded("FAILED", "CATALOG_UNAVAILABLE"))
+	if m.watch != nil {
+		t.Fatal("FAILED registration should end the watch")
+	}
+	out := printed(cmd)
+	for _, want := range []string{"registration FAILED shop.orders", "CATALOG_UNAVAILABLE", "registration_retry"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in %s", want, out)
+		}
+	}
+
+	m.watch = &watchState{runID: "r1", iceberg: true, icebergTable: "shop.orders"}
+	_, cmd = update(t, m, succeeded("REGISTERED", ""))
+	if out := printed(cmd); !strings.Contains(out, "Iceberg: registered shop.orders") {
+		t.Errorf("success not reported: %s", out)
+	}
+
+	// Without registration the watch ends right at SUCCEEDED, as before.
+	m.watch = &watchState{runID: "r1"}
+	if m, _ = update(t, m, succeeded("", "")); m.watch != nil {
+		t.Fatal("a run without Iceberg should end at SUCCEEDED")
+	}
+}
+
+// If the master never records a registration, the watch gives up with a hint
+// instead of waiting forever.
+func TestWatchGivesUpWhenNoRegistrationAppears(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
+	m.watch = &watchState{runID: "r1", iceberg: true, succeededAt: time.Now().Add(-2 * registrationTimeout)}
+	_, cmd := update(t, m, watchMsg{runID: "r1", details: orabbitcli.RunDetails{Run: orabbitcli.RunState{ID: "r1", Status: "SUCCEEDED"}}})
+	if out := printed(cmd); !strings.Contains(out, "no registration was recorded") {
+		t.Errorf("expected a no-registration warning, got %s", out)
+	}
 }

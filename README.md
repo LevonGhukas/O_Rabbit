@@ -233,7 +233,9 @@ performance tuning, fetch size) and a review screen. It offers choices as
 lists, proposes names from earlier answers, prefills storage from
 `ORABBIT_DEFAULT_S3_*` when set, and hides passwords. Tab fills a field with
 its example, or completes the dim suggestion after what you typed. From the review you can submit the run, which the
-shell then watches, or save the answers as a YAML spec for `/submit` (written
+shell then watches (with Iceberg on, the watch continues until the master's
+registration is `REGISTERED` or has failed, and says which; `/show <run-id>`
+also prints the run's Iceberg status), or save the answers as a YAML spec for `/submit` (written
 to the working directory with owner-only permissions, since it holds the
 secrets). The wizard builds the same spec as `run submit` and applies the same
 validation. Before submitting it prints the configuration, and master errors

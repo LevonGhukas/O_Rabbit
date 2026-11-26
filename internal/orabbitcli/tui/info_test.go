@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"github.com/LevonGhukas/O_Rabbit/internal/orabbitcli"
+
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -160,5 +162,12 @@ func TestViewFitsTerminal(t *testing.T) {
 		if w := ansi.StringWidth(line); w >= 60 {
 			t.Fatalf("view line is %d wide on a 60-column terminal: %q", w, line)
 		}
+	}
+}
+
+func TestShowIncludesIcebergStatus(t *testing.T) {
+	d := orabbitcli.RunDetails{Run: orabbitcli.RunState{ID: "r1", Status: "SUCCEEDED", CatalogStatus: "FAILED", RegistrationLastErrorClass: "CATALOG_UNAVAILABLE"}}
+	if out := renderRunDetails(80, d); !strings.Contains(out, "FAILED (CATALOG_UNAVAILABLE)") {
+		t.Fatalf("iceberg status missing:\n%s", out)
 	}
 }

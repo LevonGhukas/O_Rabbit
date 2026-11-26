@@ -41,6 +41,15 @@ type RunState struct {
 	StartedAt    string  `json:"started_at"`
 	FinishedAt   *string `json:"finished_at"`
 	ErrorSummary *string `json:"error_summary"`
+
+	// Iceberg registration runs on the master after the export succeeds.
+	// CatalogStatus is empty until a registration exists for the run.
+	CatalogStatus              string  `json:"catalog_status,omitempty"`
+	RegistrationID             string  `json:"registration_id,omitempty"`
+	RegistrationAttempt        int     `json:"registration_attempt"`
+	RegistrationLastErrorClass string  `json:"registration_last_error_class,omitempty"`
+	RegistrationNextRetryAt    *string `json:"registration_next_retry_at,omitempty"`
+	RegistrationBlockedBy      string  `json:"registration_blocked_by,omitempty"`
 }
 
 type TaskInfo struct {

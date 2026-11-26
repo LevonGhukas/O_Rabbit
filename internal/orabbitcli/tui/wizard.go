@@ -612,9 +612,11 @@ func lipglossBold(s string) string { return styleTitle.UnsetForeground().Render(
 // --- commands the wizard triggers ------------------------------------------
 
 type wizardSubmittedMsg struct {
-	runID string
-	tasks int
-	err   error
+	runID        string
+	tasks        int
+	iceberg      bool   // registration was requested; /watch waits for it
+	icebergTable string // e.g. "shop.orders", for the result line
+	err          error
 }
 
 func (m model) submitWizardCmd(spec orabbitcli.RunSubmitFile) tea.Cmd {
@@ -623,7 +625,7 @@ func (m model) submitWizardCmd(spec orabbitcli.RunSubmitFile) tea.Cmd {
 		ctx, cancel := context.WithTimeout(m.ctx, 2*requestTimeout)
 		defer cancel()
 		runID, tasks, err := orabbitcli.SubmitRun(ctx, base, spec)
-		return wizardSubmittedMsg{runID: runID, tasks: tasks, err: err}
+		return wizardSubmittedMsg{runID: runID, tasks: tasks, iceberg: spec.Iceberg.Enabled, icebergTable: spec.Iceberg.Table, err: err}
 	}
 }
 
