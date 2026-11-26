@@ -64,7 +64,10 @@ type diagnosis struct {
 		LastErrorClass string `json:"last_error_class"`
 		BlockedBy      string `json:"blocked_by"`
 	} `json:"registration"`
-	OperatorReview      bool   `json:"operator_review_required"`
+	OperatorReview bool `json:"operator_review_required"`
+	// blockedByRun is filled in by the shell, not the master: the run whose
+	// unfinished registration holds this one back.
+	blockedByRun        string
 	SuggestedNextAction string `json:"suggested_next_action"`
 }
 
@@ -343,6 +346,18 @@ func (m model) diagnoseCmd(ref string, rawJSON bool) tea.Cmd {
 				return resultMsg{err: fmt.Errorf("read diagnosis: %w", err)}
 			}
 		}
+		if d.Registration != nil && d.Registration.BlockedBy != "" {
+			// Name the blocking run so the user can /diagnose it next.
+			if runs, err := listRuns(ctx, base, runListMax); err == nil {
+				jobID := ""
+				for _, r := range runs {
+					if r.ID == runID {
+						jobID = r.JobID
+					}
+				}
+				d.blockedByRun, _ = findRunByRegistration(ctx, base, runs, d.Registration.BlockedBy, jobID)
+			}
+		}
 		return resultMsg{text: renderDiagnosis(width, d, note)}
 	}
 }
@@ -362,12 +377,16 @@ func resolveRunRef(ctx context.Context, base, ref string) (runID, note string, e
 		return "", "", err
 	}
 	job, ok := findJob(jobs, ref)
-	if !ok {
-		return "", "", fmt.Errorf("%q is neither a run ID nor a job ID/name (see /runs and /jobs)", ref)
-	}
 	runs, err := listRuns(ctx, base, runListMax)
 	if err != nil {
 		return "", "", err
+	}
+	if !ok {
+		// "blocked by reg-…" in a diagnosis names a registration; find its run.
+		if id, found := findRunByRegistration(ctx, base, runs, ref, ""); found {
+			return id, "run of registration " + registrationID(ref), nil
+		}
+		return "", "", fmt.Errorf("%q is not a run ID, job ID/name or Iceberg registration ID (see /runs and /jobs)", ref)
 	}
 	for _, r := range runs {
 		if r.JobID == job.ID { // the master lists newest first
@@ -375,6 +394,39 @@ func resolveRunRef(ctx context.Context, base, ref string) (runID, note string, e
 		}
 	}
 	return "", "", errors.New("job " + job.Name + " has no runs in the last " + fmt.Sprint(runListMax) + " runs")
+}
+
+// registrationLookupMax bounds how many recent runs a registration lookup
+// reads; each is one request, since the master has no registration index.
+const registrationLookupMax = 50
+
+// registrationID accepts "reg-<hex>" or the bare hex part.
+func registrationID(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if strings.HasPrefix(ref, "reg-") {
+		return ref
+	}
+	return "reg-" + ref
+}
+
+// findRunByRegistration returns the run whose Iceberg registration is ref,
+// searching the given runs newest first, optionally only one job's.
+func findRunByRegistration(ctx context.Context, base string, runs []runSummary, ref, jobID string) (string, bool) {
+	want := registrationID(ref)
+	checked := 0
+	for _, r := range runs {
+		if jobID != "" && r.JobID != jobID {
+			continue
+		}
+		if checked++; checked > registrationLookupMax {
+			break
+		}
+		d, err := orabbitcli.GetRunDetails(ctx, base, r.ID)
+		if err == nil && d.Run.RegistrationID == want {
+			return r.ID, true
+		}
+	}
+	return "", false
 }
 
 func renderDiagnosis(width int, d diagnosis, note string) string {
@@ -426,6 +478,9 @@ func renderDiagnosis(width int, d diagnosis, note string) string {
 		}
 		if r.BlockedBy != "" {
 			line += ", blocked by " + r.BlockedBy
+			if d.blockedByRun != "" {
+				line += " (run " + d.blockedByRun + ")"
+			}
 		}
 		b.WriteString(label("iceberg") + line + "\n")
 	}

@@ -51,7 +51,7 @@ func TestDiagnoseAcceptsJobNameOrID(t *testing.T) {
 			t.Errorf("/diagnose %s should say which run was picked", ref)
 		}
 	}
-	if res := m.diagnoseCmd("nope", false)().(resultMsg); res.err == nil || !strings.Contains(res.err.Error(), "neither a run ID nor a job") {
+	if res := m.diagnoseCmd("nope", false)().(resultMsg); res.err == nil || !strings.Contains(res.err.Error(), "is not a run ID, job ID/name or Iceberg registration ID") {
 		t.Errorf("unknown ref: %v", res.err)
 	}
 	if out := fmtMsg(m.diagnoseCmd("r2", true)()); !strings.Contains(out, `"run_id": "r2"`) {
@@ -169,5 +169,38 @@ func TestShowIncludesIcebergStatus(t *testing.T) {
 	d := orabbitcli.RunDetails{Run: orabbitcli.RunState{ID: "r1", Status: "SUCCEEDED", CatalogStatus: "FAILED", RegistrationLastErrorClass: "CATALOG_UNAVAILABLE"}}
 	if out := renderRunDetails(80, d); !strings.Contains(out, "FAILED (CATALOG_UNAVAILABLE)") {
 		t.Fatalf("iceberg status missing:\n%s", out)
+	}
+}
+
+// "blocked by reg-…" must name the blocking run, and /diagnose must accept
+// the registration ID (with or without "reg-") to reach that run.
+func TestDiagnoseBlockedRegistration(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/jobs":
+			_, _ = w.Write([]byte(`[{"id":"j1","name":"orders"}]`))
+		case "/api/v1/runs":
+			_, _ = w.Write([]byte(`[{"id":"new","job_id":"j1","status":"SUCCEEDED"},{"id":"old","job_id":"j1","status":"SUCCEEDED"}]`))
+		case "/api/v1/runs/new":
+			_, _ = w.Write([]byte(`{"run":{"id":"new","status":"SUCCEEDED","registration_id":"reg-2","catalog_status":"PENDING"},"tasks":[]}`))
+		case "/api/v1/runs/old":
+			_, _ = w.Write([]byte(`{"run":{"id":"old","status":"SUCCEEDED","registration_id":"reg-1abc","catalog_status":"RECONCILING"},"tasks":[]}`))
+		case "/api/v1/runs/new/diagnosis":
+			_, _ = w.Write([]byte(`{"run_id":"new","status":"SUCCEEDED","registration":{"status":"PENDING","blocked_by":"reg-1abc"}}`))
+		case "/api/v1/runs/old/diagnosis":
+			_, _ = w.Write([]byte(`{"run_id":"old","status":"SUCCEEDED","registration":{"status":"RECONCILING","last_error_class":"UNKNOWN_AMBIGUOUS"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	m := newTestModel(srv.URL)
+	if out := fmtMsg(m.diagnoseCmd("new", false)()); !strings.Contains(out, "blocked by reg-1abc (run old)") {
+		t.Errorf("blocking run not named:\n%s", out)
+	}
+	for _, ref := range []string{"reg-1abc", "1abc"} {
+		if out := fmtMsg(m.diagnoseCmd(ref, false)()); !strings.Contains(out, "Diagnosis · run old") {
+			t.Errorf("/diagnose %s did not reach the run:\n%s", ref, out)
+		}
 	}
 }

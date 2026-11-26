@@ -141,6 +141,10 @@ func formatRegistrationLine(r orabbitcli.RunState, table string) string {
 	if r.RegistrationBlockedBy != "" {
 		line += ", waiting on registration " + r.RegistrationBlockedBy
 	}
+	switch r.RegistrationLastErrorClass {
+	case "AUTHENTICATION_FAILED", "AUTHORIZATION_FAILED":
+		line += "\n  the catalog refused the request: check the catalog bearer token (a value from its bearerTokens)"
+	}
 	style := styleErr
 	if status == "BLOCKED" {
 		style = styleWarn

@@ -11,6 +11,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	restcatalog "github.com/apache/iceberg-go/catalog/rest"
+
 	"github.com/LevonGhukas/O_Rabbit/internal/failure"
 )
 
@@ -39,6 +41,17 @@ func ClassifyFailure(err error, externalStarted bool) failure.Failure {
 			return failure.Failure{Class: failure.FailureExternalAmbiguous, Err: err}
 		}
 		return failure.Failure{Class: failure.FailureCatalogTimeout, Retryable: true, DefiniteRejection: true, Err: err}
+	}
+	// The REST catalog refused the request itself (HTTP 401, 403 or 419), so
+	// nothing was committed even if the external commit had started. This is
+	// the rest-go counterpart of the ice CLI's "unauthenticated" and
+	// "forbidden" cases below; treating it as ambiguous sent a missing token
+	// into reconciliation, which then failed the same way forever.
+	if errors.Is(err, restcatalog.ErrUnauthorized) || errors.Is(err, restcatalog.ErrAuthorizationExpired) {
+		return failure.Failure{Class: failure.FailureAuthentication, DefiniteRejection: true, Err: err}
+	}
+	if errors.Is(err, restcatalog.ErrForbidden) {
+		return failure.Failure{Class: failure.FailureAuthorization, DefiniteRejection: true, Err: err}
 	}
 	var ne net.Error
 	var ue *url.Error
