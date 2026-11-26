@@ -27,7 +27,7 @@ var (
 // clearWizardEnv keeps the machine's ORABBIT_DEFAULT_S3_* settings out of
 // the tests' defaults.
 func clearWizardEnv(t *testing.T) {
-	for _, k := range []string{"ORABBIT_DEFAULT_S3_ENDPOINT", "ORABBIT_DEFAULT_S3_ACCESS_KEY_ID", "ORABBIT_DEFAULT_S3_SECRET_ACCESS_KEY", "ORABBIT_DEFAULT_S3_REGION"} {
+	for _, k := range []string{"ORABBIT_DEFAULT_S3_ENDPOINT", "ORABBIT_DEFAULT_S3_ACCESS_KEY_ID", "ORABBIT_DEFAULT_S3_SECRET_ACCESS_KEY", "ORABBIT_DEFAULT_S3_REGION", "ORABBIT_DEFAULT_ICE_BEARER_TOKEN"} {
 		t.Setenv(k, "")
 	}
 }
@@ -81,6 +81,7 @@ func fillClickHouse(t *testing.T, w *runWizard) {
 		{wkIceberg, optYes},
 		{wkIceEngine, "rest-go"},
 		{wkIceURI, "http://iceberg-rest:8181"},
+		{wkIceToken, "cat-token"},
 		{wkIceTable, ""}, // default: clickhouse.orders
 		{wkAdvanced, optNo},
 	}
@@ -520,4 +521,37 @@ func firstSequenced(t *testing.T, cmd tea.Cmd) string {
 		t.Fatalf("sequence element is %T", v.Index(0).Interface())
 	}
 	return fmtMsg(first())
+}
+
+// The catalog token reaches the master in the run's Iceberg options, and is
+// masked in the printed configuration. Without it a catalog with
+// bearerTokens refuses the registration (401 Unauthorized).
+func TestWizardSendsCatalogToken(t *testing.T) {
+	clearWizardEnv(t)
+	w := newRunWizard(nil)
+	fillClickHouse(t, w)
+	spec, err := buildWizardSpec(w.answers, "http://127.0.0.1:9100")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok := spec.Iceberg.Options.BearerToken; tok == nil || *tok != "cat-token" {
+		t.Fatalf("bearer token not in spec: %v", tok)
+	}
+	if out := w.reviewSummary(wizardFields(w.answers)); strings.Contains(out, "cat-token") {
+		t.Fatalf("token printed in the summary:\n%s", out)
+	}
+
+	// Empty stays unset, for catalogs with anonymous access.
+	w.answers[wkIceToken] = ""
+	if spec, _ := buildWizardSpec(w.answers, "http://127.0.0.1:9100"); spec.Iceberg.Options.BearerToken != nil {
+		t.Fatal("an empty token should not be sent")
+	}
+
+	// The default comes from the environment, like the S3 settings.
+	t.Setenv("ORABBIT_DEFAULT_ICE_BEARER_TOKEN", "from-env")
+	for _, f := range wizardFields(w.answers) {
+		if f.Key == wkIceToken && f.Default(w.answers) != "from-env" {
+			t.Fatal("token default should come from ORABBIT_DEFAULT_ICE_BEARER_TOKEN")
+		}
+	}
 }

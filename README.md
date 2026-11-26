@@ -231,7 +231,10 @@ job's latest run.
 storage, destination, optional advanced settings (S3 prefix, manual
 performance tuning, fetch size) and a review screen. It offers choices as
 lists, proposes names from earlier answers, prefills storage from
-`ORABBIT_DEFAULT_S3_*` when set, and hides passwords. Tab fills a field with
+`ORABBIT_DEFAULT_S3_*` (and the catalog bearer token from
+`ORABBIT_DEFAULT_ICE_BEARER_TOKEN`) when set, and hides passwords. A catalog
+that sets `bearerTokens` answers `401 Unauthorized` without the token, after
+the export itself has succeeded. Tab fills a field with
 its example, or completes the dim suggestion after what you typed. From the review you can submit the run, which the
 shell then watches (with Iceberg on, the watch continues until the master's
 registration is `REGISTERED` or has failed, and says which; `/show <run-id>`

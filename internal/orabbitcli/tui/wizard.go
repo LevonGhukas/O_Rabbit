@@ -54,6 +54,7 @@ const (
 	wkIceEngine  = "iceberg_engine"
 	wkIceURI     = "iceberg_uri"
 	wkIceTable   = "iceberg_table"
+	wkIceToken   = "iceberg_token"
 	wkAdvanced   = "advanced"
 	wkAutoTune   = "auto_tune"
 	wkMaxFlight  = "max_in_flight"
@@ -230,6 +231,11 @@ func wizardFields(a map[string]string) []wizField {
 		f = append(f,
 			wizField{Key: wkIceEngine, Step: 3, Label: "Iceberg engine", Kind: wizSelect, Options: []string{"rest-go", "ice"}},
 			wizField{Key: wkIceURI, Step: 3, Label: "Iceberg REST catalog URI", Help: "As the master reaches it (registration runs on the master).", Placeholder: "http://iceberg-rest:8181"},
+			// Without it a catalog that sets bearerTokens answers 401 and the
+			// registration fails after the export has already succeeded.
+			wizField{Key: wkIceToken, Step: 3, Label: "Catalog bearer token", Kind: wizSecret, Optional: true,
+				Help:    "A value from the catalog's bearerTokens. Leave empty only if it allows anonymous access.",
+				Default: envDefault("ORABBIT_DEFAULT_ICE_BEARER_TOKEN")},
 			wizField{Key: wkIceTable, Step: 3, Label: "Iceberg table",
 				Default: func(a map[string]string) string { return a[wkNamespace] + "." + a[wkTargetTbl] }},
 		)
@@ -304,6 +310,9 @@ func buildWizardSpec(a map[string]string, masterHTTP string) (orabbitcli.RunSubm
 		uri := a[wkIceURI]
 		spec.Iceberg = orabbitcli.RunSubmitIcebergSpec{Enabled: true, Engine: a[wkIceEngine], Table: a[wkIceTable]}
 		spec.Iceberg.Options.URI = &uri
+		if tok := strings.TrimSpace(a[wkIceToken]); tok != "" {
+			spec.Iceberg.Options.BearerToken = &tok
+		}
 	}
 	if err := spec.Validate(); err != nil {
 		return orabbitcli.RunSubmitFile{}, err
