@@ -326,7 +326,14 @@ func (m *Manager) executeRegistrationEngine(ctx context.Context, req RunRequest,
 		}
 		expectedLocation := strings.TrimSuffix(restGoTableLocation(req.DatasetS3.Bucket, basePrefix), "/")
 		if got := strings.TrimSuffix(strings.TrimSpace(tbl.Location()), "/"); got != "" && got != expectedLocation {
-			return fmt.Errorf("iceberg table %s location %q does not match dataset location %q; ice insert requires parquet files under the table location", table, got, expectedLocation)
+			// Nothing has been sent to the catalog yet: a table we had just
+			// created would sit at expectedLocation, so a mismatch means an
+			// existing table that this job's output prefix cannot feed. Mark
+			// it a definite rejection; as a plain error it was classified
+			// ambiguous (the external-commit boundary is already recorded),
+			// and reconciliation then quarantined the run for a commit that
+			// never happened.
+			return failure.NewFailure(failure.FailureConfigurationInvalid, false, true, fmt.Errorf("iceberg table %s location %q does not match dataset location %q; ice insert requires parquet files under the table location", table, got, expectedLocation))
 		}
 		return m.registerIceTable(ctx, tbl, req, reg, table, regS3, objectURIs(req.DatasetS3.Bucket, objs))
 	default:

@@ -300,7 +300,7 @@ func (s *Store) attachRegistrationProjection(ctx context.Context, r *Run) {
 		if projection, err := s.GetReconciliationProjection(ctx, reg.ID); err == nil {
 			r.Reconciliation = projection
 		}
-		_ = s.rdb.QueryRowContext(ctx, `SELECT id FROM iceberg_registrations WHERE dataset_id=? AND target_key=? AND dataset_sequence<? AND status<>'REGISTERED' ORDER BY dataset_sequence LIMIT 1`, reg.DatasetID, reg.TargetKey, reg.DatasetSequence).Scan(&r.RegistrationBlockedBy)
+		_ = s.rdb.QueryRowContext(ctx, `SELECT p.id FROM iceberg_registrations p, iceberg_registrations r WHERE r.id=? AND p.dataset_id=r.dataset_id AND p.target_key=r.target_key AND p.dataset_sequence<r.dataset_sequence AND `+registrationBlocksSQL("p", "r")+` ORDER BY p.dataset_sequence LIMIT 1`, reg.ID).Scan(&r.RegistrationBlockedBy)
 	}
 	r.Readiness = RegistrationReadiness(r.Status, r.CatalogStatus)
 	if r.Status == "COMMITTING" {

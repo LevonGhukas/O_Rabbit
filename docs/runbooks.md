@@ -101,7 +101,8 @@ decides whether to replay.
   changed during inspection.
 
 **Act.**
-- Restore catalog access. If reconciliation is idle in RETRY_REQUIRED, run
+- Restore catalog access. If reconciliation is idle in RETRY_REQUIRED, or
+  FAILED after its automatic attempts ran out, run
   `run recover <run-id> --action reconciliation_retry`.
 - Never replay by hand: O_Rabbit replays only after it proves the commit did
   not land.
@@ -129,6 +130,15 @@ then `run diagnose` the blocking run.
 **Act.** Retry the blocking registration once its cause is fixed, or cancel
 it (`POST /api/v1/runs/{id}/registration/cancel`) if its data must not be
 published. The queue then continues in order.
+
+A full refresh (a non-incremental job, or `write_mode: overwrite`) replaces
+the whole table, so it is not held back by an earlier registration that is
+FAILED or CANCELED; it is held back only by one whose outcome is still
+unknown (REGISTERING, RECONCILING, QUARANTINED). An earlier full-refresh
+registration that was overtaken by a newer committed run fails with
+`dataset state last_committed_run_id=<newer> (want <older>)`: that is
+expected, since only the newest data may be registered. Append jobs keep the
+strict order, because skipping a registration would leave its rows out.
 
 ## OrabbitRegistrationLeaseExpired
 
@@ -172,7 +182,8 @@ outcome.
 [OrabbitRegistrationReconcilingSustained](#orabbitregistrationreconcilingsustained).
 
 **Act.** Restore catalog access, then `run recover <run-id> --action
-reconciliation_retry`. If the catalog history was expired, inspect the table
+reconciliation_retry`. Each such request allows one more observation; if it
+also fails, reconciliation returns to FAILED. If the catalog history was expired, inspect the table
 by hand before deciding; never assume the commit failed.
 
 ## OrabbitCatalogCapacityFull

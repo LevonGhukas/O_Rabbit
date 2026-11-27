@@ -1,0 +1,206 @@
+package tui
+
+import (
+	"github.com/LevonGhukas/O_Rabbit/internal/orabbitcli"
+
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/charmbracelet/x/ansi"
+)
+
+// fakeInfoMaster serves two jobs, three runs and a diagnosis for r2.
+func fakeInfoMaster(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/jobs":
+			_, _ = w.Write([]byte(`[{"id":"j1","name":"orders","target_namespace":"shop","target_table":"orders"},{"id":"j2","name":"users"}]`))
+		case "/api/v1/runs":
+			_, _ = w.Write([]byte(`[{"id":"r3","job_id":"j2","status":"SUCCEEDED","started_at":"2026-11-25T14:02:14.816469347Z"},
+				{"id":"r2","job_id":"j1","status":"FAILED","started_at":"2026-11-25T13:34:17Z","error_summary":"dial clickhouse://u:secret@db:9000 failed"},
+				{"id":"r1","job_id":"j1","status":"SUCCEEDED","started_at":"2026-11-25T12:00:00Z"}]`))
+		case "/api/v1/runs/r2":
+			_, _ = w.Write([]byte(`{"run":{"id":"r2","status":"FAILED"},"tasks":[]}`))
+		case "/api/v1/runs/r2/diagnosis":
+			_, _ = w.Write([]byte(`{"run_id":"r2","status":"FAILED","task_counts":{"FAILED":1,"SUCCEEDED":3},
+				"last_classified_error":"NETWORK_CONNECTION_FAILED","operator_review_required":false,
+				"blocking_tasks":[{"task_index":2,"status":"FAILED","attempt_count":3,"max_attempts":3}],
+				"suggested_next_action":"fix the source and start a new run"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestDiagnoseAcceptsJobNameOrID(t *testing.T) {
+	m := newTestModel(fakeInfoMaster(t).URL)
+	for _, ref := range []string{"r2", "j1", "orders"} {
+		out := fmtMsg(m.diagnoseCmd(ref, false)())
+		for _, want := range []string{"Diagnosis · run r2", "FAILED 1 · SUCCEEDED 3", "NETWORK_CONNECTION_FAILED", "task 2 FAILED, attempts 3/3", "fix the source"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("/diagnose %s: missing %q in\n%s", ref, want, out)
+			}
+		}
+		if ref != "r2" && !strings.Contains(out, "latest run of job orders") {
+			t.Errorf("/diagnose %s should say which run was picked", ref)
+		}
+	}
+	if res := m.diagnoseCmd("nope", false)().(resultMsg); res.err == nil || !strings.Contains(res.err.Error(), "is not a run ID, job ID/name or Iceberg registration ID") {
+		t.Errorf("unknown ref: %v", res.err)
+	}
+	if out := fmtMsg(m.diagnoseCmd("r2", true)()); !strings.Contains(out, `"run_id": "r2"`) {
+		t.Errorf("--json should print raw JSON: %s", out)
+	}
+}
+
+func TestRunsShowsJobNamesAndFilters(t *testing.T) {
+	m := newTestModel(fakeInfoMaster(t).URL)
+	out := fmtMsg(m.listRunsCmd(10, "")())
+	for _, want := range []string{"orders", "users", "2026-11-25 14:02:14", "└ dial"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("runs table missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "secret") {
+		t.Error("runs table leaked a DSN password")
+	}
+	out = fmtMsg(m.listRunsCmd(10, "users")())
+	if !strings.Contains(out, "r3") || strings.Contains(out, "r2 ") {
+		t.Errorf("--job users kept the wrong runs:\n%s", out)
+	}
+}
+
+func TestCommandHelp(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
+	for line, want := range map[string]string{
+		"/watch --help":       "/watch <run-id>",
+		"/maintenance -h":     "--operation <op>",
+		"/stack help":         "/stack start [master] [worker]",
+		"/help diagnose":      "job name",
+		"/recover r1 --help":  "--action <action>",
+		"/help":               "Inspect",
+		"/diagnose --help":    "--json",
+		"/run --help":         "wizard",
+		"/help /runs":         "--job",
+		"/workers --help":     "--all",
+		"/submit --help":      "orders.run.yaml",
+		"/connect --help":     "http://",
+		"/jobs --help":        "/jobs",
+		"/show --help":        "tasks",
+		"/cancel --help":      "confirmation",
+		"/maintenance --help": "list prints nothing",
+	} {
+		_, cmd := m.dispatch(line)
+		if got := printed(cmd); !strings.Contains(got, want) {
+			t.Errorf("%q: missing %q in\n%s", line, want, got)
+		}
+	}
+}
+
+func TestParseRunsArgs(t *testing.T) {
+	limit, job, err := parseRunsArgs([]string{"25", "--job", "orders"})
+	if err != nil || limit != 25 || job != "orders" {
+		t.Fatalf("got %d %q %v", limit, job, err)
+	}
+	if _, job, _ := parseRunsArgs([]string{"--job=j1"}); job != "j1" {
+		t.Fatalf("--job= form: %q", job)
+	}
+	if _, _, err := parseRunsArgs([]string{"--job"}); err == nil {
+		t.Fatal("--job without a value should fail")
+	}
+}
+
+// Lines as wide as the terminal used to leave pieces of the prompt box on
+// screen, so every printed line must stay narrower than the terminal.
+func TestFitWidthKeepsLinesNarrower(t *testing.T) {
+	long := strings.Repeat("x", 150) + "\nshort"
+	for _, line := range strings.Split(fitWidth(long, 100), "\n") {
+		if w := ansi.StringWidth(line); w >= 100 {
+			t.Fatalf("line width %d >= terminal width", w)
+		}
+	}
+}
+
+// A colored word must never be split by wrapping, and every wrapped line
+// must carry its own color so Bubble Tea's per-line redraw keeps it.
+func TestFitWidthKeepsWordsWholeAndColored(t *testing.T) {
+	dim := "\x1b[38;5;245m"
+	in := dim + "submit is a dry run unless --execute is given. list prints nothing" + "\x1b[0m"
+	out := fitWidth(in, 30)
+	if !strings.Contains(out, "--execute") {
+		t.Fatalf("word was split:\n%q", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, dim) {
+			t.Errorf("line lost its color: %q", line)
+		}
+		if ansi.StringWidth(line) >= 30 {
+			t.Errorf("line too wide: %q", line)
+		}
+	}
+}
+
+// The live view (watch line, prompt, footer) must never be as wide as the
+// terminal, or Bubble Tea leaves pieces of the old frame on screen.
+func TestViewFitsTerminal(t *testing.T) {
+	m := newTestModel("http://127.0.0.1:1")
+	m.width = 60
+	m.watch = &watchState{runID: "42c244d7694d6fa087c4f51b1cac20d5", loaded: true, status: "RUNNING"}
+	m.watch.lastErr = errors.New(strings.Repeat("very long transient error ", 10))
+	lines := strings.Split(m.View(), "\n")
+	for _, line := range lines {
+		// A lone border character means fitWidth split a box.
+		if trimmed := strings.TrimSpace(ansi.Strip(line)); trimmed == "╮" || trimmed == "│" || trimmed == "╯" {
+			t.Fatalf("box border was wrapped onto its own line:\n%s", strings.Join(lines, "\n"))
+		}
+		if w := ansi.StringWidth(line); w >= 60 {
+			t.Fatalf("view line is %d wide on a 60-column terminal: %q", w, line)
+		}
+	}
+}
+
+func TestShowIncludesIcebergStatus(t *testing.T) {
+	d := orabbitcli.RunDetails{Run: orabbitcli.RunState{ID: "r1", Status: "SUCCEEDED", CatalogStatus: "FAILED", RegistrationLastErrorClass: "CATALOG_UNAVAILABLE"}}
+	if out := renderRunDetails(80, d); !strings.Contains(out, "FAILED (CATALOG_UNAVAILABLE)") {
+		t.Fatalf("iceberg status missing:\n%s", out)
+	}
+}
+
+// "blocked by reg-…" must name the blocking run, and /diagnose must accept
+// the registration ID (with or without "reg-") to reach that run.
+func TestDiagnoseBlockedRegistration(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/jobs":
+			_, _ = w.Write([]byte(`[{"id":"j1","name":"orders"}]`))
+		case "/api/v1/runs":
+			_, _ = w.Write([]byte(`[{"id":"new","job_id":"j1","status":"SUCCEEDED"},{"id":"old","job_id":"j1","status":"SUCCEEDED"}]`))
+		case "/api/v1/runs/new":
+			_, _ = w.Write([]byte(`{"run":{"id":"new","status":"SUCCEEDED","registration_id":"reg-2","catalog_status":"PENDING"},"tasks":[]}`))
+		case "/api/v1/runs/old":
+			_, _ = w.Write([]byte(`{"run":{"id":"old","status":"SUCCEEDED","registration_id":"reg-1abc","catalog_status":"RECONCILING"},"tasks":[]}`))
+		case "/api/v1/runs/new/diagnosis":
+			_, _ = w.Write([]byte(`{"run_id":"new","status":"SUCCEEDED","registration":{"status":"PENDING","blocked_by":"reg-1abc"}}`))
+		case "/api/v1/runs/old/diagnosis":
+			_, _ = w.Write([]byte(`{"run_id":"old","status":"SUCCEEDED","registration":{"status":"RECONCILING","last_error_class":"UNKNOWN_AMBIGUOUS"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	m := newTestModel(srv.URL)
+	if out := fmtMsg(m.diagnoseCmd("new", false)()); !strings.Contains(out, "blocked by reg-1abc (run old)") {
+		t.Errorf("blocking run not named:\n%s", out)
+	}
+	for _, ref := range []string{"reg-1abc", "1abc"} {
+		if out := fmtMsg(m.diagnoseCmd(ref, false)()); !strings.Contains(out, "Diagnosis · run old") {
+			t.Errorf("/diagnose %s did not reach the run:\n%s", ref, out)
+		}
+	}
+}

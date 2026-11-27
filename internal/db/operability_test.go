@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -177,6 +178,49 @@ func TestReconciliationRecoveryRequiresIdleRetryableState(t *testing.T) {
 	_, err = st.RequestLifecycleRecovery(ctx, r.RunID, "reconciliation_retry", "unsafe active retry", audit)
 	if !errors.Is(err, ErrRecoveryRefused) {
 		t.Fatalf("active reconciliation err=%v", err)
+	}
+}
+
+// When automatic reconciliation retries are exhausted (reconciliation_status
+// FAILED), an operator retry must restart it; otherwise the registration
+// stays RECONCILING and blocks the table forever. Each retry buys one more
+// observation with the next attempt number.
+func TestReconciliationRecoveryRestartsExhaustedReconciliation(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	r := insertRegistrationFixture(t, st, "recover-exhausted", "recover-exhausted-dataset", 1, RegistrationReconciling)
+	if _, err := st.db.Exec(`UPDATE iceberg_registrations SET reconciliation_status='FAILED',reconciliation_attempt_count=5,reconciliation_next_eligible_at='2000-01-01T00:00:00Z' WHERE id=?`, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if _, _, ok, err := st.ClaimReconciliation(ctx, now, time.Minute); err != nil || ok {
+		t.Fatalf("an exhausted reconciliation must not be claimed on its own: ok=%v err=%v", ok, err)
+	}
+
+	audit := AuditRecord{ActorType: "token", ActorID: "sha256:test"}
+	result, err := st.RequestLifecycleRecovery(ctx, r.RunID, "reconciliation_retry", "catalog token fixed", audit)
+	if err != nil || !result.Changed {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	var recStatus string
+	var next sql.NullString
+	if err := st.db.QueryRow(`SELECT reconciliation_status,reconciliation_next_eligible_at FROM iceberg_registrations WHERE id=?`, r.ID).Scan(&recStatus, &next); err != nil {
+		t.Fatal(err)
+	}
+	if recStatus != "RETRY_REQUIRED" || next.Valid {
+		t.Fatalf("after retry: status=%s next=%v, want RETRY_REQUIRED and eligible now", recStatus, next)
+	}
+	_, attempt, ok, err := st.ClaimReconciliation(ctx, now, time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("retried reconciliation was not claimed: ok=%v err=%v", ok, err)
+	}
+	if attempt.AttemptNumber != 6 {
+		t.Fatalf("attempt number = %d, want 6 (numbers stay unique)", attempt.AttemptNumber)
+	}
+	// A registration that is not reconciling is still refused.
+	other := insertRegistrationFixture(t, st, "recover-not-reconciling", "recover-not-reconciling-dataset", 1, RegistrationFailed)
+	if _, err := st.RequestLifecycleRecovery(ctx, other.RunID, "reconciliation_retry", "x", audit); !errors.Is(err, ErrRecoveryRefused) {
+		t.Fatalf("non-reconciling registration err=%v", err)
 	}
 }
 

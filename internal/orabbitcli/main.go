@@ -38,6 +38,9 @@ const (
 // It exists to dispatch subcommands and return process exit codes.
 func Main(args []string) int {
 	if len(args) < 1 {
+		// cmd/orabbit-client opens the interactive shell (package tui) before
+		// calling Main when there are no arguments in a terminal; pipes,
+		// scripts and CI get here and keep usage + exit code 2.
 		usage(os.Stderr)
 		return exitUsage
 	}

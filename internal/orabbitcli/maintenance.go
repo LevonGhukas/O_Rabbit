@@ -176,6 +176,10 @@ func cmdMaintenanceList(ctx context.Context, args []string) int {
 	for _, op := range resp.Operations {
 		fmt.Printf("%-24s %-15s %-10s %-8t %-24s %s\n", op.ID, op.Kind, op.Status, op.DryRun, op.CreatedAt, op.JobID)
 	}
+	if len(resp.Operations) == 0 {
+		// stderr keeps stdout a plain table for scripts.
+		fmt.Fprintln(os.Stderr, "no maintenance operations found; start one with: maintenance submit --job <job-id> --operation orphan_cleanup")
+	}
 	return exitSuccess
 }
 

@@ -14,6 +14,7 @@ func usage(w io.Writer) {
 	tw.title(fmt.Sprintf("%s - Orabbit client CLI", CLIName))
 	tw.blank()
 	tw.section("Usage")
+	tw.command(fmt.Sprintf("%s                      (interactive shell, in a terminal)", CLIName))
 	tw.command(fmt.Sprintf("%s <command> [options]", CLIName))
 	tw.command(fmt.Sprintf("%s help [command] [subcommand]", CLIName))
 	tw.blank()

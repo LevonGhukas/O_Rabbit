@@ -208,6 +208,51 @@ ordered-cursor support are exported as one task.
 
 Run `orabbit-client help <command> <subcommand>` for every flag.
 
+**Interactive shell.** Run `orabbit-client` with no arguments in a terminal to
+open a shell with slash commands, a completion menu, command history and a
+live progress bar for runs. Typing `/` opens the menu: ↑/↓ moves through it and
+Tab or Enter picks an item. After a command it offers that command's
+subcommands, flags and, for flags such as `--iceberg-engine` or `--action`, the
+accepted values. With the menu closed, ↑/↓ browses history:
+
+```sh
+orabbit-client                                         # local master on :9100
+ORABBIT_MASTER_HTTP=http://master:9100 orabbit-client  # a remote master
+```
+
+Type `/help` inside it; `/help <command>` or `/<command> --help` shows a
+command's flags and examples. `/status`, `/runs [limit] [--job <id|name>]`,
+`/jobs`, `/workers [--all]`, `/show <run-id>`, `/watch <run-id>`, `/cancel`
+(asks for confirmation) and `/diagnose <run-id|job> [--json]` call the master
+directly. `/diagnose` accepts a job ID or name too and then explains that
+job's latest run.
+
+`/run` (or `/run interactive`) opens a step-by-step wizard: source, data,
+storage, destination, optional advanced settings (S3 prefix, manual
+performance tuning, fetch size) and a review screen. It offers choices as
+lists, proposes names from earlier answers, prefills storage from
+`ORABBIT_DEFAULT_S3_*` (and the catalog bearer token from
+`ORABBIT_DEFAULT_ICE_BEARER_TOKEN`) when set, and hides passwords. A catalog
+that sets `bearerTokens` answers `401 Unauthorized` without the token, after
+the export itself has succeeded. Tab fills a field with
+its example, or completes the dim suggestion after what you typed. From the review you can submit the run, which the
+shell then watches (with Iceberg on, the watch continues until the master's
+registration is `REGISTERED` or has failed, and says which; `/show <run-id>`
+also prints the run's Iceberg status), or save the answers as a YAML spec for `/submit` (written
+to the working directory with owner-only permissions, since it holds the
+secrets). The wizard builds the same spec as `run submit` and applies the same
+validation. Before submitting it prints the configuration, and master errors
+are shown with their details and a suggested fix. Every form of `/run`
+(including `/run interactive` and the old `/run classic`) opens the wizard;
+the line-by-line prompts remain available outside the shell as
+`orabbit-client run interactive`.
+
+`/submit`, `/recover`, `/stack` and `/maintenance` run the matching subcommand
+below, and pass the shell's master URL along. `/connect <url>` switches masters. Esc stops
+watching without stopping the run, and Ctrl+D exits. When stdin or stdout is not
+a terminal, no arguments still prints usage and exits with code 2, so scripts
+are unaffected.
+
 **Guided run.** An interactive flow that can start a local master and workers,
 asks for the source, target, performance and Iceberg settings, then streams
 the run's events:
@@ -1007,7 +1052,9 @@ token flag so the token does not appear in process arguments.
 | `ORABBIT_{POSTGRES,MYSQL,MARIADB,MSSQL,TRINO}_ORDERED_RANGE_READS` | Enable engine-specific ordered range reads |
 
 `orabbit-client` sends `ORABBIT_HTTP_AUTH_TOKEN` as its bearer token. API
-callers may set `X-Orabbit-Actor` to name themselves in audit records.
+callers may set `X-Orabbit-Actor` to name themselves in audit records. The
+interactive shell (`orabbit-client` with no arguments) reads
+`ORABBIT_MASTER_HTTP` as its master URL (default `http://127.0.0.1:9100`).
 
 </details>
 
@@ -1037,6 +1084,14 @@ levonghukas/orabbit:latest-worker
 
 Both run as the unprivileged user `orabbit` (uid/gid `10001`). Because the tag
 never changes, run `docker compose pull` to update a server.
+
+The master image also contains `orabbit-client`. Inside the container it
+reaches the master on `127.0.0.1:9100` and uses the container's
+`ORABBIT_HTTP_AUTH_TOKEN`, so the interactive shell needs no setup:
+
+```sh
+docker exec -it <master-container> orabbit-client
+```
 
 **Split deployment.** Master, workers and MinIO run as separate Compose
 projects, configured by environment files:

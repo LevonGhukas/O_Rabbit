@@ -282,7 +282,7 @@ func parseTime(raw string) (time.Time, bool) {
 	return ts, true
 }
 
-func countParquetFiles(tasks []taskInfo) int {
+func countParquetFiles(tasks []TaskInfo) int {
 	seen := map[string]struct{}{}
 	for _, task := range tasks {
 		if len(task.ParquetObjects) == 0 {
@@ -304,7 +304,7 @@ func countParquetFiles(tasks []taskInfo) int {
 	return len(seen)
 }
 
-func workerUtilization(tasks []taskInfo) []workerBench {
+func workerUtilization(tasks []TaskInfo) []workerBench {
 	byWorker := map[string]*workerBench{}
 	for _, task := range tasks {
 		if task.WorkerID == nil {
@@ -332,7 +332,7 @@ func workerUtilization(tasks []taskInfo) []workerBench {
 	return out
 }
 
-func taskDurationMS(task taskInfo, bench *benchAgg) (int64, bool) {
+func taskDurationMS(task TaskInfo, bench *benchAgg) (int64, bool) {
 	if task.StartedAt != nil && task.FinishedAt != nil {
 		start, okStart := parseTime(*task.StartedAt)
 		finish, okFinish := parseTime(*task.FinishedAt)
@@ -353,7 +353,7 @@ func taskDurationMS(task taskInfo, bench *benchAgg) (int64, bool) {
 // exportWallMS measures the export stage from the earliest task start until the
 // commit event when present. If commit timing is unavailable, it falls back to
 // the latest finished task, then finally to the longest observed task duration.
-func exportWallMS(tasks []taskInfo, bench *benchAgg, taskDurations []int64) int64 {
+func exportWallMS(tasks []TaskInfo, bench *benchAgg, taskDurations []int64) int64 {
 	var (
 		earliestStart time.Time
 		latestFinish  time.Time
@@ -420,7 +420,7 @@ func registrationStatus(cfg benchReportConfig, runStatus string, bench *benchAgg
 
 // renderBenchReport builds the final benchmark summary block.
 // It exists to keep formatting deterministic and reusable for tests.
-func renderBenchReport(cfg benchReportConfig, runID, runStatus string, details runDetails, bench *benchAgg, overallWallMS int64) string {
+func renderBenchReport(cfg benchReportConfig, runID, runStatus string, details RunDetails, bench *benchAgg, overallWallMS int64) string {
 	if strings.TrimSpace(runID) == "" {
 		return ""
 	}
@@ -593,7 +593,7 @@ func renderBenchReport(cfg benchReportConfig, runID, runStatus string, details r
 
 // printBenchReport renders bench report for the operator.
 // It exists to keep reporting logic separate from core execution.
-func printBenchReport(out *cliOutput, cfg benchReportConfig, runID, runStatus string, details runDetails, bench *benchAgg, observedStart time.Time) {
+func printBenchReport(out *cliOutput, cfg benchReportConfig, runID, runStatus string, details RunDetails, bench *benchAgg, observedStart time.Time) {
 	report := renderBenchReport(cfg, runID, runStatus, details, bench, time.Since(observedStart).Milliseconds())
 	if report == "" {
 		return
