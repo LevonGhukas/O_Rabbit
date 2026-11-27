@@ -101,7 +101,8 @@ decides whether to replay.
   changed during inspection.
 
 **Act.**
-- Restore catalog access. If reconciliation is idle in RETRY_REQUIRED, run
+- Restore catalog access. If reconciliation is idle in RETRY_REQUIRED, or
+  FAILED after its automatic attempts ran out, run
   `run recover <run-id> --action reconciliation_retry`.
 - Never replay by hand: O_Rabbit replays only after it proves the commit did
   not land.
@@ -172,7 +173,8 @@ outcome.
 [OrabbitRegistrationReconcilingSustained](#orabbitregistrationreconcilingsustained).
 
 **Act.** Restore catalog access, then `run recover <run-id> --action
-reconciliation_retry`. If the catalog history was expired, inspect the table
+reconciliation_retry`. Each such request allows one more observation; if it
+also fails, reconciliation returns to FAILED. If the catalog history was expired, inspect the table
 by hand before deciding; never assume the commit failed.
 
 ## OrabbitCatalogCapacityFull

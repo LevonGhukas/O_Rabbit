@@ -400,10 +400,20 @@ func (s *Store) RequestLifecycleRecovery(ctx context.Context, runID, action, rea
 			if err := tx.QueryRowContext(ctx, `SELECT id,status,reconciliation_status,current_reconciliation_attempt_id FROM iceberg_registrations WHERE run_id=? ORDER BY id LIMIT 1`, runID).Scan(&registrationID, &status, &reconciliationStatus, &current); err != nil {
 				return err
 			}
-			if status != RegistrationReconciling || reconciliationStatus != "RETRY_REQUIRED" || current.Valid {
-				return fmt.Errorf("%w: reconciliation is %s/%s, not idle RECONCILING/RETRY_REQUIRED", ErrRecoveryRefused, status, reconciliationStatus)
+			idleRetry := reconciliationStatus == "RETRY_REQUIRED"
+			// FAILED means automatic observation retries ran out, e.g. while
+			// the catalog refused requests. The diagnosis then recommends a
+			// reconciliation retry "after the failure is understood", so the
+			// operator must be able to start one; otherwise the registration
+			// stays RECONCILING forever and blocks every later registration
+			// of the table. Attempt numbers keep counting (they are unique
+			// per registration), so each such request buys one observation:
+			// if it fails again the reconciliation returns to FAILED.
+			exhausted := reconciliationStatus == "FAILED"
+			if status != RegistrationReconciling || !(idleRetry || exhausted) || current.Valid {
+				return fmt.Errorf("%w: reconciliation is %s/%s, not idle RECONCILING/RETRY_REQUIRED or RECONCILING/FAILED", ErrRecoveryRefused, status, reconciliationStatus)
 			}
-			res, err := tx.ExecContext(ctx, `UPDATE iceberg_registrations SET reconciliation_next_eligible_at=NULL,updated_at=? WHERE id=? AND status='RECONCILING' AND reconciliation_status='RETRY_REQUIRED' AND current_reconciliation_attempt_id IS NULL AND reconciliation_next_eligible_at IS NOT NULL`, nowUTC(), registrationID)
+			res, err := tx.ExecContext(ctx, `UPDATE iceberg_registrations SET reconciliation_status='RETRY_REQUIRED',reconciliation_next_eligible_at=NULL,updated_at=? WHERE id=? AND status='RECONCILING' AND current_reconciliation_attempt_id IS NULL AND ((reconciliation_status='RETRY_REQUIRED' AND reconciliation_next_eligible_at IS NOT NULL) OR reconciliation_status='FAILED')`, nowUTC(), registrationID)
 			if err != nil {
 				return err
 			}
