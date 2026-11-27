@@ -131,6 +131,15 @@ then `run diagnose` the blocking run.
 it (`POST /api/v1/runs/{id}/registration/cancel`) if its data must not be
 published. The queue then continues in order.
 
+A full refresh (a non-incremental job, or `write_mode: overwrite`) replaces
+the whole table, so it is not held back by an earlier registration that is
+FAILED or CANCELED; it is held back only by one whose outcome is still
+unknown (REGISTERING, RECONCILING, QUARANTINED). An earlier full-refresh
+registration that was overtaken by a newer committed run fails with
+`dataset state last_committed_run_id=<newer> (want <older>)`: that is
+expected, since only the newest data may be registered. Append jobs keep the
+strict order, because skipping a registration would leave its rows out.
+
 ## OrabbitRegistrationLeaseExpired
 
 **Meaning.** An active registration attempt has had an expired lease for more

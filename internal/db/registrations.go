@@ -89,6 +89,24 @@ func randomRegistrationToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// registrationBlocksSQL is the SQL condition under which the earlier
+// registration aliased earlier holds back the later registration aliased
+// later of the same dataset and target.
+//
+// Registrations run in dataset order, so any earlier registration that is
+// not REGISTERED blocks: for append jobs, skipping one would leave its rows
+// out of the table. A full refresh (non-incremental or write_mode overwrite,
+// the rule isFullRefreshRequest applies) replaces the whole table, so an
+// earlier registration that definitely ended without registering (FAILED or
+// CANCELED) cannot matter to it; such a registration also can never succeed
+// later, because its dataset state was superseded by the newer commit.
+// Without this exception one failed registration blocked the table forever.
+// Earlier registrations whose outcome is unknown (RECONCILING, REGISTERING,
+// QUARANTINED, ...) still block.
+func registrationBlocksSQL(earlier, later string) string {
+	return earlier + `.status<>'REGISTERED' AND NOT (` + earlier + `.status IN ('FAILED','CANCELED') AND EXISTS (SELECT 1 FROM runs fr JOIN jobs fj ON fj.id=fr.job_id WHERE fr.id=` + later + `.run_id AND (fj.incremental=0 OR lower(trim(fj.write_mode))='overwrite')))`
+}
+
 func insertRegistrationEventTx(ctx context.Context, tx *sql.Tx, eventType, registrationID, attemptID, level, message, now string, extra map[string]any) error {
 	var runID, datasetID, commitID, backend, table string
 	var attemptNumber int
@@ -299,10 +317,10 @@ func (s *Store) ClaimRegistration(ctx context.Context, now time.Time, policy Reg
 			return err
 		}
 		defer tx.Rollback()
-		row := tx.QueryRowContext(ctx, `SELECT r.id,r.run_id,r.dataset_id,r.dataset_sequence,r.target_key,r.commit_id,r.manifest_key,r.artifact_set_digest,r.backend_type,r.catalog_namespace,r.table_identifier,r.status,r.attempt_count,r.current_attempt_id,r.next_eligible_at,r.last_error_class,r.last_error_message,r.registered_snapshot_or_metadata_id,r.created_at,r.updated_at,r.registered_at,r.retry_override_config_json FROM iceberg_registrations r WHERE r.status IN ('PENDING','RETRY_REQUIRED') AND (r.next_eligible_at IS NULL OR r.next_eligible_at<=?) AND NOT EXISTS (SELECT 1 FROM iceberg_registrations p WHERE p.dataset_id=r.dataset_id AND p.target_key=r.target_key AND p.dataset_sequence<r.dataset_sequence AND p.status<>'REGISTERED') ORDER BY r.dataset_sequence,r.id LIMIT 1`, now.UTC().Format(TimestampLayout))
+		row := tx.QueryRowContext(ctx, `SELECT r.id,r.run_id,r.dataset_id,r.dataset_sequence,r.target_key,r.commit_id,r.manifest_key,r.artifact_set_digest,r.backend_type,r.catalog_namespace,r.table_identifier,r.status,r.attempt_count,r.current_attempt_id,r.next_eligible_at,r.last_error_class,r.last_error_message,r.registered_snapshot_or_metadata_id,r.created_at,r.updated_at,r.registered_at,r.retry_override_config_json FROM iceberg_registrations r WHERE r.status IN ('PENDING','RETRY_REQUIRED') AND (r.next_eligible_at IS NULL OR r.next_eligible_at<=?) AND NOT EXISTS (SELECT 1 FROM iceberg_registrations p WHERE p.dataset_id=r.dataset_id AND p.target_key=r.target_key AND p.dataset_sequence<r.dataset_sequence AND `+registrationBlocksSQL("p", "r")+`) ORDER BY r.dataset_sequence,r.id LIMIT 1`, now.UTC().Format(TimestampLayout))
 		r, err := s.scanRegistration(row)
 		if err == sql.ErrNoRows {
-			blocked, qerr := tx.QueryContext(ctx, `SELECT r.id,p.id FROM iceberg_registrations r JOIN iceberg_registrations p ON p.dataset_id=r.dataset_id AND p.target_key=r.target_key AND p.dataset_sequence=(SELECT MIN(x.dataset_sequence) FROM iceberg_registrations x WHERE x.dataset_id=r.dataset_id AND x.target_key=r.target_key AND x.dataset_sequence<r.dataset_sequence AND x.status<>'REGISTERED') WHERE r.status IN ('PENDING','RETRY_REQUIRED')`)
+			blocked, qerr := tx.QueryContext(ctx, `SELECT r.id,p.id FROM iceberg_registrations r JOIN iceberg_registrations p ON p.dataset_id=r.dataset_id AND p.target_key=r.target_key AND p.dataset_sequence=(SELECT MIN(x.dataset_sequence) FROM iceberg_registrations x WHERE x.dataset_id=r.dataset_id AND x.target_key=r.target_key AND x.dataset_sequence<r.dataset_sequence AND `+registrationBlocksSQL("x", "r")+`) WHERE r.status IN ('PENDING','RETRY_REQUIRED')`)
 			if qerr != nil {
 				return qerr
 			}
